@@ -1,0 +1,5518 @@
+================================================================================
+XRPL MEME BOT v1.6.0 - COMPLETE SOURCE CODE BUNDLE
+================================================================================
+
+INSTRUCTIONS:
+1. Create folder: xrpl-meme-bot
+2. Create subfolders: src/xrpl src/scanner src/market src/scoring src/risk src/paper src/telegram src/db src/utils
+3. Copy each section below into the corresponding file
+4. Run: npm install
+5. Copy .env.example to .env and edit with your credentials
+6. Run: npm run build && npm start
+
+================================================================================
+FILE: package.json
+---
+{
+  "name": "xrpl-meme-bot",
+  "version": "1.0.0",
+  "description": "XRPL meme-token scanner and paper trading bot",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "dotenv": "^16.3.1",
+    "node-telegram-bot-api": "^0.64.0",
+    "winston": "^3.11.0",
+    "xrpl": "^4.2.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/node": "^20.19.39",
+    "@types/node-telegram-bot-api": "^0.64.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.2"
+  }
+}
+
+---END---
+
+FILE: tsconfig.json
+---
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "commonjs",
+    "lib": ["ES2020"],
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}
+
+---END---
+
+FILE: .env.example
+---
+# XRPL Meme Bot Configuration
+
+# XRPL Connection
+XRPL_WS_URL=wss://rpc.xrplclaw.com/ws
+
+# Telegram Bot
+TELEGRAM_BOT_TOKEN=your_bot_token_here
+TELEGRAM_CHAT_ID=your_chat_id_here
+
+# Operating Mode: WATCH or PAPER (AUTO is stub-only)
+MODE=WATCH
+
+# Risk Thresholds
+MIN_LIQUIDITY_XRP=2000
+MIN_SCORE_ALERT=75
+MIN_SCORE_PAPER_TRADE=80
+
+# Paper Trading Config
+STARTING_BANKROLL_XRP=500
+MAX_TRADE_XRP=20
+MAX_OPEN_TRADES=3
+MAX_DAILY_LOSS_XRP=50
+
+# Scoring Weights (should sum to 100)
+WEIGHT_LIQUIDITY=20
+WEIGHT_HOLDER_GROWTH=15
+WEIGHT_BUY_PRESSURE=20
+WEIGHT_VOLUME_ACCEL=15
+WEIGHT_DEV_SAFETY=15
+WEIGHT_WHITELIST_BOOST=10
+WEIGHT_SPREAD=5
+
+# Logging
+LOG_LEVEL=info
+
+---END---
+
+FILE: ecosystem.config.js
+---
+module.exports = {
+  apps: [
+    {
+      name: 'xrpl-meme-bot',
+      script: 'dist/index.js',
+      instances: 1,
+      autorestart: true,
+      watch: false,
+      max_memory_restart: '500M',
+      env: {
+        NODE_ENV: 'production',
+      },
+      error_file: './logs/pm2-error.log',
+      out_file: './logs/pm2-out.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss',
+    },
+  ],
+};
+
+---END---
+
+FILE: src/config.ts
+---
+/**
+ * Configuration loader from environment variables
+ */
+
+import dotenv from 'dotenv';
+import { BotConfig } from './types';
+import { error, warn } from './utils/logger';
+
+// Load .env file
+dotenv.config();
+
+export type { BotConfig };
+
+export function loadConfig(): BotConfig {
+  const mode = (process.env.MODE || 'WATCH').toUpperCase() as 'WATCH' | 'PAPER' | 'AUTO';
+
+  if (!['WATCH', 'PAPER', 'AUTO'].includes(mode)) {
+    error(`Invalid MODE: ${mode}. Defaulting to WATCH`);
+  }
+
+  const config: BotConfig = {
+    xrplWsUrl: process.env.XRPL_WS_URL || 'wss://rpc.xrplclaw.com/ws',
+    telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
+    mode: mode === 'AUTO' ? 'WATCH' : mode, // AUTO is stub-only, fallback to WATCH
+    minLiquidityXRP: parseInt(process.env.MIN_LIQUIDITY_XRP || '2000', 10),
+    minScoreAlert: parseInt(process.env.MIN_SCORE_ALERT || '75', 10),
+    minScorePaperTrade: parseInt(process.env.MIN_SCORE_PAPER_TRADE || '80', 10),
+    startingBankrollXRP: parseInt(process.env.STARTING_BANKROLL_XRP || '500', 10),
+    maxTradeXRP: parseInt(process.env.MAX_TRADE_XRP || '20', 10),
+    maxOpenTrades: parseInt(process.env.MAX_OPEN_TRADES || '3', 10),
+    maxDailyLossXRP: parseInt(process.env.MAX_DAILY_LOSS_XRP || '50', 10),
+    weights: {
+      liquidity: parseInt(process.env.WEIGHT_LIQUIDITY || '20', 10),
+      holderGrowth: parseInt(process.env.WEIGHT_HOLDER_GROWTH || '15', 10),
+      buyPressure: parseInt(process.env.WEIGHT_BUY_PRESSURE || '20', 10),
+      volumeAccel: parseInt(process.env.WEIGHT_VOLUME_ACCEL || '15', 10),
+      devSafety: parseInt(process.env.WEIGHT_DEV_SAFETY || '15', 10),
+      whitelistBoost: parseInt(process.env.WEIGHT_WHITELIST_BOOST || '10', 10),
+      spread: parseInt(process.env.WEIGHT_SPREAD || '5', 10),
+    },
+    logLevel: process.env.LOG_LEVEL || 'info',
+  };
+
+  // FIX #17: Validate configuration values
+  const weightSum = Object.values(config.weights).reduce((sum, w) => sum + w, 0);
+  if (weightSum !== 100) {
+    warn(`WARNING: Scoring weights sum to ${weightSum}, not 100. Normalizing may produce unexpected scores.`);
+  }
+
+  if (config.minLiquidityXRP <= 0) {
+    warn(`WARNING: MIN_LIQUIDITY_XRP is ${config.minLiquidityXRP}, setting to default 2000`);
+    config.minLiquidityXRP = 2000;
+  }
+
+  if (config.maxTradeXRP <= 0 || config.maxTradeXRP > config.startingBankrollXRP) {
+    warn(`WARNING: MAX_TRADE_XRP (${config.maxTradeXRP}) is invalid, setting to 10% of bankroll`);
+    config.maxTradeXRP = Math.floor(config.startingBankrollXRP * 0.1);
+  }
+
+  if (config.minScoreAlert < 0 || config.minScoreAlert > 100) {
+    warn(`WARNING: MIN_SCORE_ALERT (${config.minScoreAlert}) out of range, setting to 75`);
+    config.minScoreAlert = 75;
+  }
+
+  if (config.minScorePaperTrade < config.minScoreAlert) {
+    warn(`WARNING: MIN_SCORE_PAPER_TRADE (${config.minScorePaperTrade}) < MIN_SCORE_ALERT (${config.minScoreAlert}). Setting to ${config.minScoreAlert + 5}`);
+    config.minScorePaperTrade = config.minScoreAlert + 5;
+  }
+
+  // Validate Telegram credentials format
+  if (config.telegramBotToken && !config.telegramBotToken.match(/^\d+:[A-Za-z0-9_-]{35,}$/)) {
+    warn('WARNING: TELEGRAM_BOT_TOKEN format looks invalid. Alerts may fail.');
+  }
+
+  if (config.telegramChatId && !config.telegramChatId.match(/^-?\d+$/)) {
+    warn('WARNING: TELEGRAM_CHAT_ID should be a numeric ID. Alerts may fail.');
+  }
+
+  // Log current mode
+  console.log(`\n=== XRPL Meme Bot Configuration ===`);
+  console.log(`Mode: ${config.mode}`);
+  console.log(`XRPL WS: ${config.xrplWsUrl}`);
+  console.log(`Min Liquidity: ${config.minLiquidityXRP} XRP`);
+  console.log(`Alert Score Threshold: ${config.minScoreAlert}`);
+  console.log(`Paper Trade Score Threshold: ${config.minScorePaperTrade}`);
+  console.log(`Starting Bankroll: ${config.startingBankrollXRP} XRP`);
+  console.log(`Max Trade Size: ${config.maxTradeXRP} XRP`);
+  console.log(`Max Open Trades: ${config.maxOpenTrades}`);
+  console.log(`Max Daily Loss: ${config.maxDailyLossXRP} XRP`);
+  console.log(`==================================\n`);
+
+  return config;
+}
+
+---END---
+
+FILE: src/db/database.ts
+---
+/**
+ * Database Module using SQLite (better-sqlite3)
+ */
+
+import BetterSQLite3 from 'better-sqlite3';
+import path from 'path';
+import { SCHEMA, INDEXES } from './schema';
+import {
+  TrackedToken,
+  AMMPool,
+  MarketSnapshot,
+  RiskFlags,
+  TokenScore,
+  PaperTrade,
+  DailySummary,
+  AlertPayload,
+} from '../types';
+import { info, warn } from '../utils/logger';
+
+export class Database {
+  private db: BetterSQLite3.Database;
+  private readonly MAX_RETRIES = 3;
+  private readonly RETRY_DELAY_MS = 100;
+
+  constructor(dbPath?: string) {
+    const filePath = dbPath || path.join(process.cwd(), 'data', 'meme_bot.db');
+
+    // Ensure data directory exists
+    const fs = require('fs');
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    this.db = new BetterSQLite3(filePath);
+
+    // Enable WAL mode for better performance
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+
+    this.initializeSchema();
+    info(`Database initialized at ${filePath}`);
+  }
+
+  /**
+   * FIX #15: Execute SQL with retry logic for database locks
+   */
+  private execWithRetry(sql: string, retries: number = this.MAX_RETRIES): void {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        this.db.exec(sql);
+        return;
+      } catch (err: any) {
+        // SQLite lock error codes: SQLITE_BUSY (5), SQLITE_LOCKED (6)
+        if ((err.code === 'SQLITE_BUSY' || err.code === 'SQLITE_LOCKED' || err.message?.includes('database is locked')) && attempt < retries) {
+          const delay = this.RETRY_DELAY_MS * attempt;
+          warn(`Database locked, retry ${attempt}/${retries} in ${delay}ms`);
+          // Synchronous sleep for simplicity in SQLite context
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+
+  /**
+   * FIX #15: Run prepared statement with retry logic
+   */
+  private runWithRetry(stmt: BetterSQLite3.Statement, params: any[], retries: number = this.MAX_RETRIES): any {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return stmt.run(...params);
+      } catch (err: any) {
+        if ((err.code === 'SQLITE_BUSY' || err.code === 'SQLITE_LOCKED' || err.message?.includes('database is locked')) && attempt < retries) {
+          const delay = this.RETRY_DELAY_MS * attempt;
+          warn(`Database locked on write, retry ${attempt}/${retries} in ${delay}ms`);
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+        } else {
+          throw err;
+        }
+      }
+    }
+  }
+
+  /**
+   * Initialize database schema
+   */
+  private initializeSchema(): void {
+    // Create tables with retry
+    for (const [name, sql] of Object.entries(SCHEMA)) {
+      try {
+        this.execWithRetry(sql);
+      } catch (err) {
+        warn(`Error creating table ${name}: ${err}`);
+      }
+    }
+
+    // Create indexes with retry
+    for (const indexSql of INDEXES) {
+      try {
+        this.execWithRetry(indexSql);
+      } catch (err) {
+        warn(`Error creating index: ${err}`);
+      }
+    }
+  }
+
+  // ==================== TOKENS ====================
+
+  saveToken(token: TrackedToken): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO tokens (currency, issuer, first_seen, last_updated)
+        VALUES (?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [token.currency, token.issuer, token.firstSeen, token.lastUpdated]);
+    } catch (err) {
+      warn(`Error saving token: ${err}`);
+    }
+  }
+
+  getTrackedTokens(): TrackedToken[] {
+    try {
+      const rows = this.db.prepare('SELECT * FROM tokens').all() as any[];
+      return rows.map(row => ({
+        currency: row.currency,
+        issuer: row.issuer,
+        firstSeen: row.first_seen,
+        lastUpdated: row.last_updated,
+      }));
+    } catch (err) {
+      warn(`Error getting tracked tokens: ${err}`);
+      return [];
+    }
+  }
+
+  getTokenCount(): number {
+    try {
+      const row = this.db.prepare('SELECT COUNT(*) as count FROM tokens').get() as any;
+      return row.count;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  // ==================== AMM POOLS ====================
+
+  saveAMMPool(pool: AMMPool): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO amm_pools
+        (pool_id, asset1_currency, asset1_issuer, asset2_currency, asset2_issuer,
+         amount1, amount2, lp_balance, trading_fee, created_at, last_updated)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        pool.poolId,
+        pool.asset1.currency,
+        pool.asset1.issuer || null,
+        pool.asset2.currency,
+        pool.asset2.issuer || null,
+        pool.amount1,
+        pool.amount2,
+        pool.lpBalance,
+        pool.tradingFee,
+        pool.createdAt,
+        pool.lastUpdated
+      ]);
+    } catch (err) {
+      warn(`Error saving AMM pool: ${err}`);
+    }
+  }
+
+  updateAMMPool(pool: AMMPool): void {
+    try {
+      const stmt = this.db.prepare(`
+        UPDATE amm_pools
+        SET amount1 = ?, amount2 = ?, lp_balance = ?, last_updated = ?
+        WHERE pool_id = ?
+      `);
+      this.runWithRetry(stmt, [pool.amount1, pool.amount2, pool.lpBalance, pool.lastUpdated, pool.poolId]);
+    } catch (err) {
+      warn(`Error updating AMM pool: ${err}`);
+    }
+  }
+
+  getAMMPools(): AMMPool[] {
+    try {
+      const rows = this.db.prepare('SELECT * FROM amm_pools').all() as any[];
+      return rows.map(row => ({
+        asset1: { currency: row.asset1_currency, issuer: row.asset1_issuer || undefined },
+        asset2: { currency: row.asset2_currency, issuer: row.asset2_issuer || undefined },
+        amount1: row.amount1,
+        amount2: row.amount2,
+        lpBalance: row.lp_balance,
+        tradingFee: row.trading_fee,
+        poolId: row.pool_id,
+        createdAt: row.created_at,
+        lastUpdated: row.last_updated,
+      }));
+    } catch (err) {
+      warn(`Error getting AMM pools: ${err}`);
+      return [];
+    }
+  }
+
+  // ==================== MARKET SNAPSHOTS ====================
+
+  saveMarketSnapshot(snapshot: MarketSnapshot): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO market_snapshots
+        (token_currency, token_issuer, timestamp, price_xrp, liquidity_xrp,
+         buy_volume_5m, sell_volume_5m, buy_count_5m, sell_count_5m,
+         unique_buyers_5m, unique_sellers_5m,
+         price_change_5m, price_change_15m, price_change_1h,
+         holder_estimate, spread_percent)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        snapshot.tokenCurrency,
+        snapshot.tokenIssuer,
+        snapshot.timestamp,
+        snapshot.priceXRP,
+        snapshot.liquidityXRP,
+        snapshot.buyVolume5m,
+        snapshot.sellVolume5m,
+        snapshot.buyCount5m,
+        snapshot.sellCount5m,
+        snapshot.uniqueBuyers5m || 0,
+        snapshot.uniqueSellers5m || 0,
+        snapshot.priceChange5m,
+        snapshot.priceChange15m,
+        snapshot.priceChange1h,
+        snapshot.holderEstimate,
+        snapshot.spreadPercent
+      ]);
+    } catch (err) {
+      warn(`Error saving market snapshot: ${err}`);
+    }
+  }
+
+  getLatestSnapshot(currency: string, issuer: string): MarketSnapshot | null {
+    try {
+      const row = this.db.prepare(`
+        SELECT * FROM market_snapshots
+        WHERE token_currency = ? AND token_issuer = ?
+        ORDER BY timestamp DESC LIMIT 1
+      `).get(currency, issuer) as any;
+
+      if (!row) return null;
+
+      return {
+        tokenCurrency: row.token_currency,
+        tokenIssuer: row.token_issuer,
+        timestamp: row.timestamp,
+        priceXRP: row.price_xrp,
+        liquidityXRP: row.liquidity_xrp,
+        buyVolume5m: row.buy_volume_5m,
+        sellVolume5m: row.sell_volume_5m,
+        buyCount5m: row.buy_count_5m,
+        sellCount5m: row.sell_count_5m,
+        uniqueBuyers5m: row.unique_buyers_5m || 0,
+        uniqueSellers5m: row.unique_sellers_5m || 0,
+        priceChange5m: row.price_change_5m,
+        priceChange15m: row.price_change_15m,
+        priceChange1h: row.price_change_1h,
+        holderEstimate: row.holder_estimate,
+        spreadPercent: row.spread_percent,
+      };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // ==================== RISK FLAGS ====================
+
+  saveRiskFlags(tokenCurrency: string, tokenIssuer: string, riskFlags: RiskFlags): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO risk_flags
+        (token_currency, token_issuer, timestamp,
+         low_liquidity, wide_spread, concentrated_supply, dev_dumping,
+         liquidity_removed, low_holders, no_buy_activity, single_wallet_price,
+         flags_text)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        tokenCurrency,
+        tokenIssuer,
+        Date.now(),
+        riskFlags.lowLiquidity ? 1 : 0,
+        riskFlags.wideSpread ? 1 : 0,
+        riskFlags.concentratedSupply ? 1 : 0,
+        riskFlags.devDumping ? 1 : 0,
+        riskFlags.liquidityRemoved ? 1 : 0,
+        riskFlags.lowHolderCount ? 1 : 0,
+        riskFlags.noBuyActivity ? 1 : 0,
+        riskFlags.singleWalletPrice ? 1 : 0,
+        riskFlags.flags.join(',')
+      ]);
+    } catch (err) {
+      warn(`Error saving risk flags: ${err}`);
+    }
+  }
+
+  // ==================== SCORES ====================
+
+  saveScore(score: TokenScore): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO scores
+        (token_currency, token_issuer, timestamp, total_score,
+         liquidity_score, holder_growth_score, buy_pressure_score,
+         volume_accel_score, dev_safety_score, whitelist_boost, spread_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        score.tokenCurrency,
+        score.tokenIssuer,
+        score.timestamp,
+        score.totalScore,
+        score.liquidityScore,
+        score.holderGrowthScore,
+        score.buyPressureScore,
+        score.volumeAccelScore,
+        score.devSafetyScore,
+        score.whitelistBoost,
+        score.spreadScore
+      ]);
+    } catch (err) {
+      warn(`Error saving score: ${err}`);
+    }
+  }
+
+  getLatestScore(currency: string, issuer: string): TokenScore | null {
+    try {
+      const row = this.db.prepare(`
+        SELECT * FROM scores
+        WHERE token_currency = ? AND token_issuer = ?
+        ORDER BY timestamp DESC LIMIT 1
+      `).get(currency, issuer) as any;
+
+      if (!row) return null;
+
+      return {
+        tokenCurrency: row.token_currency,
+        tokenIssuer: row.token_issuer,
+        timestamp: row.timestamp,
+        totalScore: row.total_score,
+        liquidityScore: row.liquidity_score,
+        holderGrowthScore: row.holder_growth_score,
+        buyPressureScore: row.buy_pressure_score,
+        volumeAccelScore: row.volume_accel_score,
+        devSafetyScore: row.dev_safety_score,
+        whitelistBoost: row.whitelist_boost,
+        spreadScore: row.spread_score,
+      };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  // ==================== PAPER TRADES ====================
+
+  savePaperTrade(trade: PaperTrade): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO paper_trades
+        (token_currency, token_issuer, entry_price_xrp, entry_amount_xrp,
+         entry_timestamp, entry_score, entry_reason, exit_price_xrp,
+         exit_timestamp, exit_score, exit_reason, status, pnl_xrp,
+         pnl_percent, slippage_estimate, fees_paid, tp1_hit, tp2_hit,
+         trailing_stop_active, remaining_position)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        trade.tokenCurrency,
+        trade.tokenIssuer,
+        trade.entryPriceXRP,
+        trade.entryAmountXRP,
+        trade.entryTimestamp,
+        trade.entryScore,
+        trade.entryReason,
+        trade.exitPriceXRP,
+        trade.exitTimestamp,
+        trade.exitScore,
+        trade.exitReason,
+        trade.status,
+        trade.pnlXRP,
+        trade.pnlPercent,
+        trade.slippageEstimate,
+        trade.feesPaid,
+        trade.tp1Hit ? 1 : 0,
+        trade.tp2Hit ? 1 : 0,
+        trade.trailingStopActive ? 1 : 0,
+        trade.remainingPosition
+      ]);
+
+      // Set the ID on the trade object
+      const result: any = this.db.prepare('SELECT last_insert_rowid() as id').get();
+      trade.id = Number(result.id);
+    } catch (err) {
+      warn(`Error saving paper trade: ${err}`);
+    }
+  }
+
+  updatePaperTrade(trade: PaperTrade): void {
+    try {
+      const stmt = this.db.prepare(`
+        UPDATE paper_trades
+        SET exit_price_xrp = ?, exit_timestamp = ?, exit_score = ?,
+            exit_reason = ?, status = ?, pnl_xrp = ?, pnl_percent = ?,
+            fees_paid = ?, tp1_hit = ?, tp2_hit = ?,
+            trailing_stop_active = ?, remaining_position = ?
+        WHERE id = ?
+      `);
+      this.runWithRetry(stmt, [
+        trade.exitPriceXRP,
+        trade.exitTimestamp,
+        trade.exitScore,
+        trade.exitReason,
+        trade.status,
+        trade.pnlXRP,
+        trade.pnlPercent,
+        trade.feesPaid,
+        trade.tp1Hit ? 1 : 0,
+        trade.tp2Hit ? 1 : 0,
+        trade.trailingStopActive ? 1 : 0,
+        trade.remainingPosition,
+        trade.id
+      ]);
+    } catch (err) {
+      warn(`Error updating paper trade: ${err}`);
+    }
+  }
+
+  getOpenTrades(): PaperTrade[] {
+    try {
+      const rows = this.db.prepare(`
+        SELECT * FROM paper_trades WHERE status IN ('open', 'partial')
+      `).all() as any[];
+
+      return rows.map(row => this.rowToPaperTrade(row));
+    } catch (err) {
+      warn(`Error getting open trades: ${err}`);
+      return [];
+    }
+  }
+
+  getTradesForDate(date: string): PaperTrade[] {
+    try {
+      const startOfDay = new Date(date).getTime();
+      const endOfDay = startOfDay + 24 * 60 * 60 * 1000;
+
+      const rows = this.db.prepare(`
+        SELECT * FROM paper_trades
+        WHERE entry_timestamp >= ? AND entry_timestamp < ?
+      `).all(startOfDay, endOfDay) as any[];
+
+      return rows.map(row => this.rowToPaperTrade(row));
+    } catch (err) {
+      warn(`Error getting trades for date: ${err}`);
+      return [];
+    }
+  }
+
+  private rowToPaperTrade(row: any): PaperTrade {
+    return {
+      id: row.id,
+      tokenCurrency: row.token_currency,
+      tokenIssuer: row.token_issuer,
+      entryPriceXRP: row.entry_price_xrp,
+      entryAmountXRP: row.entry_amount_xrp,
+      entryTimestamp: row.entry_timestamp,
+      entryScore: row.entry_score,
+      entryReason: row.entry_reason,
+      exitPriceXRP: row.exit_price_xrp,
+      exitTimestamp: row.exit_timestamp,
+      exitScore: row.exit_score,
+      exitReason: row.exit_reason,
+      status: row.status,
+      pnlXRP: row.pnl_xrp,
+      pnlPercent: row.pnl_percent,
+      slippageEstimate: row.slippage_estimate,
+      feesPaid: row.fees_paid,
+      tp1Hit: row.tp1_hit === 1,
+      tp2Hit: row.tp2_hit === 1,
+      trailingStopActive: row.trailing_stop_active === 1,
+      remainingPosition: row.remaining_position,
+    };
+  }
+
+  // ==================== ALERTS ====================
+
+  saveAlert(payload: AlertPayload): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO alerts (alert_type, token_currency, token_issuer, timestamp, message, score)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        payload.type,
+        payload.tokenCurrency || null,
+        payload.tokenIssuer || null,
+        Date.now(),
+        payload.message,
+        payload.score || null
+      ]);
+    } catch (err) {
+      warn(`Error saving alert: ${err}`);
+    }
+  }
+
+  // ==================== DAILY SUMMARIES ====================
+
+  saveDailySummary(summary: DailySummary): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO daily_summaries
+        (date, trades_opened, trades_closed, total_pnl_xrp, win_rate,
+         max_drawdown, best_trade, worst_trade)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        summary.date,
+        summary.tradesOpened,
+        summary.tradesClosed,
+        summary.totalPnLXRP,
+        summary.winRate,
+        summary.maxDrawdown,
+        summary.bestTrade,
+        summary.worstTrade
+      ]);
+    } catch (err) {
+      warn(`Error saving daily summary: ${err}`);
+    }
+  }
+
+  getRecentSummaries(limit: number = 7): DailySummary[] {
+    try {
+      const rows = this.db.prepare(`
+        SELECT * FROM daily_summaries ORDER BY date DESC LIMIT ?
+      `).all(limit) as any[];
+
+      return rows.map(row => ({
+        date: row.date,
+        tradesOpened: row.trades_opened,
+        tradesClosed: row.trades_closed,
+        totalPnLXRP: row.total_pnl_xrp,
+        winRate: row.win_rate,
+        maxDrawdown: row.max_drawdown,
+        bestTrade: row.best_trade,
+        worstTrade: row.worst_trade,
+      }));
+    } catch (err) {
+      warn(`Error getting recent summaries: ${err}`);
+      return [];
+    }
+  }
+
+  /**
+   * QUICK WIN #5: Execute multiple operations in a transaction
+   * Much faster than individual writes due to reduced fsync overhead
+   */
+  transaction<T>(fn: () => T): T {
+    return this.db.transaction(fn)();
+  }
+
+  /**
+   * Close database connection
+   */
+  close(): void {
+    try {
+      this.db.close();
+      info('Database closed');
+    } catch (err) {
+      warn(`Error closing database: ${err}`);
+    }
+  }
+}
+
+---END---
+
+FILE: src/db/schema.ts
+---
+/**
+ * Database Schema Definitions
+ */
+
+export const SCHEMA = {
+  tokens: `
+    CREATE TABLE IF NOT EXISTS tokens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      currency TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      first_seen INTEGER NOT NULL,
+      last_updated INTEGER NOT NULL,
+      UNIQUE(currency, issuer)
+    )
+  `,
+
+  ammPools: `
+    CREATE TABLE IF NOT EXISTS amm_pools (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pool_id TEXT NOT NULL UNIQUE,
+      asset1_currency TEXT NOT NULL,
+      asset1_issuer TEXT,
+      asset2_currency TEXT NOT NULL,
+      asset2_issuer TEXT,
+      amount1 TEXT NOT NULL,
+      amount2 TEXT NOT NULL,
+      lp_balance TEXT,
+      trading_fee INTEGER,
+      created_at INTEGER NOT NULL,
+      last_updated INTEGER NOT NULL
+    )
+  `,
+
+  marketSnapshots: `
+    CREATE TABLE IF NOT EXISTS market_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      price_xrp REAL,
+      liquidity_xrp REAL,
+      buy_volume_5m REAL DEFAULT 0,
+      sell_volume_5m REAL DEFAULT 0,
+      buy_count_5m INTEGER DEFAULT 0,
+      sell_count_5m INTEGER DEFAULT 0,
+      unique_buyers_5m INTEGER DEFAULT 0,
+      unique_sellers_5m INTEGER DEFAULT 0,
+      price_change_5m REAL,
+      price_change_15m REAL,
+      price_change_1h REAL,
+      holder_estimate INTEGER,
+      spread_percent REAL
+    )
+  `,
+
+  riskFlags: `
+    CREATE TABLE IF NOT EXISTS risk_flags (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      low_liquidity INTEGER DEFAULT 0,
+      wide_spread INTEGER DEFAULT 0,
+      concentrated_supply INTEGER DEFAULT 0,
+      dev_dumping INTEGER DEFAULT 0,
+      liquidity_removed INTEGER DEFAULT 0,
+      low_holders INTEGER DEFAULT 0,
+      no_buy_activity INTEGER DEFAULT 0,
+      single_wallet_price INTEGER DEFAULT 0,
+      flags_text TEXT
+    )
+  `,
+
+  scores: `
+    CREATE TABLE IF NOT EXISTS scores (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      total_score INTEGER NOT NULL,
+      liquidity_score INTEGER,
+      holder_growth_score INTEGER,
+      buy_pressure_score INTEGER,
+      volume_accel_score INTEGER,
+      dev_safety_score INTEGER,
+      whitelist_boost INTEGER,
+      spread_score INTEGER
+    )
+  `,
+
+  paperTrades: `
+    CREATE TABLE IF NOT EXISTS paper_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      entry_price_xrp REAL NOT NULL,
+      entry_amount_xrp REAL NOT NULL,
+      entry_timestamp INTEGER NOT NULL,
+      entry_score INTEGER NOT NULL,
+      entry_reason TEXT,
+      exit_price_xrp REAL,
+      exit_timestamp INTEGER,
+      exit_score INTEGER,
+      exit_reason TEXT,
+      status TEXT NOT NULL DEFAULT 'open',
+      pnl_xrp REAL,
+      pnl_percent REAL,
+      slippage_estimate REAL DEFAULT 0,
+      fees_paid REAL DEFAULT 0,
+      tp1_hit INTEGER DEFAULT 0,
+      tp2_hit INTEGER DEFAULT 0,
+      trailing_stop_active INTEGER DEFAULT 0,
+      remaining_position REAL DEFAULT 100
+    )
+  `,
+
+  alerts: `
+    CREATE TABLE IF NOT EXISTS alerts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      alert_type TEXT NOT NULL,
+      token_currency TEXT,
+      token_issuer TEXT,
+      timestamp INTEGER NOT NULL,
+      message TEXT,
+      score INTEGER,
+      sent INTEGER DEFAULT 1
+    )
+  `,
+
+  dailySummaries: `
+    CREATE TABLE IF NOT EXISTS daily_summaries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL UNIQUE,
+      trades_opened INTEGER DEFAULT 0,
+      trades_closed INTEGER DEFAULT 0,
+      total_pnl_xrp REAL DEFAULT 0,
+      win_rate REAL DEFAULT 0,
+      max_drawdown REAL DEFAULT 0,
+      best_trade REAL DEFAULT 0,
+      worst_trade REAL DEFAULT 0
+    )
+  `,
+};
+
+// Index definitions for performance
+export const INDEXES = [
+  'CREATE INDEX IF NOT EXISTS idx_tokens_currency ON tokens(currency)',
+  'CREATE INDEX IF NOT EXISTS idx_tokens_issuer ON tokens(issuer)',
+  'CREATE INDEX IF NOT EXISTS idx_market_snapshots_token ON market_snapshots(token_currency, token_issuer, timestamp)',
+  'CREATE INDEX IF NOT EXISTS idx_scores_token ON scores(token_currency, token_issuer, timestamp)',
+  'CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status)',
+  'CREATE INDEX IF NOT EXISTS idx_paper_trades_entry ON paper_trades(entry_timestamp)',
+  'CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, timestamp)',
+  'CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date)',
+];
+
+---END---
+
+FILE: src/index.ts
+---
+/**
+ * XRPL Meme Bot - Main Entry Point v1.3.0
+ *
+ * Modes:
+ * - WATCH: Scan and alert only
+ * - PAPER: Simulate trades with tracked PnL
+ * - AUTO: Stub only (not implemented for safety)
+ *
+ * v1.3.0 Improvements:
+ * - Parallel token scanning (batches of 10)
+ * - Batched database writes in transactions
+ * - HTTP health endpoint for monitoring
+ */
+
+import { loadConfig } from './config';
+import { getLogger, info, warn, error, debug } from './utils/logger';
+import http from 'http';
+import { XRPLClient } from './xrpl/client';
+import { TokenDiscovery } from './scanner/tokenDiscovery';
+import { AMMScanner } from './scanner/ammEvents';
+import { MarketDataCollector } from './market/marketData';
+import { VolumeTracker } from './market/volumeTracker';
+import { HolderCounter } from './market/holderCounter';
+import { RiskFilter } from './risk/riskFilters';
+import { TokenScorer } from './scoring/tokenScorer';
+import { IssuerReputation } from './scoring/issuerReputation';
+import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
+import { PaperTrader } from './paper/paperTrader';
+import { TelegramAlerter } from './telegram/alerts';
+import { Database } from './db/database';
+import { AlertPayload } from './types';
+import { PositionSizer } from './paper/positionSizer';
+import { CorrelationDetector } from './scoring/correlationDetector';
+
+// Global state
+let isRunning = false;
+let scanInterval: NodeJS.Timeout | null = null;
+let healthCheckInterval: NodeJS.Timeout | null = null;
+let healthServer: http.Server | null = null;
+
+// Transaction queue for rate limiting
+const MAX_TX_QUEUE_SIZE = 500;
+const MAX_TX_PER_BATCH = 20;
+let txQueue: any[] = [];
+let txProcessingTimer: NodeJS.Timeout | null = null;
+
+async function main() {
+  const config = loadConfig();
+  getLogger(config.logLevel);
+
+  info('🚀 Starting XRPL Meme Bot v1.3.0...');
+  info(`Mode: ${config.mode}`);
+
+  if (config.mode === 'AUTO') {
+    warn('⚠️  AUTO mode is not implemented! Falling back to WATCH mode for safety.');
+  }
+
+  // Initialize components
+  const db = new Database();
+  const xrplClient = new XRPLClient(config.xrplWsUrl);
+
+  try {
+    await xrplClient.connect();
+    info('✅ XRPL connection established');
+  } catch (err) {
+    error(`❌ Failed to connect to XRPL: ${err}`);
+    process.exit(1);
+  }
+
+  const tokenDiscovery = new TokenDiscovery(xrplClient, db);
+  const ammScanner = new AMMScanner(xrplClient, db);
+  const marketData = new MarketDataCollector(xrplClient, db);
+  const volumeTracker = new VolumeTracker();
+  const holderCounter = new HolderCounter(xrplClient);
+  const riskFilter = new RiskFilter(config);
+  const tokenScorer = new TokenScorer(config);
+  const issuerReputation = new IssuerReputation();
+  const multiTimeframeScorer = new MultiTimeframeScorer(config);
+  const positionSizer = new PositionSizer();
+  const correlationDetector = new CorrelationDetector();
+  const paperTrader = config.mode === 'PAPER' ? new PaperTrader(config, db) : null;
+  const telegramAlerter = new TelegramAlerter(config);
+
+  await tokenDiscovery.initialize();
+  await ammScanner.initialize();
+  await telegramAlerter.sendTestMessage();
+
+  // Subscribe to transaction stream
+  info('Subscribing to XRPL transaction stream...');
+  await xrplClient.subscribeTransactions((tx) => {
+    if (txQueue.length < MAX_TX_QUEUE_SIZE) {
+      txQueue.push(tx);
+    } else {
+      txQueue.splice(0, 50);
+      txQueue.push(tx);
+      warn(`Transaction queue full (${MAX_TX_QUEUE_SIZE}), dropped 50 oldest`);
+    }
+  });
+
+  startTransactionProcessor(tokenDiscovery, ammScanner, volumeTracker, issuerReputation, correlationDetector, telegramAlerter, db);
+
+  // Start periodic scanning with parallel batches
+  isRunning = true;
+  startPeriodicScan(
+    tokenDiscovery, ammScanner, marketData, volumeTracker, holderCounter,
+    issuerReputation, multiTimeframeScorer, correlationDetector,
+    riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config
+  );
+
+  startHealthCheck(xrplClient);
+  startHealthEndpoint(tokenDiscovery, paperTrader, xrplClient);
+  setupGracefulShutdown(xrplClient, db);
+
+  info('✅ XRPL Meme Bot is running!');
+  info(`Tracking ${tokenDiscovery.getTokenCount()} tokens`);
+  info(`Monitoring ${ammScanner.getPoolCount()} AMM pools`);
+}
+
+/**
+ * Process queued transactions at controlled rate
+ */
+function startTransactionProcessor(
+  tokenDiscovery: TokenDiscovery,
+  ammScanner: AMMScanner,
+  volumeTracker: VolumeTracker,
+  issuerReputation: IssuerReputation,
+  correlationDetector: CorrelationDetector,
+  telegramAlerter: TelegramAlerter,
+  db: Database
+): void {
+  let lastProcessTime = 0;
+  const MIN_PROCESS_INTERVAL_MS = 500;
+
+  txProcessingTimer = setInterval(async () => {
+    if (!isRunning || txQueue.length === 0) return;
+
+    const now = Date.now();
+    if (now - lastProcessTime < MIN_PROCESS_INTERVAL_MS) return;
+
+    lastProcessTime = now;
+    const batchSize = Math.min(MAX_TX_PER_BATCH, txQueue.length);
+    const toProcess = txQueue.splice(0, batchSize);
+
+    for (const tx of toProcess) {
+      try {
+        // Track volume for all transactions
+        volumeTracker.processTransaction(tx);
+
+        // Record price movements for correlation detection
+        recordPriceMovementIfRelevant(tx, correlationDetector);
+
+        await processSingleTransaction(tx, tokenDiscovery, ammScanner, issuerReputation, telegramAlerter, db);
+      } catch (err) {
+        warn(`Error processing transaction: ${err}`);
+      }
+    }
+  }, 100);
+}
+
+/**
+ * Record significant price movements for correlation detection
+ */
+function recordPriceMovementIfRelevant(tx: any, correlationDetector: CorrelationDetector): void {
+  const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+  if (txType !== 'Payment' && txType !== 'AMMTrade') return;
+
+  const transaction = tx.tx || tx.transaction;
+  if (!transaction) return;
+
+  const amount = transaction.Amount;
+  if (!amount || typeof amount === 'string') return;
+  if (!amount.currency || amount.currency === 'XRP') return;
+
+  // Estimate price change from transaction (simplified)
+  // In production, would compare to previous price
+  const estimatedChange = 0; // Placeholder - would need historical price
+  const volume = parseFloat(amount.value || '0');
+
+  if (volume > 100) { // Only track significant transactions
+    correlationDetector.recordMovement(
+      amount.currency,
+      amount.issuer,
+      estimatedChange,
+      volume
+    );
+  }
+}
+
+async function processSingleTransaction(
+  tx: any,
+  tokenDiscovery: TokenDiscovery,
+  ammScanner: AMMScanner,
+  issuerReputation: IssuerReputation,
+  telegramAlerter: TelegramAlerter,
+  db: Database
+): Promise<void> {
+  const newToken = await tokenDiscovery.processTransaction(tx);
+  if (newToken) {
+    // Track issuer reputation
+    issuerReputation.registerTokenLaunch(newToken.issuer, newToken.currency);
+
+    await sendAlert(telegramAlerter, db, {
+      type: 'new_token',
+      tokenCurrency: newToken.currency,
+      tokenIssuer: newToken.issuer,
+      message: `New token detected: ${newToken.currency} issued by ${newToken.issuer}`,
+      explorerLinks: {
+        token: `https://livenet.xrpl.org/accounts/${newToken.issuer}`,
+        issuer: `https://livenet.xrpl.org/accounts/${newToken.issuer}`,
+      },
+    }, {} as any);
+  }
+
+  const ammEvent = await ammScanner.processTransaction(tx);
+  if (ammEvent?.type === 'new_pool' && ammEvent.pool) {
+    // Track AMM creation for issuer reputation
+    issuerReputation.registerAMMPool(
+      ammEvent.pool.asset1.issuer || '',
+      ammEvent.pool.asset1.currency,
+      0 // Will be calculated from pool data
+    );
+
+    await sendAlert(telegramAlerter, db, {
+      type: 'amm_pool',
+      tokenCurrency: ammEvent.pool.asset1.currency,
+      tokenIssuer: ammEvent.pool.asset1.issuer,
+      message: `New AMM pool: ${ammEvent.pool.poolId}`,
+    }, {} as any);
+  }
+}
+
+/**
+ * Smart token pruning: remove inactive tokens with no AMM pool and low score
+ */
+function smartPruneTokens(
+  tokens: any[],
+  db: Database,
+  ammScanner: AMMScanner,
+  tokenScorer: TokenScorer,
+  riskFilter: RiskFilter,
+  config: any
+): any[] {
+  const PRUNE_AGE_MS = 48 * 60 * 60 * 1000; // 48 hours
+  const MIN_SCORE_TO_KEEP = 50;
+  const now = Date.now();
+
+  return tokens.filter(token => {
+    // Keep recently active tokens
+    if (now - token.lastUpdated < PRUNE_AGE_MS) return true;
+
+    // Keep tokens with AMM pools
+    const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
+    if (pool) return true;
+
+    // Check last score
+    const lastScore = db.getLatestScore(token.currency, token.issuer);
+    if (lastScore && lastScore.totalScore >= MIN_SCORE_TO_KEEP) return true;
+
+    // Prune this token
+    debug(`Pruning inactive token: ${token.currency}:${token.issuer}`);
+    return false;
+  });
+}
+
+/**
+ * QUICK WIN #1 & #5: Parallel token scanning with batched DB writes
+ */
+function startPeriodicScan(
+  tokenDiscovery: TokenDiscovery,
+  ammScanner: AMMScanner,
+  marketData: MarketDataCollector,
+  volumeTracker: VolumeTracker,
+  holderCounter: HolderCounter,
+  issuerReputation: IssuerReputation,
+  multiTimeframeScorer: MultiTimeframeScorer,
+  correlationDetector: CorrelationDetector,
+  riskFilter: RiskFilter,
+  tokenScorer: TokenScorer,
+  paperTrader: PaperTrader | null,
+  telegramAlerter: TelegramAlerter,
+  db: Database,
+  config: any
+): void {
+  const MAX_TRACKED_TOKENS = 500;
+  const BATCH_SIZE = 10; // Process 10 tokens concurrently
+  const HOLDER_SCAN_INTERVAL = 6; // Scan holders every 6th cycle (~6 minutes)
+  let scanCycle = 0;
+  let isScanning = false;
+
+  const scanTokens = async () => {
+    if (!isRunning || isScanning) {
+      if (isScanning) debug('Previous scan still running, skipping');
+      return;
+    }
+
+    isScanning = true;
+    const startTime = Date.now();
+    scanCycle++;
+
+    try {
+      let tokens = tokenDiscovery.getTrackedTokens();
+
+      // Smart pruning: remove inactive tokens with no pool and low score
+      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config);
+
+      // Hard cap if still over limit
+      if (tokens.length > MAX_TRACKED_TOKENS) {
+        tokens = tokens.sort((a, b) => b.lastUpdated - a.lastUpdated).slice(0, MAX_TRACKED_TOKENS);
+        warn(`Token count exceeds limit after pruning, scanning most recent ${MAX_TRACKED_TOKENS}`);
+      }
+
+      // Periodic holder count update
+      if (scanCycle % HOLDER_SCAN_INTERVAL === 0 && tokens.length > 0) {
+        holderCounter.batchUpdateHolders(tokens).catch(err => {
+          warn(`Holder batch update failed: ${err}`);
+        });
+        holderCounter.pruneCache();
+      }
+
+      info(`Starting scan of ${tokens.length} tokens in batches of ${BATCH_SIZE}...`);
+
+      // Create batches
+      const batches: typeof tokens[] = [];
+      for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
+        batches.push(tokens.slice(i, i + BATCH_SIZE));
+      }
+
+      let totalProcessed = 0;
+      let totalAlerts = 0;
+      let totalTrades = 0;
+
+      for (const batch of batches) {
+        if (!isRunning) break;
+
+        // Process batch in parallel
+        const results = await Promise.allSettled(
+          batch.map(async (token) => {
+            try {
+              if (tokenDiscovery.isSpamIssuer(token.issuer)) {
+                return { token, skipped: true };
+              }
+
+              const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
+
+              // Get real volume data
+              const vol = volumeTracker.getVolume(token.currency, token.issuer);
+
+              // Get holder count (cached)
+              const holders = await holderCounter.getHolderCount(token.currency, token.issuer);
+
+              const snapshot = await marketData.collectMarketDataWithExtras(token, pool, vol, holders);
+              if (!snapshot) return { token, snapshot: null };
+
+              const risks = riskFilter.evaluate(token, snapshot, pool);
+              const baseScore = tokenScorer.score(token, snapshot, pool, risks);
+
+              // Apply issuer reputation boost/penalty
+              const issuerTrust = issuerReputation.getTrustScore(token.issuer);
+              const adjustedTotalScore = Math.round(
+                baseScore.totalScore * 0.8 + issuerTrust * 0.2
+              );
+              const score = { ...baseScore, totalScore: adjustedTotalScore };
+
+              // Calculate multi-timeframe scores
+              const tfScores = multiTimeframeScorer.calculate(snapshot, score.totalScore);
+
+              return { token, snapshot, risks, score, tfScores };
+            } catch (err) {
+              warn(`Error processing ${token.currency}:${token.issuer}: ${err}`);
+              return { token, error: err };
+            }
+          })
+        );
+
+        // QUICK WIN #5: Batch DB writes in transaction
+        db.transaction(() => {
+          for (const result of results) {
+            if (result.status !== 'fulfilled' || !result.value || result.value.skipped) continue;
+            const { token, snapshot, risks, score } = result.value;
+            if (!snapshot || !risks || !score) continue;
+
+            // Check correlation/wash trading
+            const washTradingDetected = correlationDetector.detectWashTrading(
+              snapshot.uniqueBuyers5m || 0,
+              snapshot.uniqueSellers5m || 0,
+              snapshot.buyVolume5m,
+              snapshot.sellVolume5m
+            );
+
+            if (washTradingDetected) {
+              debug(`Wash trading detected for ${token.currency}:${token.issuer}, skipping`);
+              continue;
+            }
+
+            db.saveRiskFlags(token.currency, token.issuer, risks);
+            db.saveScore(score);
+            totalProcessed++;
+
+            // Hysteresis: only alert on upward threshold cross
+            const lastScore = db.getLatestScore(token.currency, token.issuer);
+            const shouldAlert = score.totalScore >= config.minScoreAlert &&
+              (!lastScore || lastScore.totalScore < config.minScoreAlert);
+
+            // Require multi-timeframe consensus for alerts
+            const hasConsensus = result.value.tfScores?.trend === 'bullish' ||
+              (result.value.tfScores?.score5m > 60 && result.value.tfScores?.score15m > 55);
+
+            if (shouldAlert && hasConsensus) {
+              setTimeout(() => sendHighScoreAlert(
+                telegramAlerter, db, token, snapshot, risks, score, result.value.tfScores, config
+              ), 0);
+              totalAlerts++;
+            }
+
+            // Paper trade entry - require higher consensus
+            if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
+                riskFilter.isSafe(risks) && hasConsensus) {
+              const trade = paperTrader.tryOpenTrade(
+                token, snapshot, score.totalScore,
+                `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`
+              );
+
+              if (trade) {
+                setTimeout(() => sendAlert(telegramAlerter, db, {
+                  type: 'paper_trade_opened',
+                  tokenCurrency: token.currency,
+                  tokenIssuer: token.issuer,
+                  paperTrade: trade,
+                  message: `Opened paper trade for ${token.currency}`,
+                }, config), 0);
+                totalTrades++;
+              }
+            }
+
+            // Check exits
+            if (paperTrader) {
+              const closedTrades = paperTrader.checkExits(snapshot);
+              for (const ct of closedTrades) {
+                setTimeout(() => sendAlert(telegramAlerter, db, {
+                  type: ct.status === 'partial' ? 'paper_trade_partial_close' : 'paper_trade_closed',
+                  tokenCurrency: ct.tokenCurrency,
+                  tokenIssuer: ct.tokenIssuer,
+                  paperTrade: ct,
+                  message: `Closed paper trade for ${ct.tokenCurrency}`,
+                }, config), 0);
+              }
+            }
+
+            // Emergency exit check
+            if (paperTrader && paperTrader.hasOpenPosition(token.currency, token.issuer)) {
+              const emergencyTrade = paperTrader.updateRiskState(
+                token.currency, token.issuer, risks.flags, snapshot
+              );
+              if (emergencyTrade) {
+                setTimeout(() => sendAlert(telegramAlerter, db, {
+                  type: 'paper_trade_closed',
+                  tokenCurrency: emergencyTrade.tokenCurrency,
+                  tokenIssuer: emergencyTrade.tokenIssuer,
+                  paperTrade: emergencyTrade,
+                  message: `Emergency exit: ${risks.flags.join(', ')}`,
+                }, config), 0);
+              }
+            }
+          }
+        });
+
+        await sleep(50); // Rate limit between batches
+      }
+
+      const elapsed = Date.now() - startTime;
+      info(`✅ Scan complete: ${elapsed}ms | Tokens: ${totalProcessed} | Alerts: ${totalAlerts} | Trades: ${totalTrades}`);
+    } finally {
+      isScanning = false;
+    }
+  };
+
+  scanTokens();
+  scanInterval = setInterval(scanTokens, 60000);
+}
+
+async function sendHighScoreAlert(
+  alerter: TelegramAlerter,
+  db: Database,
+  token: any,
+  snapshot: any,
+  risks: any,
+  score: any,
+  tfScores: any,
+  config: any
+): Promise<void> {
+  const action = score.totalScore >= config.minScorePaperTrade
+    ? 'HIGH SCORE - Eligible for paper trading'
+    : 'Strong signal - monitoring';
+
+  const tfInfo = tfScores ? ` | 5m:${tfScores.score5m} 15m:${tfScores.score15m} 1h:${tfScores.score1h} (${tfScores.trend})` : '';
+
+  await sendAlert(alerter, db, {
+    type: 'high_score',
+    tokenCurrency: token.currency,
+    tokenIssuer: token.issuer,
+    score: score.totalScore,
+    liquidity: snapshot.liquidityXRP,
+    price: snapshot.priceXRP,
+    change5m: snapshot.priceChange5m,
+    change15m: snapshot.priceChange15m,
+    change1h: snapshot.priceChange1h,
+    holders: snapshot.holderEstimate,
+    buyPressure: `${snapshot.buyCount5m} buys / ${snapshot.sellCount5m} sells`,
+    riskFlags: risks.flags,
+    action,
+    explorerLinks: {
+      token: `https://livenet.xrpl.org/accounts/${token.issuer}`,
+      issuer: `https://livenet.xrpl.org/accounts/${token.issuer}`,
+    },
+    message: `Score: ${score.totalScore}/100${tfInfo}`,
+  }, config);
+}
+
+/**
+ * Health check interval
+ */
+function startHealthCheck(xrplClient: XRPLClient): void {
+  healthCheckInterval = setInterval(() => {
+    const status = xrplClient.getStatus();
+    if (status.connected) {
+      info(`💓 Health: Connected to ${status.url}`);
+    } else {
+      warn('⚠️  Health: NOT connected to XRPL');
+    }
+  }, 300000);
+}
+
+/**
+ * QUICK WIN #4: HTTP health endpoint
+ */
+function startHealthEndpoint(
+  tokenDiscovery: TokenDiscovery,
+  paperTrader: PaperTrader | null,
+  xrplClient: XRPLClient
+): void {
+  const PORT = parseInt(process.env.HEALTH_PORT || '3000', 10);
+
+  healthServer = http.createServer((req, res) => {
+    if (req.url === '/health' || req.url === '/healthz') {
+      const status = {
+        status: 'ok',
+        uptime: Math.round(process.uptime()),
+        tokens: tokenDiscovery.getTokenCount(),
+        positions: paperTrader?.getOpenPositions().length || 0,
+        xrplConnected: xrplClient.getStatus().connected,
+        timestamp: Date.now(),
+      };
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(status, null, 2));
+    } else if (req.url === '/metrics') {
+      const state = paperTrader?.getState();
+      const metrics = [
+        `bot_uptime_seconds ${Math.round(process.uptime())}`,
+        `bot_tokens_tracked ${tokenDiscovery.getTokenCount()}`,
+        `bot_open_positions ${state?.openPositions || 0}`,
+        `bot_bankroll_xrp ${state?.bankrollXRP || 0}`,
+        `bot_daily_pnl_xrp ${state?.dailyPnL || 0}`,
+        `bot_xrpl_connected ${xrplClient.getStatus().connected ? 1 : 0}`,
+      ];
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end(metrics.join('\n') + '\n');
+    } else {
+      res.writeHead(404);
+      res.end('Not found\n');
+    }
+  });
+
+  healthServer.listen(PORT, () => {
+    info(`🩺 Health endpoint on port ${PORT} — GET http://localhost:${PORT}/health`);
+  });
+}
+
+/**
+ * Graceful shutdown
+ */
+function setupGracefulShutdown(xrplClient: XRPLClient, db: Database): void {
+  const shutdown = async (signal: string) => {
+    info(`\nReceived ${signal}. Shutting down...`);
+    isRunning = false;
+
+    if (scanInterval) clearInterval(scanInterval);
+    if (healthCheckInterval) clearInterval(healthCheckInterval);
+    if (txProcessingTimer) clearInterval(txProcessingTimer);
+    if (healthServer) healthServer.close();
+
+    await xrplClient.disconnect();
+    db.close();
+
+    info('✅ Shutdown complete');
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('uncaughtException', (err) => error(`Uncaught exception: ${err}`));
+  process.on('unhandledRejection', (reason) => error(`Unhandled rejection: ${reason}`));
+}
+
+async function sendAlert(
+  alerter: TelegramAlerter,
+  db: Database,
+  payload: AlertPayload,
+  config: any
+): Promise<void> {
+  db.saveAlert(payload);
+  await alerter.sendAlert(payload);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+main().catch((err) => {
+  error(`Fatal error: ${err}`);
+  process.exit(1);
+});
+
+---END---
+
+FILE: src/market/holderCounter.ts
+---
+/**
+ * Holder Counter Module
+ * Counts actual trustline holders for a token by scanning issuer's account_lines
+ */
+
+import { XRPLClient } from '../xrpl/client';
+import { info, warn, debug } from '../utils/logger';
+
+interface HolderCache {
+  count: number;
+  lastUpdated: number;
+}
+
+export class HolderCounter {
+  private xrplClient: XRPLClient;
+  private cache: Map<string, HolderCache> = new Map();
+  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // Cache for 10 minutes
+  private readonly MAX_ISSUERS_PER_SCAN = 20; // Max issuers to scan per cycle
+
+  constructor(xrplClient: XRPLClient) {
+    this.xrplClient = xrplClient;
+  }
+
+  /**
+   * Get holder count for a token (cached)
+   */
+  async getHolderCount(currency: string, issuer: string): Promise<number | null> {
+    const key = `${currency}:${issuer}`;
+    const cached = this.cache.get(key);
+
+    // Return cached value if fresh
+    if (cached && Date.now() - cached.lastUpdated < this.CACHE_TTL_MS) {
+      return cached.count;
+    }
+
+    // Fetch fresh count
+    try {
+      const count = await this.fetchHolderCount(issuer, currency);
+      this.cache.set(key, { count, lastUpdated: Date.now() });
+      debug(`Holder count for ${key}: ${count}`);
+      return count;
+    } catch (err) {
+      warn(`Failed to fetch holder count for ${key}: ${err}`);
+      // Return cached value even if stale
+      return cached?.count || null;
+    }
+  }
+
+  /**
+   * Fetch holder count by scanning issuer's account_lines
+   */
+  private async fetchHolderCount(issuer: string, currency: string): Promise<number> {
+    let holders = 0;
+    let marker: string | undefined;
+    let iterations = 0;
+    const MAX_ITERATIONS = 10; // Safety limit
+
+    do {
+      iterations++;
+      if (iterations > MAX_ITERATIONS) {
+        warn(`Holder count scan exceeded max iterations for ${issuer}`);
+        break;
+      }
+
+      const result = await this.xrplClient.getAccountLinesWithMarker(issuer, marker);
+      const lines = result.lines || [];
+      if (lines.length === 0) break;
+
+      // Count lines matching our currency
+      for (const line of lines) {
+        if (line.currency === currency && parseFloat(line.balance || '0') > 0) {
+          holders++;
+        }
+      }
+
+      marker = result.marker;
+    } while (marker);
+
+    return holders;
+  }
+
+  /**
+   * Batch update holders for multiple tokens
+   * Scans up to MAX_ISSUERS_PER_SCAN issuers per call
+   */
+  async batchUpdateHolders(tokens: Array<{ currency: string; issuer: string }>): Promise<Map<string, number>> {
+    const results = new Map<string, number>();
+    const uniqueIssuers = new Set(tokens.map(t => t.issuer));
+
+    // Limit to MAX_ISSUERS_PER_SCAN issuers
+    const issuersToScan = Array.from(uniqueIssuers).slice(0, this.MAX_ISSUERS_PER_SCAN);
+
+    info(`Scanning holders for ${issuersToScan.length} issuers...`);
+
+    for (const issuer of issuersToScan) {
+      const issuerTokens = tokens.filter(t => t.issuer === issuer);
+
+      try {
+        const lines = await this.xrplClient.getAccountLines(issuer);
+
+        // Count holders for each token from this issuer
+        const tokenCounts = new Map<string, number>();
+
+        for (const line of lines) {
+          if (parseFloat(line.balance || '0') > 0) {
+            const key = `${line.currency}:${issuer}`;
+            tokenCounts.set(key, (tokenCounts.get(key) || 0) + 1);
+          }
+        }
+
+        // Update cache and results
+        for (const token of issuerTokens) {
+          const key = `${token.currency}:${token.issuer}`;
+          const count = tokenCounts.get(key) || 0;
+          this.cache.set(key, { count, lastUpdated: Date.now() });
+          results.set(key, count);
+        }
+      } catch (err) {
+        warn(`Failed to scan holders for issuer ${issuer}: ${err}`);
+      }
+
+      // Rate limit between issuers
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+
+    info(`Holder scan complete: ${results.size} tokens updated`);
+    return results;
+  }
+
+  /**
+   * Prune stale cache entries
+   */
+  pruneCache(): void {
+    const now = Date.now();
+    let pruned = 0;
+
+    for (const [key, cache] of this.cache.entries()) {
+      if (now - cache.lastUpdated > this.CACHE_TTL_MS * 2) { // 2x TTL
+        this.cache.delete(key);
+        pruned++;
+      }
+    }
+
+    if (pruned > 0) {
+      debug(`Pruned ${pruned} stale holder cache entries`);
+    }
+  }
+
+  /**
+   * Get cache size
+   */
+  getCacheSize(): number {
+    return this.cache.size;
+  }
+}
+
+---END---
+
+FILE: src/market/marketData.ts
+---
+/**
+ * Market Data Module
+ * Calculates price, liquidity, volume, holder estimates for tracked tokens
+ */
+
+import { XRPLClient } from '../xrpl/client';
+import { TrackedToken, AMMPool, MarketSnapshot } from '../types';
+import { info, debug, warn } from '../utils/logger';
+import { Database } from '../db/database';
+
+// Price history cache: key = "currency:issuer", value = array of {timestamp, price}
+interface PricePoint {
+  timestamp: number;
+  price: number;
+}
+
+export class MarketDataCollector {
+  private xrplClient: XRPLClient;
+  private db: Database;
+  private priceHistory: Map<string, PricePoint[]> = new Map();
+  private snapshots: Map<string, MarketSnapshot> = new Map();
+  private maxHistoryPoints = 100; // Keep last 100 price points per token
+  private lastPruneTime = 0;
+  private readonly PRUNE_INTERVAL_MS = 3600000; // Prune every hour
+
+  // FIX #16: Track consecutive failures per token
+  private failureCounts: Map<string, number> = new Map();
+  private readonly MAX_CONSECUTIVE_FAILURES = 5;
+
+  constructor(xrplClient: XRPLClient, db: Database) {
+    this.xrplClient = xrplClient;
+    this.db = db;
+  }
+
+  /**
+   * FIX #19 & #21: Prune old price history and snapshots to prevent memory leaks
+   */
+  private pruneOldData(): void {
+    const now = Date.now();
+    if (now - this.lastPruneTime < this.PRUNE_INTERVAL_MS) return;
+
+    this.lastPruneTime = now;
+    const cutoffTime = now - 24 * 60 * 60 * 1000; // 24 hours ago
+
+    let prunedSnapshots = 0;
+    let prunedHistories = 0;
+
+    // Prune snapshots not updated in 24 hours
+    for (const [key, snapshot] of this.snapshots.entries()) {
+      if (snapshot.timestamp < cutoffTime) {
+        this.snapshots.delete(key);
+        prunedSnapshots++;
+      }
+    }
+
+    // Prune price history for tokens with no recent snapshots
+    for (const [key, history] of this.priceHistory.entries()) {
+      if (!this.snapshots.has(key) || history.length === 0) {
+        this.priceHistory.delete(key);
+        prunedHistories++;
+      }
+    }
+
+    if (prunedSnapshots > 0 || prunedHistories > 0) {
+      info(`Pruned ${prunedSnapshots} stale snapshots, ${prunedHistories} empty price histories`);
+    }
+  }
+
+  /**
+   * Collect market data for a token with real volume and holder data
+   */
+  async collectMarketDataWithExtras(
+    token: TrackedToken,
+    ammPool: AMMPool | null | undefined,
+    volumeData: { buyVolume: number; sellVolume: number; buyCount: number; sellCount: number; uniqueBuyers: number; uniqueSellers: number },
+    holderCount: number | null
+  ): Promise<MarketSnapshot | null> {
+    try {
+      const key = `${token.currency}:${token.issuer}`;
+
+      // Get current price and liquidity
+      let priceXRP: number | null = null;
+      let liquidityXRP: number | null = null;
+
+      if (ammPool) {
+        const result = this.calculatePriceFromAMM(ammPool, token.currency, token.issuer);
+        priceXRP = result.price;
+        liquidityXRP = result.liquidity;
+      } else {
+        const bookResult = await this.getPriceFromBookOffers(token.currency, token.issuer);
+        priceXRP = bookResult.price;
+        liquidityXRP = bookResult.liquidity;
+      }
+
+      // Calculate price changes
+      const priceChanges = this.calculatePriceChanges(key, priceXRP);
+
+      // Calculate spread
+      const spreadPercent = await this.calculateSpread(token.currency, token.issuer);
+
+      const snapshot: MarketSnapshot = {
+        tokenCurrency: token.currency,
+        tokenIssuer: token.issuer,
+        timestamp: Date.now(),
+        priceXRP,
+        liquidityXRP,
+        buyVolume5m: volumeData.buyVolume,
+        sellVolume5m: volumeData.sellVolume,
+        buyCount5m: volumeData.buyCount,
+        sellCount5m: volumeData.sellCount,
+        uniqueBuyers5m: volumeData.uniqueBuyers,
+        uniqueSellers5m: volumeData.uniqueSellers,
+        priceChange5m: priceChanges.change5m,
+        priceChange15m: priceChanges.change15m,
+        priceChange1h: priceChanges.change1h,
+        holderEstimate: holderCount,
+        spreadPercent,
+      };
+
+      // Save snapshot
+      this.snapshots.set(key, snapshot);
+      this.db.saveMarketSnapshot(snapshot);
+
+      // Update price history
+      if (priceXRP !== null && priceXRP > 0) {
+        this.updatePriceHistory(key, priceXRP);
+      }
+
+      // Reset failure count on success
+      this.resetFailureCount(key);
+
+      // Periodically prune old data
+      this.pruneOldData();
+
+      return snapshot;
+    } catch (err) {
+      const key = `${token.currency}:${token.issuer}`;
+      const failures = (this.failureCounts.get(key) || 0) + 1;
+      this.failureCounts.set(key, failures);
+
+      if (failures >= this.MAX_CONSECUTIVE_FAILURES) {
+        warn(`⚠️ Token ${key} has failed ${failures} consecutive market data collections`);
+      }
+
+      warn(`Error collecting market data for ${token.currency}:${token.issuer}: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Collect market data for a token (legacy method, uses mock volume/holders)
+   */
+  async collectMarketData(token: TrackedToken, ammPool?: AMMPool | null): Promise<MarketSnapshot | null> {
+    try {
+      const key = `${token.currency}:${token.issuer}`;
+
+      // Get current price and liquidity
+      let priceXRP: number | null = null;
+      let liquidityXRP: number | null = null;
+
+      if (ammPool) {
+        // Calculate price from AMM pool using constant product formula
+        const result = this.calculatePriceFromAMM(ammPool, token.currency, token.issuer);
+        priceXRP = result.price;
+        liquidityXRP = result.liquidity;
+      } else {
+        // Fallback: try to get price from order book
+        const bookResult = await this.getPriceFromBookOffers(token.currency, token.issuer);
+        priceXRP = bookResult.price;
+        liquidityXRP = bookResult.liquidity;
+      }
+
+      // Get volume data (mock fallback)
+      const volumeData = this.getVolumeEstimate(key);
+
+      // Calculate price changes
+      const priceChanges = this.calculatePriceChanges(key, priceXRP);
+
+      // Estimate holder count (mock - real implementation would scan trustlines)
+      const holderEstimate = this.estimateHolders(token.issuer, token.currency);
+
+      // Calculate spread
+      const spreadPercent = await this.calculateSpread(token.currency, token.issuer);
+
+      const snapshot: MarketSnapshot = {
+        tokenCurrency: token.currency,
+        tokenIssuer: token.issuer,
+        timestamp: Date.now(),
+        priceXRP,
+        liquidityXRP,
+        buyVolume5m: volumeData.buyVolume,
+        sellVolume5m: volumeData.sellVolume,
+        buyCount5m: volumeData.buyCount,
+        sellCount5m: volumeData.sellCount,
+        uniqueBuyers5m: 0, // Mock - only available via collectMarketDataWithExtras
+        uniqueSellers5m: 0,
+        priceChange5m: priceChanges.change5m,
+        priceChange15m: priceChanges.change15m,
+        priceChange1h: priceChanges.change1h,
+        holderEstimate,
+        spreadPercent,
+      };
+
+      // Save snapshot
+      this.snapshots.set(key, snapshot);
+      this.db.saveMarketSnapshot(snapshot);
+
+      // Update price history
+      if (priceXRP !== null && priceXRP > 0) {
+        this.updatePriceHistory(key, priceXRP);
+      }
+
+      // FIX #16: Reset failure count on success
+      this.resetFailureCount(key);
+
+      // FIX #19 & #21: Periodically prune old data
+      this.pruneOldData();
+
+      return snapshot;
+    } catch (err) {
+      // FIX #16: Track consecutive failures
+      const key = `${token.currency}:${token.issuer}`;
+      const failures = (this.failureCounts.get(key) || 0) + 1;
+      this.failureCounts.set(key, failures);
+
+      if (failures >= this.MAX_CONSECUTIVE_FAILURES) {
+        warn(`⚠️ Token ${key} has failed ${failures} consecutive market data collections`);
+      }
+
+      warn(`Error collecting market data for ${token.currency}:${token.issuer}: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * FIX #16: Reset failure count on successful collection
+   */
+  private resetFailureCount(key: string): void {
+    if (this.failureCounts.has(key)) {
+      this.failureCounts.delete(key);
+    }
+  }
+
+  /**
+   * Calculate price from AMM pool using constant product formula
+   * FIX #6: Only calculate price if one asset is XRP
+   * Price of token in XRP = amountXRP / amountToken
+   */
+  private calculatePriceFromAMM(
+    pool: AMMPool,
+    tokenCurrency: string,
+    tokenIssuer: string
+  ): { price: number | null; liquidity: number | null } {
+    try {
+      // Determine which asset is the token and which is XRP
+      let tokenAmount: number = 0;
+      let xrpAmount: number = 0;
+
+      const asset1IsToken =
+        pool.asset1.currency === tokenCurrency && pool.asset1.issuer === tokenIssuer;
+      const asset2IsToken =
+        pool.asset2.currency === tokenCurrency && pool.asset2.issuer === tokenIssuer;
+
+      if (asset1IsToken) {
+        tokenAmount = this.parseAmount(pool.amount1);
+        xrpAmount = this.parseAmount(pool.amount2);
+
+        // FIX #6: Verify the other asset is XRP
+        if (pool.asset2.currency !== 'XRP') {
+          debug(`AMM pool for ${tokenCurrency} is not paired with XRP (paired with ${pool.asset2.currency})`);
+          return { price: null, liquidity: null };
+        }
+      } else if (asset2IsToken) {
+        tokenAmount = this.parseAmount(pool.amount2);
+        xrpAmount = this.parseAmount(pool.amount1);
+
+        // FIX #6: Verify the other asset is XRP
+        if (pool.asset1.currency !== 'XRP') {
+          debug(`AMM pool for ${tokenCurrency} is not paired with XRP (paired with ${pool.asset1.currency})`);
+          return { price: null, liquidity: null };
+        }
+      } else {
+        return { price: null, liquidity: null };
+      }
+
+      if (tokenAmount <= 0 || xrpAmount <= 0) {
+        return { price: null, liquidity: null };
+      }
+
+      // Price of 1 token in XRP
+      const price = xrpAmount / tokenAmount;
+
+      // Liquidity in XRP terms (total pool value in XRP)
+      const liquidity = xrpAmount * 2; // Both sides of the pool
+
+      return { price, liquidity };
+    } catch (err) {
+      debug(`Error calculating AMM price: ${err}`);
+      return { price: null, liquidity: null };
+    }
+  }
+
+  /**
+   * Parse amount string/value to number
+   * FIX #11: Handle all XRPL amount formats including IssuedCurrencyAmount objects
+   */
+  private parseAmount(amount: string | number | any): number {
+    if (typeof amount === 'number') return amount;
+    if (typeof amount === 'string') {
+      // Handle scientific notation (e.g., "1e6") or plain numbers
+      const parsed = parseFloat(amount);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    if (amount && typeof amount === 'object') {
+      // XRPL IssuedCurrencyAmount: { value: "1.5", currency: "USD", issuer: "r..." }
+      // Or alternative format: { amount: "123" }
+      if (amount.value !== undefined) {
+        const parsed = parseFloat(amount.value);
+        return isNaN(parsed) ? 0 : parsed;
+      }
+      if (amount.amount !== undefined) {
+        const parsed = parseFloat(amount.amount);
+        return isNaN(parsed) ? 0 : parsed;
+      }
+      // Fallback: try to stringify and parse
+      try {
+        const str = JSON.stringify(amount);
+        const parsed = parseFloat(str);
+        return isNaN(parsed) ? 0 : parsed;
+      } catch {
+        return 0;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Get price from order book (fallback when no AMM exists)
+   */
+  private async getPriceFromBookOffers(
+    currency: string,
+    issuer: string
+  ): Promise<{ price: number | null; liquidity: number | null }> {
+    try {
+      // Get book offers: taker gets token, pays XRP
+      const bookResult = await this.xrplClient.getBookOffers(
+        { currency, issuer }, // taker_gets: the token
+        { currency: 'XRP' }, // taker_pays: XRP
+        10
+      );
+
+      if (!bookResult || !bookResult.offers || bookResult.offers.length === 0) {
+        return { price: null, liquidity: null };
+      }
+
+      // Calculate weighted average price from top offers
+      let totalXRP = 0;
+      let totalTokens = 0;
+      let liquidity = 0;
+
+      for (const offer of bookResult.offers.slice(0, 5)) {
+        const takerPays = this.parseAmount(offer.TakerPays);
+        const takerGets = this.parseAmount(offer.TakerGets);
+
+        if (takerGets > 0) {
+          totalXRP += takerPays;
+          totalTokens += takerGets;
+          liquidity += takerPays;
+        }
+      }
+
+      const price = totalTokens > 0 ? totalXRP / totalTokens : null;
+
+      return { price, liquidity };
+    } catch (err) {
+      debug(`Error getting book offers: ${err}`);
+      return { price: null, liquidity: null };
+    }
+  }
+
+  /**
+   * Get volume estimate (MOCK - placeholder for real transaction tracking)
+   * In production, this would analyze recent Payment/AMMTrade transactions
+   */
+  private getVolumeEstimate(key: string): {
+    buyVolume: number;
+    sellVolume: number;
+    buyCount: number;
+    sellCount: number;
+  } {
+    // TODO: Implement real volume tracking by monitoring transactions
+    // For MVP, return zeros - this will be populated as we track trades
+    return {
+      buyVolume: 0,
+      sellVolume: 0,
+      buyCount: 0,
+      sellCount: 0,
+    };
+  }
+
+  /**
+   * Calculate price changes over different time periods
+   */
+  private calculatePriceChanges(
+    key: string,
+    currentPrice: number | null
+  ): { change5m: number | null; change15m: number | null; change1h: number | null } {
+    const history = this.priceHistory.get(key) || [];
+
+    if (!currentPrice || history.length === 0) {
+      return { change5m: null, change15m: null, change1h: null };
+    }
+
+    const now = Date.now();
+    const fiveMinAgo = now - 5 * 60 * 1000;
+    const fifteenMinAgo = now - 15 * 60 * 1000;
+    const oneHourAgo = now - 60 * 60 * 1000;
+
+    const findPriceAtTime = (targetTime: number): number | null => {
+      // Find closest price point to target time
+      let closest: PricePoint | null = null;
+      let minDiff = Infinity;
+
+      for (const point of history) {
+        const diff = Math.abs(point.timestamp - targetTime);
+        if (diff < minDiff) {
+          minDiff = diff;
+          closest = point;
+        }
+      }
+
+      // Only use if within reasonable time window (2 minutes)
+      if (closest && minDiff < 2 * 60 * 1000) {
+        return closest.price;
+      }
+      return null;
+    };
+
+    const price5m = findPriceAtTime(fiveMinAgo);
+    const price15m = findPriceAtTime(fifteenMinAgo);
+    const price1h = findPriceAtTime(oneHourAgo);
+
+    const calcChange = (oldPrice: number | null): number | null => {
+      if (!oldPrice || oldPrice <= 0) return null;
+      return ((currentPrice - oldPrice) / oldPrice) * 100;
+    };
+
+    return {
+      change5m: calcChange(price5m),
+      change15m: calcChange(price15m),
+      change1h: calcChange(price1h),
+    };
+  }
+
+  /**
+   * Update price history
+   */
+  private updatePriceHistory(key: string, price: number): void {
+    const history = this.priceHistory.get(key) || [];
+    history.push({ timestamp: Date.now(), price });
+
+    // Keep only last N points
+    if (history.length > this.maxHistoryPoints) {
+      history.splice(0, history.length - this.maxHistoryPoints);
+    }
+
+    this.priceHistory.set(key, history);
+  }
+
+  /**
+   * Estimate holder count (MOCK - placeholder)
+   * Real implementation would query account_lines for the issuer
+   */
+  private estimateHolders(issuer: string, currency: string): number | null {
+    // TODO: Implement real holder counting by scanning trustlines
+    // For MVP, return null - this requires significant API calls
+    return null;
+  }
+
+  /**
+   * Calculate spread percentage from order book
+   */
+  private async calculateSpread(currency: string, issuer: string): Promise<number | null> {
+    try {
+      // Get both sides of the book
+      const asks = await this.xrplClient.getBookOffers(
+        { currency, issuer },
+        { currency: 'XRP' },
+        1
+      );
+
+      const bids = await this.xrplClient.getBookOffers(
+        { currency: 'XRP' },
+        { currency, issuer },
+        1
+      );
+
+      if (!asks?.offers?.length || !bids?.offers?.length) {
+        return null;
+      }
+
+      const bestAsk = this.parseAmount(asks.offers[0].TakerPays) / this.parseAmount(asks.offers[0].TakerGets);
+      const bestBid = this.parseAmount(bids.offers[0].TakerGets) / this.parseAmount(bids.offers[0].TakerPays);
+
+      if (bestAsk <= 0 || bestBid <= 0) return null;
+
+      const spread = ((bestAsk - bestBid) / bestBid) * 100;
+      return spread;
+    } catch (err) {
+      debug(`Error calculating spread: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get latest snapshot for a token
+   */
+  getSnapshot(currency: string, issuer: string): MarketSnapshot | null {
+    const key = `${currency}:${issuer}`;
+    return this.snapshots.get(key) || null;
+  }
+
+  /**
+   * Get all snapshots
+   */
+  getAllSnapshots(): MarketSnapshot[] {
+    return Array.from(this.snapshots.values());
+  }
+}
+
+---END---
+
+FILE: src/market/volumeTracker.ts
+---
+/**
+ * Volume Tracker Module
+ * Tracks real buy/sell volume from Payment and AMMTrade transactions
+ */
+
+import { info, debug } from '../utils/logger';
+
+interface TokenVolume {
+  buyVolumeXRP: number;
+  sellVolumeXRP: number;
+  buyCount: number;
+  sellCount: number;
+  uniqueBuyers: Set<string>;
+  uniqueSellers: Set<string>;
+  lastReset: number;
+}
+
+export class VolumeTracker {
+  private volumes: Map<string, TokenVolume> = new Map();
+  private readonly WINDOW_MS = 5 * 60 * 1000; // 5 minute window
+
+  /**
+   * Process a transaction and update volume stats
+   */
+  processTransaction(tx: any): void {
+    const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+    if (!txType) return;
+
+    if (txType === 'Payment') {
+      this.handlePayment(tx);
+    } else if (txType === 'AMMTrade') {
+      this.handleAMMTrade(tx);
+    }
+  }
+
+  /**
+   * Handle Payment transaction
+   */
+  private handlePayment(tx: any): void {
+    const transaction = tx.tx || tx.transaction;
+    if (!transaction) return;
+
+    const amount = transaction.Amount;
+    const destination = transaction.Destination;
+    const account = transaction.Account;
+
+    // Skip XRP-only payments
+    if (typeof amount === 'string') return;
+    if (!amount.currency || amount.currency === 'XRP') return;
+
+    const key = `${amount.currency}:${amount.issuer}`;
+    const volume = this.getOrCreateVolume(key);
+
+    // Determine if this is a buy or sell based on context
+    // Simplified: if destination is the issuer, it's a sell (returning tokens)
+    // Otherwise it's a buy (receiving tokens)
+    const isSell = destination === amount.issuer;
+
+    // Estimate XRP value (simplified - uses token amount as proxy)
+    const tokenAmount = parseFloat(amount.value || '0');
+
+    if (isSell) {
+      volume.sellVolumeXRP += tokenAmount;
+      volume.sellCount++;
+      volume.uniqueSellers.add(account);
+    } else {
+      volume.buyVolumeXRP += tokenAmount;
+      volume.buyCount++;
+      volume.uniqueBuyers.add(account);
+    }
+  }
+
+  /**
+   * Handle AMMTrade transaction
+   */
+  private handleAMMTrade(tx: any): void {
+    const transaction = tx.tx || tx.transaction;
+    if (!transaction) return;
+
+    const asset = transaction.Asset;
+    const asset2 = transaction.Asset2;
+    const amount = transaction.Amount;
+    const amount2 = transaction.Amount2;
+
+    if (!asset || !asset2 || !amount || !amount2) return;
+
+    // Determine which asset is the token (non-XRP)
+    let tokenKey: string | null = null;
+    let xrpAmount = 0;
+
+    if (asset.currency !== 'XRP') {
+      tokenKey = `${asset.currency}:${asset.issuer}`;
+      xrpAmount = this.parseAmount(amount2);
+    } else if (asset2.currency !== 'XRP') {
+      tokenKey = `${asset2.currency}:${asset2.issuer}`;
+      xrpAmount = this.parseAmount(amount);
+    }
+
+    if (!tokenKey) return;
+
+    const volume = this.getOrCreateVolume(tokenKey);
+    const account = transaction.Account;
+
+    // AMMTrade: user sends XRP, receives tokens = buy
+    // Or sends tokens, receives XRP = sell
+    // Simplified: assume buys for now (can be enhanced with path analysis)
+    volume.buyVolumeXRP += xrpAmount;
+    volume.buyCount++;
+    volume.uniqueBuyers.add(account);
+  }
+
+  /**
+   * Get volume stats for a token
+   */
+  getVolume(currency: string, issuer: string): {
+    buyVolume: number;
+    sellVolume: number;
+    buyCount: number;
+    sellCount: number;
+    uniqueBuyers: number;
+    uniqueSellers: number;
+  } {
+    const key = `${currency}:${issuer}`;
+    const volume = this.volumes.get(key);
+
+    if (!volume) {
+      return {
+        buyVolume: 0,
+        sellVolume: 0,
+        buyCount: 0,
+        sellCount: 0,
+        uniqueBuyers: 0,
+        uniqueSellers: 0,
+      };
+    }
+
+    // Check if window has expired
+    this.checkReset(volume);
+
+    return {
+      buyVolume: volume.buyVolumeXRP,
+      sellVolume: volume.sellVolumeXRP,
+      buyCount: volume.buyCount,
+      sellCount: volume.sellCount,
+      uniqueBuyers: volume.uniqueBuyers.size,
+      uniqueSellers: volume.uniqueSellers.size,
+    };
+  }
+
+  /**
+   * Get or create volume tracking for a token
+   */
+  private getOrCreateVolume(key: string): TokenVolume {
+    let volume = this.volumes.get(key);
+    if (!volume) {
+      volume = {
+        buyVolumeXRP: 0,
+        sellVolumeXRP: 0,
+        buyCount: 0,
+        sellCount: 0,
+        uniqueBuyers: new Set(),
+        uniqueSellers: new Set(),
+        lastReset: Date.now(),
+      };
+      this.volumes.set(key, volume);
+    }
+    return volume;
+  }
+
+  /**
+   * Reset volume stats if window has expired
+   */
+  private checkReset(volume: TokenVolume): void {
+    const now = Date.now();
+    if (now - volume.lastReset >= this.WINDOW_MS) {
+      volume.buyVolumeXRP = 0;
+      volume.sellVolumeXRP = 0;
+      volume.buyCount = 0;
+      volume.sellCount = 0;
+      volume.uniqueBuyers.clear();
+      volume.uniqueSellers.clear();
+      volume.lastReset = now;
+    }
+  }
+
+  /**
+   * Parse amount to number
+   */
+  private parseAmount(amount: any): number {
+    if (typeof amount === 'number') return amount;
+    if (typeof amount === 'string') {
+      const parsed = parseFloat(amount);
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    if (amount && typeof amount === 'object') {
+      return this.parseAmount(amount.value || amount.amount || 0);
+    }
+    return 0;
+  }
+
+  /**
+   * Get total tracked tokens
+   */
+  getTrackedCount(): number {
+    return this.volumes.size;
+  }
+}
+
+---END---
+
+FILE: src/paper/paperTrader.ts
+---
+/**
+ * Paper Trading Module
+ * Simulates trades with tracked PnL, no real execution
+ */
+
+import { TrackedToken, MarketSnapshot, PaperTrade, DailySummary } from '../types';
+import { BotConfig } from '../config';
+import { Database } from '../db/database';
+import { PositionSizer } from './positionSizer';
+import { info, warn, debug } from '../utils/logger';
+
+interface OpenPosition {
+  trade: PaperTrade;
+  entryPriceXRP: number;
+  tokensHeld: number;
+  remainingPercent: number; // 100 = full position
+  highestPriceSinceEntry: number;
+  // FIX #24: Track risk state for emergency exit decisions
+  entryRiskFlags: string[];
+  lastRiskCheck: number;
+  // Improved exit: track volatility for dynamic stops
+  priceHistory: number[]; // Last 10 prices for volatility calculation
+}
+
+export class PaperTrader {
+  private config: BotConfig;
+  private db: Database;
+  private positionSizer: PositionSizer;
+  private bankrollXRP: number;
+  private openPositions: Map<string, OpenPosition> = new Map();
+  private dailyPnL: number = 0;
+  private tradesToday: number = 0;
+  private lastResetDate: string = '';
+
+  // Trading stats for Kelly Criterion
+  private totalTrades: number = 0;
+  private winningTrades: number = 0;
+  private totalWinAmount: number = 0;
+  private totalLossAmount: number = 0;
+
+  constructor(config: BotConfig, db: Database) {
+    this.config = config;
+    this.db = db;
+    this.positionSizer = new PositionSizer();
+    this.bankrollXRP = config.startingBankrollXRP;
+    this.lastResetDate = this.getCurrentDate();
+
+    // Load existing state from DB
+    this.loadState();
+  }
+
+  /**
+   * Try to open a new paper trade
+   */
+  tryOpenTrade(
+    token: TrackedToken,
+    snapshot: MarketSnapshot | null,
+    score: number,
+    entryReason: string
+  ): PaperTrade | null {
+    // Check mode
+    if (this.config.mode !== 'PAPER') {
+      debug('Paper trading disabled (mode is not PAPER)');
+      return null;
+    }
+
+    // Check score threshold
+    if (score < this.config.minScorePaperTrade) {
+      debug(`Score ${score} below threshold ${this.config.minScorePaperTrade}`);
+      return null;
+    }
+
+    // Check max open trades
+    if (this.openPositions.size >= this.config.maxOpenTrades) {
+      warn(`Max open trades (${this.config.maxOpenTrades}) reached`);
+      return null;
+    }
+
+    // Check daily loss limit
+    this.checkDailyReset();
+    if (this.dailyPnL <= -this.config.maxDailyLossXRP) {
+      warn(`Daily loss limit reached: ${this.dailyPnL.toFixed(2)} XRP`);
+      return null;
+    }
+
+    // Check we have bankroll
+    if (this.bankrollXRP < this.config.maxTradeXRP) {
+      warn(`Insufficient bankroll: ${this.bankrollXRP.toFixed(2)} XRP`);
+      return null;
+    }
+
+    // Need valid price
+    if (!snapshot || !snapshot.priceXRP || snapshot.priceXRP <= 0) {
+      warn('No valid price for trade entry');
+      return null;
+    }
+
+    const key = `${token.currency}:${token.issuer}`;
+
+    // Don't double-enter same token
+    if (this.openPositions.has(key)) {
+      debug(`Already have open position for ${key}`);
+      return null;
+    }
+
+    // Calculate dynamic position size
+    const winRate = this.totalTrades > 0 ? this.winningTrades / this.totalTrades : 0.5;
+    const avgWin = this.winningTrades > 0 ? this.totalWinAmount / this.winningTrades : 5;
+    const avgLoss = this.totalLossAmount > 0 ? Math.abs(this.totalLossAmount) / (this.totalTrades - this.winningTrades) : 5;
+    const volatility = this.estimateVolatility(snapshot);
+
+    const sizeRecommendation = this.positionSizer.calculatePositionSize(
+      this.bankrollXRP,
+      winRate,
+      avgWin,
+      avgLoss,
+      volatility,
+      score
+    );
+
+    const tradeSizeXRP = Math.min(sizeRecommendation.sizeXRP, this.config.maxTradeXRP);
+    const entryPrice = snapshot.priceXRP;
+    const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
+    const effectivePrice = entryPrice * (1 + slippage);
+    const tokensBought = tradeSizeXRP / effectivePrice;
+    const fees = tradeSizeXRP * 0.003; // 0.3% estimated fees
+
+    const trade: PaperTrade = {
+      tokenCurrency: token.currency,
+      tokenIssuer: token.issuer,
+      entryPriceXRP: entryPrice,
+      entryAmountXRP: tradeSizeXRP,
+      entryTimestamp: Date.now(),
+      entryScore: score,
+      entryReason,
+      exitPriceXRP: null,
+      exitTimestamp: null,
+      exitScore: null,
+      exitReason: null,
+      status: 'open',
+      pnlXRP: null,
+      pnlPercent: null,
+      slippageEstimate: slippage,
+      feesPaid: fees,
+      tp1Hit: false,
+      tp2Hit: false,
+      trailingStopActive: false,
+      remainingPosition: 100,
+    };
+
+    // Deduct from bankroll
+    this.bankrollXRP -= tradeSizeXRP + fees;
+
+    debug(`Position sizing: ${sizeRecommendation.method} | Size: ${tradeSizeXRP.toFixed(2)} XRP | ${sizeRecommendation.reasoning}`);
+
+    // Track position
+    this.openPositions.set(key, {
+      trade,
+      entryPriceXRP: entryPrice,
+      tokensHeld: tokensBought,
+      remainingPercent: 100,
+      highestPriceSinceEntry: entryPrice,
+      // FIX #24: Store initial risk state
+      entryRiskFlags: [],
+      lastRiskCheck: Date.now(),
+      // Improved exit: initialize price history
+      priceHistory: [entryPrice],
+    });
+
+    // Save to DB
+    this.db.savePaperTrade(trade);
+
+    info(`📈 Paper trade OPENED: ${token.currency} @ ${entryPrice.toFixed(6)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, score: ${score}`);
+
+    return trade;
+  }
+
+  /**
+   * Check all open positions for exit conditions
+   * FIX #4: Collect keys to close first, then delete after iteration to avoid
+   * modifying Map during iteration
+   */
+  checkExits(snapshot: MarketSnapshot | null): PaperTrade[] {
+    const closedTrades: PaperTrade[] = [];
+    const keysToClose: string[] = [];
+
+    if (!snapshot || !snapshot.priceXRP || snapshot.priceXRP <= 0) {
+      return closedTrades;
+    }
+
+    const currentPrice = snapshot.priceXRP;
+
+    // First pass: evaluate all positions and collect actions
+    for (const [key, position] of this.openPositions.entries()) {
+      const trade = position.trade;
+
+      // Skip already-closing positions
+      if (keysToClose.includes(key)) continue;
+
+      // Update highest price and price history
+      if (currentPrice > position.highestPriceSinceEntry) {
+        position.highestPriceSinceEntry = currentPrice;
+      }
+      position.priceHistory.push(currentPrice);
+      if (position.priceHistory.length > 10) {
+        position.priceHistory.shift(); // Keep last 10 prices
+      }
+
+      const pnlPercent = ((currentPrice - trade.entryPriceXRP) / trade.entryPriceXRP) * 100;
+
+      // Calculate dynamic stop loss based on volatility
+      const volatility = this.calculateVolatility(position.priceHistory);
+      const dynamicStopLoss = this.getDynamicStopLoss(volatility, pnlPercent);
+
+      // Check stop loss (dynamic based on volatility)
+      if (pnlPercent <= dynamicStopLoss && trade.remainingPosition > 0) {
+        keysToClose.push(key);
+        closedTrades.push(trade);
+        continue;
+      }
+
+      // Check Take Profit 1 (+35%, sell 40% of original position)
+      if (!trade.tp1Hit && pnlPercent >= 35 && trade.remainingPosition > 0) {
+        this.partialClose(key, currentPrice, 40, 'take_profit_1', snapshot);
+        trade.tp1Hit = true;
+        this.db.updatePaperTrade(trade);
+      }
+
+      // Check Take Profit 2 (+75%, sell 30% of original position)
+      // After TP1 (40% sold), remaining is 60%. Sell 30/60 = 50% of remaining.
+      if (!trade.tp2Hit && pnlPercent >= 75 && trade.remainingPosition > 0) {
+        const percentOfRemaining = (30 / trade.remainingPosition) * 100;
+        this.partialClose(key, currentPrice, Math.min(percentOfRemaining, 100), 'take_profit_2', snapshot);
+        trade.tp2Hit = true;
+        this.db.updatePaperTrade(trade);
+      }
+
+      // Activate trailing stop based on volatility and gains
+      const trailVolatility = this.calculateVolatility(position.priceHistory);
+      const trailingActivationThreshold = this.getTrailingActivationThreshold(trailVolatility, pnlPercent);
+
+      if (!trade.trailingStopActive && pnlPercent >= trailingActivationThreshold) {
+        trade.trailingStopActive = true;
+        this.db.updatePaperTrade(trade);
+      }
+
+      // Check trailing stop (dynamic based on volatility)
+      if (trade.trailingStopActive && trade.remainingPosition > 0) {
+        const trailingDistance = this.getTrailingDistance(trailVolatility);
+        const trailThreshold = position.highestPriceSinceEntry * (1 - trailingDistance);
+        if (currentPrice <= trailThreshold) {
+          keysToClose.push(key);
+          closedTrades.push(trade);
+        }
+      }
+    }
+
+    // Second pass: delete closed positions after iteration
+    for (const key of keysToClose) {
+      this.openPositions.delete(key);
+    }
+
+    return closedTrades;
+  }
+
+  /**
+   * Close entire position
+   * FIX #25: Calculate slippage based on token quantity vs pool depth
+   */
+  private closePosition(
+    key: string,
+    exitPrice: number,
+    reason: string,
+    snapshot: MarketSnapshot | null
+  ): void {
+    const position = this.openPositions.get(key);
+    if (!position) return;
+
+    const trade = position.trade;
+    const tokensToSell = position.tokensHeld * (trade.remainingPosition / 100);
+
+    // FIX #25: Estimate slippage based on trade value relative to liquidity
+    const tradeValueXRP = tokensToSell * exitPrice;
+    const slippage = this.estimateSlippage(tradeValueXRP, snapshot);
+
+    const effectiveExitPrice = exitPrice * (1 - slippage);
+    const proceeds = tokensToSell * effectiveExitPrice;
+    const fees = proceeds * 0.003;
+    const netProceeds = proceeds - fees;
+
+    // PnL is net proceeds minus the portion of entry cost for this position
+    const entryCostForPosition = trade.entryAmountXRP * (trade.remainingPosition / 100);
+    const pnlXRP = netProceeds - entryCostForPosition;
+    const pnlPercent = entryCostForPosition > 0 ? (pnlXRP / entryCostForPosition) * 100 : 0;
+
+    // Update trade
+    trade.exitPriceXRP = exitPrice;
+    trade.exitTimestamp = Date.now();
+    trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
+    trade.exitReason = reason;
+    trade.status = 'closed';
+    trade.pnlXRP = parseFloat(pnlXRP.toFixed(6));
+    trade.pnlPercent = parseFloat(pnlPercent.toFixed(2));
+    trade.feesPaid += fees;
+    trade.remainingPosition = 0;
+
+    // Return proceeds to bankroll
+    this.bankrollXRP += netProceeds;
+    this.dailyPnL += pnlXRP;
+    this.tradesToday++;
+
+    // Remove from open positions
+    this.openPositions.delete(key);
+
+    // Save to DB
+    this.db.updatePaperTrade(trade);
+
+    // Update trading stats for Kelly Criterion
+    this.totalTrades++;
+    if (pnlXRP > 0) {
+      this.winningTrades++;
+      this.totalWinAmount += pnlXRP;
+    } else {
+      this.totalLossAmount += Math.abs(pnlXRP);
+    }
+
+    const action = pnlXRP >= 0 ? '✅' : '❌';
+    info(`${action} Paper trade CLOSED: ${trade.tokenCurrency} | PnL: ${pnlXRP.toFixed(4)} XRP (${pnlPercent.toFixed(2)}%) | Reason: ${reason}`);
+  }
+
+  /**
+   * Partially close position
+   * FIX #3: Track cost basis per token unit for accurate PnL on partial closes
+   */
+  private partialClose(
+    key: string,
+    exitPrice: number,
+    percentToClose: number,
+    reason: string,
+    snapshot: MarketSnapshot | null
+  ): void {
+    const position = this.openPositions.get(key);
+    if (!position) return;
+
+    const trade = position.trade;
+
+    // percentToClose is percentage of REMAINING position to close
+    const tokensToSell = position.tokensHeld * (percentToClose / 100);
+
+    // FIX #25: Slippage based on trade value vs liquidity
+    const tradeValueXRP = tokensToSell * exitPrice;
+    const slippage = this.estimateSlippage(tradeValueXRP, snapshot);
+
+    const effectiveExitPrice = exitPrice * (1 - slippage);
+    const proceeds = tokensToSell * effectiveExitPrice;
+    const fees = proceeds * 0.003;
+    const netProceeds = proceeds - fees;
+
+    // FIX #3: Cost basis is proportional to tokens sold vs total tokens held
+    const fractionSold = percentToClose / 100;
+    const costBasisSold = trade.entryAmountXRP * fractionSold;
+    const pnlXRP = netProceeds - costBasisSold;
+    const pnlPercent = costBasisSold > 0 ? (pnlXRP / costBasisSold) * 100 : 0;
+
+    // Update trade
+    trade.feesPaid += fees;
+    trade.remainingPosition -= percentToClose;
+
+    // If fully closed, mark as closed
+    if (trade.remainingPosition <= 0) {
+      trade.exitPriceXRP = exitPrice;
+      trade.exitTimestamp = Date.now();
+      trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
+      trade.exitReason = reason;
+      trade.status = 'closed';
+      trade.pnlXRP = parseFloat(pnlXRP.toFixed(6));
+      trade.pnlPercent = parseFloat(pnlPercent.toFixed(2));
+      this.openPositions.delete(key);
+    } else {
+      trade.status = 'partial';
+    }
+
+    // Return proceeds to bankroll
+    this.bankrollXRP += netProceeds;
+    this.dailyPnL += pnlXRP;
+    this.tradesToday++;
+
+    // Save to DB
+    this.db.updatePaperTrade(trade);
+
+    info(`📊 Partial close: ${trade.tokenCurrency} | Sold ${percentToClose}% | PnL: ${pnlXRP.toFixed(4)} XRP`);
+  }
+
+  /**
+   * FIX #24: Update risk state for an open position and check for emergency exit
+   * Returns trade if emergency exit was triggered, null otherwise
+   */
+  updateRiskState(
+    tokenCurrency: string,
+    tokenIssuer: string,
+    currentRiskFlags: string[],
+    snapshot: MarketSnapshot | null
+  ): PaperTrade | null {
+    const key = `${tokenCurrency}:${tokenIssuer}`;
+    const position = this.openPositions.get(key);
+
+    if (!position) return null;
+
+    const trade = position.trade;
+
+    // Skip if already closing/closed
+    if (trade.status === 'closed') return null;
+
+    // Update risk tracking
+    position.entryRiskFlags = currentRiskFlags;
+    position.lastRiskCheck = Date.now();
+
+    // Check for critical new risk flags that warrant emergency exit
+    const criticalFlags = ['liquidity_removed', 'dev_dumping', 'concentrated_supply'];
+    const newCriticalFlags = currentRiskFlags.filter(f =>
+      criticalFlags.includes(f) && !trade.entryReason.includes(f)
+    );
+
+    if (newCriticalFlags.length > 0) {
+      warn(`🚨 Emergency exit triggered for ${key}: ${newCriticalFlags.join(', ')}`);
+
+      const exitPrice = snapshot?.priceXRP || trade.entryPriceXRP * 0.9;
+      this.closePosition(key, exitPrice, `emergency_${newCriticalFlags.join(',')}`, snapshot);
+      return trade;
+    }
+
+    return null;
+  }
+
+  /**
+   * Emergency exit all positions (e.g., system-wide risk event)
+   */
+  emergencyExitAll(reason: string, snapshots: Map<string, MarketSnapshot>): PaperTrade[] {
+    const closedTrades: PaperTrade[] = [];
+    const keysToClose: string[] = [];
+
+    for (const [key, position] of this.openPositions.entries()) {
+      const snapshot = snapshots.get(key);
+      const exitPrice = snapshot?.priceXRP || position.entryPriceXRP * 0.9; // Default to -10% if no price
+
+      this.closePosition(key, exitPrice, `emergency_${reason}`, snapshot || null);
+      closedTrades.push(position.trade);
+      keysToClose.push(key);
+    }
+
+    // Clean up after iteration
+    for (const key of keysToClose) {
+      this.openPositions.delete(key);
+    }
+
+    return closedTrades;
+  }
+
+  /**
+   * Estimate slippage based on trade size vs liquidity
+   */
+  private estimateSlippage(tradeSizeXRP: number, snapshot: MarketSnapshot | null): number {
+    if (!snapshot || !snapshot.liquidityXRP || snapshot.liquidityXRP <= 0) {
+      return 0.02; // Default 2% slippage if unknown
+    }
+
+    // Slippage increases with trade size relative to liquidity
+    const ratio = tradeSizeXRP / snapshot.liquidityXRP;
+    return Math.min(0.05, ratio * 0.1); // Max 5% slippage
+  }
+
+  /**
+   * Get score from snapshot (helper)
+   */
+  private getScoreFromSnapshot(snapshot: MarketSnapshot | null): number | null {
+    // This would need the scorer - for now return null
+    return null;
+  }
+
+  /**
+   * Check and reset daily counters
+   */
+  private checkDailyReset(): void {
+    const today = this.getCurrentDate();
+    if (today !== this.lastResetDate) {
+      info(`Daily reset: PnL was ${this.dailyPnL.toFixed(2)} XRP over ${this.tradesToday} trades`);
+
+      // FIX #1: Save summary for the COMPLETED day (yesterday), not today
+      this.saveDailySummary(this.lastResetDate);
+
+      this.dailyPnL = 0;
+      this.tradesToday = 0;
+      this.lastResetDate = today;
+    }
+  }
+
+  /**
+   * Save daily summary to DB
+   * FIX #1: Accept date parameter to save correct day's summary
+   */
+  private saveDailySummary(dateStr: string): void {
+
+    const trades = this.db.getTradesForDate(dateStr);
+    const closedTrades = trades.filter(t => t.status === 'closed');
+
+    if (closedTrades.length === 0) return;
+
+    const totalPnL = closedTrades.reduce((sum, t) => sum + (t.pnlXRP || 0), 0);
+    const winningTrades = closedTrades.filter(t => (t.pnlXRP || 0) > 0);
+    const winRate = closedTrades.length > 0 ? (winningTrades.length / closedTrades.length) * 100 : 0;
+
+    const pnls = closedTrades.map(t => t.pnlXRP || 0);
+    const maxDrawdown = Math.min(0, ...pnls);
+    const bestTrade = Math.max(0, ...pnls);
+    const worstTrade = Math.min(0, ...pnls);
+
+    const summary: DailySummary = {
+      date: dateStr,
+      tradesOpened: trades.length,
+      tradesClosed: closedTrades.length,
+      totalPnLXRP: parseFloat(totalPnL.toFixed(4)),
+      winRate: parseFloat(winRate.toFixed(2)),
+      maxDrawdown: parseFloat(maxDrawdown.toFixed(4)),
+      bestTrade: parseFloat(bestTrade.toFixed(4)),
+      worstTrade: parseFloat(worstTrade.toFixed(4)),
+    };
+
+    this.db.saveDailySummary(summary);
+  }
+
+  /**
+   * Load state from DB
+   * FIX #2: Only use the most recent summary to avoid double-counting historical PnL
+   */
+  private loadState(): void {
+    // Load bankroll from the MOST RECENT daily summary only
+    const summaries = this.db.getRecentSummaries(1);
+    if (summaries.length > 0) {
+      // Bankroll = starting + all historical PnL up to yesterday
+      const latestSummary = summaries[0];
+      this.bankrollXRP = this.config.startingBankrollXRP + latestSummary.totalPnLXRP;
+    }
+
+    // Load open positions
+    const openTrades = this.db.getOpenTrades();
+    for (const trade of openTrades) {
+      const key = `${trade.tokenCurrency}:${trade.tokenIssuer}`;
+      const tokensHeld = trade.entryAmountXRP / trade.entryPriceXRP;
+      this.openPositions.set(key, {
+        trade,
+        entryPriceXRP: trade.entryPriceXRP,
+        tokensHeld,
+        remainingPercent: trade.remainingPosition,
+        highestPriceSinceEntry: trade.entryPriceXRP,
+        // FIX #24: Initialize risk tracking for loaded positions
+        entryRiskFlags: [],
+        lastRiskCheck: Date.now(),
+        // Improved exit: initialize price history
+        priceHistory: [trade.entryPriceXRP],
+      });
+    }
+
+    info(`Loaded ${this.openPositions.size} open positions, bankroll: ${this.bankrollXRP.toFixed(2)} XRP`);
+  }
+
+  /**
+   * Get current state
+   */
+  getState(): {
+    bankrollXRP: number;
+    openPositions: number;
+    dailyPnL: number;
+    tradesToday: number;
+  } {
+    this.checkDailyReset();
+    return {
+      bankrollXRP: parseFloat(this.bankrollXRP.toFixed(4)),
+      openPositions: this.openPositions.size,
+      dailyPnL: parseFloat(this.dailyPnL.toFixed(4)),
+      tradesToday: this.tradesToday,
+    };
+  }
+
+  /**
+   * Get all open positions
+   */
+  getOpenPositions(): PaperTrade[] {
+    return Array.from(this.openPositions.values()).map(p => p.trade);
+  }
+
+  /**
+   * FIX #24: Check if we have an open position for a token
+   */
+  hasOpenPosition(currency: string, issuer: string): boolean {
+    const key = `${currency}:${issuer}`;
+    return this.openPositions.has(key);
+  }
+
+  /**
+   * Helper to get current date string
+   */
+  private getCurrentDate(): string {
+    return new Date().toISOString().split('T')[0];
+  }
+
+  /**
+   * Calculate price volatility from recent prices
+   * Returns coefficient of variation (stddev / mean)
+   */
+  private calculateVolatility(prices: number[]): number {
+    if (prices.length < 2) return 0.1; // Default low volatility
+
+    const mean = prices.reduce((sum, p) => sum + p, 0) / prices.length;
+    if (mean <= 0) return 0.1;
+
+    const variance = prices.reduce((sum, p) => sum + Math.pow(p - mean, 2), 0) / prices.length;
+    const stddev = Math.sqrt(variance);
+
+    return stddev / mean; // Coefficient of variation
+  }
+
+  /**
+   * Get dynamic stop loss based on volatility
+   * High volatility = wider stop, low volatility = tighter stop
+   */
+  private getDynamicStopLoss(volatility: number, pnlPercent: number): number {
+    // Base stop loss
+    let stopLoss = -10;
+
+    // Adjust based on volatility
+    if (volatility > 0.2) stopLoss = -20; // Very volatile: wide stop
+    else if (volatility > 0.1) stopLoss = -15; // Moderate volatility
+    else if (volatility > 0.05) stopLoss = -12; // Low volatility
+    else stopLoss = -8; // Very stable: tight stop
+
+    // If already in profit, tighten stop to protect gains
+    if (pnlPercent > 20) stopLoss = Math.max(stopLoss, -5);
+    if (pnlPercent > 50) stopLoss = Math.max(stopLoss, -3);
+
+    return stopLoss;
+  }
+
+  /**
+   * Get trailing stop activation threshold based on volatility
+   */
+  private getTrailingActivationThreshold(volatility: number, pnlPercent: number): number {
+    // High volatility: wait for bigger gains before activating trail
+    if (volatility > 0.2) return 30;
+    if (volatility > 0.1) return 25;
+    if (volatility > 0.05) return 20;
+    return 15; // Low volatility: activate early
+  }
+
+  /**
+   * Get trailing stop distance based on volatility
+   */
+  private getTrailingDistance(volatility: number): number {
+    // High volatility: wider trail to avoid premature exits
+    if (volatility > 0.2) return 0.20; // 20% trail
+    if (volatility > 0.1) return 0.15; // 15% trail
+    if (volatility > 0.05) return 0.12; // 12% trail
+    return 0.10; // 10% trail for stable tokens
+  }
+
+  /**
+   * Estimate volatility from snapshot price changes
+   */
+  private estimateVolatility(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 0.1; // Default moderate volatility
+
+    const changes = [
+      snapshot.priceChange5m || 0,
+      snapshot.priceChange15m || 0,
+      snapshot.priceChange1h || 0,
+    ].filter(c => c !== null) as number[];
+
+    if (changes.length === 0) return 0.1;
+
+    // Calculate coefficient of variation
+    const mean = changes.reduce((sum, c) => sum + c, 0) / changes.length;
+    const variance = changes.reduce((sum, c) => sum + Math.pow(c - mean, 2), 0) / changes.length;
+    const stddev = Math.sqrt(variance);
+
+    return mean !== 0 ? Math.abs(stddev / mean) : 0.1;
+  }
+}
+
+---END---
+
+FILE: src/paper/positionSizer.ts
+---
+/**
+ * Dynamic Position Sizer
+ * Uses Kelly Criterion and volatility-based sizing for optimal risk-adjusted returns
+ */
+
+import { PaperTrade } from '../types';
+
+export interface PositionSizeRecommendation {
+  sizeXRP: number;
+  method: 'kelly' | 'volatility' | 'fixed';
+  kellyFraction: number;
+  riskPercent: number;
+  reasoning: string;
+}
+
+export class PositionSizer {
+  private readonly MAX_POSITION_PERCENT = 5; // Max 5% of bankroll per trade
+  private readonly MIN_POSITION_XRP = 1; // Minimum 1 XRP
+  private readonly KELLY_DIVISOR = 2; // Use half-Kelly for safety
+
+  /**
+   * Calculate optimal position size using Kelly Criterion
+   */
+  calculatePositionSize(
+    bankrollXRP: number,
+    winRate: number,      // 0-1 (e.g., 0.6 = 60%)
+    avgWinXRP: number,    // Average winning trade PnL
+    avgLossXRP: number,   // Average losing trade PnL (positive number)
+    volatility: number,   // Price volatility (0-1)
+    score: number         // Token score (0-100)
+  ): PositionSizeRecommendation {
+    // Guard against invalid inputs
+    if (winRate <= 0 || winRate >= 1) {
+      return this.fallbackSize(bankrollXRP, score, 'Invalid win rate');
+    }
+    if (avgLossXRP <= 0) {
+      return this.fallbackSize(bankrollXRP, score, 'Invalid avg loss');
+    }
+
+    // Kelly Criterion: f* = (bp - q) / b
+    // b = odds (avgWin / avgLoss)
+    // p = win probability
+    // q = 1 - p (loss probability)
+    const b = avgWinXRP / avgLossXRP;
+    const p = winRate;
+    const q = 1 - p;
+
+    const kellyFraction = (b * p - q) / b;
+
+    // Use half-Kelly for safety
+    const safeKelly = Math.max(0, kellyFraction / this.KELLY_DIVISOR);
+
+    // Adjust based on volatility (high vol = smaller position)
+    const volAdjustment = this.getVolatilityAdjustment(volatility);
+
+    // Adjust based on token score (high score = larger position)
+    const scoreAdjustment = score / 100;
+
+    // Final position size
+    let positionPercent = safeKelly * volAdjustment * scoreAdjustment * 100;
+
+    // Cap at maximum
+    positionPercent = Math.min(positionPercent, this.MAX_POSITION_PERCENT);
+
+    const sizeXRP = Math.max(
+      this.MIN_POSITION_XRP,
+      bankrollXRP * (positionPercent / 100)
+    );
+
+    return {
+      sizeXRP: parseFloat(sizeXRP.toFixed(2)),
+      method: 'kelly',
+      kellyFraction: parseFloat(kellyFraction.toFixed(4)),
+      riskPercent: parseFloat(positionPercent.toFixed(2)),
+      reasoning: `Kelly=${(kellyFraction * 100).toFixed(1)}%, Vol adj=${volAdjustment.toFixed(2)}, Score adj=${scoreAdjustment.toFixed(2)}`,
+    };
+  }
+
+  /**
+   * Calculate position size based on volatility alone (fallback)
+   */
+  calculateVolatilityBasedSize(
+    bankrollXRP: number,
+    volatility: number,
+    score: number
+  ): PositionSizeRecommendation {
+    const basePercent = 3; // Base 3% of bankroll
+    const volAdjustment = this.getVolatilityAdjustment(volatility);
+    const scoreAdjustment = score / 100;
+
+    let positionPercent = basePercent * volAdjustment * scoreAdjustment;
+    positionPercent = Math.min(positionPercent, this.MAX_POSITION_PERCENT);
+
+    const sizeXRP = Math.max(
+      this.MIN_POSITION_XRP,
+      bankrollXRP * (positionPercent / 100)
+    );
+
+    return {
+      sizeXRP: parseFloat(sizeXRP.toFixed(2)),
+      method: 'volatility',
+      kellyFraction: 0,
+      riskPercent: parseFloat(positionPercent.toFixed(2)),
+      reasoning: `Base 3%, Vol adj=${volAdjustment.toFixed(2)}, Score adj=${scoreAdjustment.toFixed(2)}`,
+    };
+  }
+
+  /**
+   * Get volatility adjustment factor
+   * High volatility = smaller positions
+   */
+  private getVolatilityAdjustment(volatility: number): number {
+    if (volatility > 0.3) return 0.5;  // Very high vol: 50% of base
+    if (volatility > 0.2) return 0.7;  // High vol: 70%
+    if (volatility > 0.1) return 0.85; // Moderate vol: 85%
+    if (volatility > 0.05) return 1.0; // Low vol: 100%
+    return 1.2;                         // Very stable: 120% (but capped by MAX)
+  }
+
+  /**
+   * Fallback position size when data is insufficient
+   */
+  private fallbackSize(bankrollXRP: number, score: number, reason: string): PositionSizeRecommendation {
+    // Conservative default: 2% of bankroll
+    const basePercent = 2;
+    const scoreAdjustment = score / 100;
+    let positionPercent = basePercent * scoreAdjustment;
+    positionPercent = Math.min(positionPercent, this.MAX_POSITION_PERCENT);
+
+    const sizeXRP = Math.max(
+      this.MIN_POSITION_XRP,
+      bankrollXRP * (positionPercent / 100)
+    );
+
+    return {
+      sizeXRP: parseFloat(sizeXRP.toFixed(2)),
+      method: 'fixed',
+      kellyFraction: 0,
+      riskPercent: parseFloat(positionPercent.toFixed(2)),
+      reasoning: `Fallback (${reason}): ${basePercent}% base * score adj`,
+    };
+  }
+}
+
+---END---
+
+FILE: src/risk/riskFilters.ts
+---
+/**
+ * Risk Filter Module
+ * Evaluates tokens for rug-pull risks and other red flags
+ */
+
+import { TrackedToken, AMMPool, MarketSnapshot, RiskFlags } from '../types';
+import { BotConfig } from '../config';
+import { debug } from '../utils/logger';
+
+export class RiskFilter {
+  private config: BotConfig;
+
+  constructor(config: BotConfig) {
+    this.config = config;
+  }
+
+  /**
+   * Evaluate all risk flags for a token
+   */
+  evaluate(token: TrackedToken, snapshot: MarketSnapshot | null, pool: AMMPool | null): RiskFlags {
+    const flags: string[] = [];
+
+    // Check liquidity
+    const lowLiquidity = this.checkLowLiquidity(snapshot);
+    if (lowLiquidity) flags.push('low_liquidity');
+
+    // Check spread
+    const wideSpread = this.checkWideSpread(snapshot);
+    if (wideSpread) flags.push('wide_spread');
+
+    // Check holder count
+    const lowHolderCount = this.checkLowHolders(snapshot);
+    if (lowHolderCount) flags.push('low_holders');
+
+    // Check buy activity
+    const noBuyActivity = this.checkNoBuyActivity(snapshot);
+    if (noBuyActivity) flags.push('no_buy_activity');
+
+    // Check concentrated supply (mock - needs issuer analysis)
+    const concentratedSupply = this.checkConcentratedSupply(token, pool);
+    if (concentratedSupply) flags.push('concentrated_supply');
+
+    // Check for dev dumping (mock - needs transaction history analysis)
+    const devDumping = this.checkDevDumping(token);
+    if (devDumping) flags.push('dev_dumping');
+
+    // Check for sudden liquidity removal
+    const liquidityRemoved = this.checkLiquidityRemoved(pool);
+    if (liquidityRemoved) flags.push('liquidity_removed');
+
+    // Check single wallet price manipulation
+    const singleWalletPrice = this.checkSingleWalletPrice(snapshot);
+    if (singleWalletPrice) flags.push('single_wallet_price');
+
+    return {
+      lowLiquidity,
+      wideSpread,
+      concentratedSupply,
+      devDumping,
+      liquidityRemoved,
+      lowHolderCount,
+      noBuyActivity,
+      singleWalletPrice,
+      flags,
+    };
+  }
+
+  /**
+   * Check if liquidity is below minimum threshold
+   */
+  private checkLowLiquidity(snapshot: MarketSnapshot | null): boolean {
+    if (!snapshot || snapshot.liquidityXRP === null) return true;
+    return snapshot.liquidityXRP < this.config.minLiquidityXRP;
+  }
+
+  /**
+   * Check if spread is too wide (>8% default)
+   */
+  private checkWideSpread(snapshot: MarketSnapshot | null): boolean {
+    if (!snapshot || snapshot.spreadPercent === null) return true;
+    return snapshot.spreadPercent > 8;
+  }
+
+  /**
+   * Check if holder count is too low (<10 estimated)
+   */
+  private checkLowHolders(snapshot: MarketSnapshot | null): boolean {
+    if (!snapshot || snapshot.holderEstimate === null) return false; // Unknown = not flagged
+    return snapshot.holderEstimate < 10;
+  }
+
+  /**
+   * Check if there's no real buy activity
+   */
+  private checkNoBuyActivity(snapshot: MarketSnapshot | null): boolean {
+    if (!snapshot) return true;
+    // If both buy count and volume are zero, flag it
+    return snapshot.buyCount5m === 0 && snapshot.buyVolume5m === 0;
+  }
+
+  /**
+   * Check if supply is concentrated in few wallets
+   * TODO: Implement by analyzing trustline distribution
+   */
+  private checkConcentratedSupply(token: TrackedToken, pool: AMMPool | null): boolean {
+    // Mock implementation - would need to scan all trustlines for the issuer
+    // For MVP, assume not concentrated unless we have data
+    return false;
+  }
+
+  /**
+   * Check if dev/issuer wallet is dumping
+   * TODO: Implement by tracking issuer's outgoing transactions
+   */
+  private checkDevDumping(token: TrackedToken): boolean {
+    // Mock implementation - would need transaction history analysis
+    return false;
+  }
+
+  /**
+   * Check if liquidity was suddenly removed
+   */
+  private checkLiquidityRemoved(pool: AMMPool | null): boolean {
+    // This would compare current vs previous pool state
+    // For MVP, we don't track historical pool states in memory
+    return false;
+  }
+
+  /**
+   * Check if price movement appears caused by single wallet
+   * TODO: Implement by analyzing transaction sources
+   */
+  private checkSingleWalletPrice(snapshot: MarketSnapshot | null): boolean {
+    // Mock implementation
+    return false;
+  }
+
+  /**
+   * Check if token passes all critical risk filters
+   */
+  isSafe(riskFlags: RiskFlags): boolean {
+    // Critical flags that must be false
+    return !riskFlags.lowLiquidity && !riskFlags.wideSpread;
+  }
+
+  /**
+   * Get risk severity level
+   */
+  getSeverity(riskFlags: RiskFlags): 'low' | 'medium' | 'high' | 'critical' {
+    const flagCount = riskFlags.flags.length;
+
+    if (flagCount === 0) return 'low';
+    if (flagCount <= 2) return 'medium';
+    if (flagCount <= 4) return 'high';
+    return 'critical';
+  }
+}
+
+---END---
+
+FILE: src/scanner/ammEvents.ts
+---
+/**
+ * AMM Events Scanner
+ * Detects AMMCreate, AMMDeposit, AMMWithdraw events
+ */
+
+import { XRPLClient } from '../xrpl/client';
+import { AMMPool, TxEvent } from '../types';
+import { info, debug, warn } from '../utils/logger';
+import { Database } from '../db/database';
+
+export class AMMScanner {
+  private xrplClient: XRPLClient;
+  private db: Database;
+  private trackedPools: Map<string, AMMPool> = new Map();
+
+  constructor(xrplClient: XRPLClient, db: Database) {
+    this.xrplClient = xrplClient;
+    this.db = db;
+  }
+
+  /**
+   * Initialize by loading existing pools from DB
+   */
+  async initialize(): Promise<void> {
+    const existingPools = this.db.getAMMPools();
+    for (const pool of existingPools) {
+      this.trackedPools.set(pool.poolId, pool);
+    }
+    info(`Loaded ${this.trackedPools.size} AMM pools from database`);
+  }
+
+  /**
+   * Process a transaction to detect AMM events
+   */
+  async processTransaction(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
+    try {
+      const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+      if (!txType) return null;
+
+      switch (txType) {
+        case 'AMMCreate':
+          return await this.handleAMMCreate(tx);
+        case 'AMMDeposit':
+          return await this.handleAMMDeposit(tx);
+        case 'AMMWithdraw':
+          return await this.handleAMMWithdraw(tx);
+        case 'AMMTrade':
+          return await this.handleAMMTrade(tx);
+        case 'AMMVote':
+          return await this.handleAMMVote(tx);
+        default:
+          return null;
+      }
+    } catch (err) {
+      warn(`Error processing AMM transaction: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Handle AMMCreate - new liquidity pool
+   */
+  private async handleAMMCreate(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
+    const transaction = tx.tx || tx.transaction;
+    if (!transaction) return null;
+
+    const asset = transaction.Asset;
+    const asset2 = transaction.Asset2;
+
+    if (!asset || !asset2) return null;
+
+    // Build pool ID from the two assets
+    const poolId = this.buildPoolId(asset, asset2);
+
+    // Check if already tracked
+    if (this.trackedPools.has(poolId)) {
+      return { type: 'existing_pool' };
+    }
+
+    // Get initial amounts from Amount and Amount2 fields
+    const amount1 = transaction.Amount || '0';
+    const amount2 = transaction.Amount2 || '0';
+
+    const pool: AMMPool = {
+      asset1: this.normalizeAsset(asset),
+      asset2: this.normalizeAsset(asset2),
+      amount1: typeof amount1 === 'string' ? amount1 : JSON.stringify(amount1),
+      amount2: typeof amount2 === 'string' ? amount2 : JSON.stringify(amount2),
+      lpBalance: '0', // Will be updated from AMM info
+      tradingFee: transaction.TradingFee || 0,
+      poolId,
+      createdAt: Date.now(),
+      lastUpdated: Date.now(),
+    };
+
+    this.trackedPools.set(poolId, pool);
+    this.db.saveAMMPool(pool);
+
+    info(`🏊 New AMM pool created: ${poolId}`);
+    debug(`AMMCreate: Asset1=${JSON.stringify(asset)}, Asset2=${JSON.stringify(asset2)}`);
+
+    return { type: 'new_pool', pool };
+  }
+
+  /**
+   * Handle AMMDeposit - liquidity added
+   */
+  private async handleAMMDeposit(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
+    const transaction = tx.tx || tx.transaction;
+    if (!transaction) return null;
+
+    const asset = transaction.Asset;
+    const asset2 = transaction.Asset2;
+
+    if (!asset || !asset2) return null;
+
+    const poolId = this.buildPoolId(asset, asset2);
+    const existingPool = this.trackedPools.get(poolId);
+
+    if (existingPool) {
+      existingPool.lastUpdated = Date.now();
+      this.trackedPools.set(poolId, existingPool);
+      this.db.updateAMMPool(existingPool);
+      return { type: 'liquidity_added', pool: existingPool };
+    }
+
+    // Pool not tracked yet - fetch full info
+    const ammInfo = await this.xrplClient.getAMMInfo(
+      this.normalizeAsset(asset),
+      this.normalizeAsset(asset2)
+    );
+
+    if (ammInfo) {
+      const pool = this.parseAMMInfo(ammInfo, asset, asset2);
+      this.trackedPools.set(poolId, pool);
+      this.db.saveAMMPool(pool);
+      return { type: 'liquidity_added', pool };
+    }
+
+    return { type: 'liquidity_added_unknown' };
+  }
+
+  /**
+   * Handle AMMWithdraw - liquidity removed
+   */
+  private async handleAMMWithdraw(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
+    const transaction = tx.tx || tx.transaction;
+    if (!transaction) return null;
+
+    const asset = transaction.Asset;
+    const asset2 = transaction.Asset2;
+
+    if (!asset || !asset2) return null;
+
+    const poolId = this.buildPoolId(asset, asset2);
+    const existingPool = this.trackedPools.get(poolId);
+
+    // Fetch current state to detect liquidity change
+    const ammInfo = await this.xrplClient.getAMMInfo(
+      this.normalizeAsset(asset),
+      this.normalizeAsset(asset2)
+    );
+
+    if (ammInfo && existingPool) {
+      const prevLiquidity = parseFloat(existingPool.amount1);
+      const newPool = this.parseAMMInfo(ammInfo, asset, asset2);
+
+      // Detect significant liquidity removal (>20%)
+      const newLiquidity = parseFloat(newPool.amount1);
+      if (prevLiquidity > 0 && newLiquidity < prevLiquidity * 0.8) {
+        info(`⚠️ Significant liquidity removed from pool ${poolId}`);
+        return { type: 'liquidity_removed', pool: newPool };
+      }
+
+      this.trackedPools.set(poolId, newPool);
+      this.db.updateAMMPool(newPool);
+      return { type: 'liquidity_withdrawn', pool: newPool };
+    }
+
+    return { type: 'liquidity_withdrawn_unknown' };
+  }
+
+  /**
+   * Handle AMMTrade - swap event
+   */
+  private async handleAMMTrade(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
+    // AMM trades are also captured as Payment transactions
+    // This handler is for additional metadata if needed
+    return { type: 'amm_trade' };
+  }
+
+  /**
+   * Handle AMMVote - trading fee vote
+   */
+  private async handleAMMVote(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
+    return { type: 'amm_vote' };
+  }
+
+  /**
+   * Build a unique pool ID from two assets
+   */
+  private buildPoolId(asset1: any, asset2: any): string {
+    const a1 = this.normalizeAsset(asset1);
+    const a2 = this.normalizeAsset(asset2);
+
+    // Sort to ensure consistent ID regardless of order
+    const key1 = `${a1.currency}:${a1.issuer || 'XRP'}`;
+    const key2 = `${a2.currency}:${a2.issuer || 'XRP'}`;
+
+    return [key1, key2].sort().join('|');
+  }
+
+  /**
+   * Normalize asset object
+   */
+  private normalizeAsset(asset: any): { currency: string; issuer?: string } {
+    if (typeof asset === 'string') {
+      return { currency: 'XRP' };
+    }
+    return {
+      currency: asset.currency,
+      issuer: asset.issuer,
+    };
+  }
+
+  /**
+   * Parse AMM info response into AMMPool
+   */
+  private parseAMMInfo(ammInfo: any, asset1: any, asset2: any): AMMPool {
+    const poolId = this.buildPoolId(asset1, asset2);
+
+    return {
+      asset1: this.normalizeAsset(asset1),
+      asset2: this.normalizeAsset(asset2),
+      amount1: ammInfo.amount?.value || ammInfo.amount || '0',
+      amount2: ammInfo.amount2?.value || ammInfo.amount2 || '0',
+      lpBalance: ammInfo.lp_balance || '0',
+      tradingFee: ammInfo.trading_fee || 0,
+      poolId,
+      createdAt: Date.now(),
+      lastUpdated: Date.now(),
+    };
+  }
+
+  /**
+   * Get all tracked pools
+   */
+  getTrackedPools(): AMMPool[] {
+    return Array.from(this.trackedPools.values());
+  }
+
+  /**
+   * Get pool count
+   */
+  getPoolCount(): number {
+    return this.trackedPools.size;
+  }
+
+  /**
+   * Find pool by token
+   */
+  findPoolByToken(currency: string, issuer: string): AMMPool | null {
+    for (const pool of this.trackedPools.values()) {
+      if (
+        (pool.asset1.currency === currency && pool.asset1.issuer === issuer) ||
+        (pool.asset2.currency === currency && pool.asset2.issuer === issuer)
+      ) {
+        return pool;
+      }
+    }
+    return null;
+  }
+}
+
+---END---
+
+FILE: src/scanner/tokenDiscovery.ts
+---
+/**
+ * Token Discovery Module
+ * Detects new tokens, trustlines, and early DEX activity
+ */
+
+import { XRPLClient } from '../xrpl/client';
+import { TrackedToken, TxEvent } from '../types';
+import { info, debug, warn } from '../utils/logger';
+import { Database } from '../db/database';
+
+export class TokenDiscovery {
+  private xrplClient: XRPLClient;
+  private db: Database;
+  private trackedTokens: Map<string, TrackedToken> = new Map();
+  private knownIssuers: Set<string> = new Set();
+
+  // FIX #12: Simple issuer reputation tracking
+  private issuerTrustSetCounts: Map<string, number> = new Map(); // How many tokens an issuer has created
+  private readonly SPAM_THRESHOLD = 50; // Flag issuers with 50+ tokens as potential spammers
+
+  constructor(xrplClient: XRPLClient, db: Database) {
+    this.xrplClient = xrplClient;
+    this.db = db;
+  }
+
+  /**
+   * Initialize by loading existing tracked tokens from DB
+   */
+  async initialize(): Promise<void> {
+    const existingTokens = this.db.getTrackedTokens();
+    for (const token of existingTokens) {
+      const key = `${token.currency}:${token.issuer}`;
+      this.trackedTokens.set(key, token);
+      this.knownIssuers.add(token.issuer);
+    }
+    info(`Loaded ${this.trackedTokens.size} tracked tokens from database`);
+  }
+
+  /**
+   * Process a transaction event to detect new tokens
+   * FIX #5: Only detect TrustSet transactions, NOT Payment transactions.
+   * Payment transactions cause massive false positives from normal token transfers.
+   */
+  async processTransaction(tx: any): Promise<TrackedToken | null> {
+    try {
+      const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+
+      if (!txType) return null;
+
+      // Only detect TrustSet transactions (new token trustlines)
+      // Removed Payment detection to avoid false positives from established token transfers
+      if (txType === 'TrustSet') {
+        return await this.handleTrustSet(tx);
+      }
+
+      return null;
+    } catch (err) {
+      warn(`Error processing transaction: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Handle TrustSet transaction - detects new token relationships
+   */
+  private async handleTrustSet(tx: any): Promise<TrackedToken | null> {
+    const transaction = tx.tx || tx.transaction;
+    if (!transaction) return null;
+
+    const limitAmount = transaction.LimitAmount;
+    if (!limitAmount || typeof limitAmount !== 'object') return null;
+
+    const currency = limitAmount.currency;
+    const issuer = limitAmount.issuer;
+    const account = transaction.Account;
+
+    // Skip XRP
+    if (currency === 'XRP') return null;
+
+    // Skip if issuer is the same as account (self-trustline, rare but possible)
+    if (issuer === account) return null;
+
+    const key = `${currency}:${issuer}`;
+
+    // Check if we're already tracking this token
+    if (this.trackedTokens.has(key)) {
+      // Update last seen timestamp
+      const token = this.trackedTokens.get(key)!;
+      token.lastUpdated = Date.now();
+      this.trackedTokens.set(key, token);
+      return null; // Already known
+    }
+
+    // FIX #12: Track issuer reputation
+    const currentCount = this.issuerTrustSetCounts.get(issuer) || 0;
+    this.issuerTrustSetCounts.set(issuer, currentCount + 1);
+
+    const isSpamIssuer = currentCount + 1 >= this.SPAM_THRESHOLD;
+
+    if (isSpamIssuer) {
+      warn(`⚠️ Issuer ${issuer} has created ${currentCount + 1} tokens - possible spam`);
+    }
+
+    // New token detected!
+    const newToken: TrackedToken = {
+      currency,
+      issuer,
+      firstSeen: Date.now(),
+      lastUpdated: Date.now(),
+    };
+
+    this.trackedTokens.set(key, newToken);
+    this.knownIssuers.add(issuer);
+
+    // Save to database
+    this.db.saveToken(newToken);
+
+    if (isSpamIssuer) {
+      info(`🆕 New token detected (SPAM ISSUER): ${currency} issued by ${issuer}`);
+    } else {
+      info(`🆕 New token detected: ${currency} issued by ${issuer}`);
+    }
+    debug(`TrustSet from ${account} for ${currency}.${issuer}`);
+
+    return newToken;
+  }
+
+  /**
+   * Handle Payment transaction - REMOVED
+   * FIX #5: This method caused massive false positives.
+   * Every normal transfer of an established token triggered "new token" alerts.
+   * Token discovery now relies solely on TrustSet transactions.
+   */
+  // private async handlePayment(tx: any): Promise<TrackedToken | null> { ... }
+
+  /**
+   * Get all currently tracked tokens
+   */
+  getTrackedTokens(): TrackedToken[] {
+    return Array.from(this.trackedTokens.values());
+  }
+
+  /**
+   * Check if a token is being tracked
+   */
+  isTracking(currency: string, issuer: string): boolean {
+    const key = `${currency}:${issuer}`;
+    return this.trackedTokens.has(key);
+  }
+
+  /**
+   * Manually add a token to tracking (for whitelisting)
+   */
+  addToken(currency: string, issuer: string): TrackedToken {
+    const key = `${currency}:${issuer}`;
+
+    if (this.trackedTokens.has(key)) {
+      return this.trackedTokens.get(key)!;
+    }
+
+    const token: TrackedToken = {
+      currency,
+      issuer,
+      firstSeen: Date.now(),
+      lastUpdated: Date.now(),
+    };
+
+    this.trackedTokens.set(key, token);
+    this.knownIssuers.add(issuer);
+    this.db.saveToken(token);
+
+    info(`Manually added token: ${currency}:${issuer}`);
+    return token;
+  }
+
+  /**
+   * Get token count
+   */
+  getTokenCount(): number {
+    return this.trackedTokens.size;
+  }
+
+  /**
+   * FIX #12: Check if an issuer is flagged as spam
+   */
+  isSpamIssuer(issuer: string): boolean {
+    const count = this.issuerTrustSetCounts.get(issuer) || 0;
+    return count >= this.SPAM_THRESHOLD;
+  }
+
+  /**
+   * FIX #12: Get issuer trust set count
+   */
+  getIssuerTokenCount(issuer: string): number {
+    return this.issuerTrustSetCounts.get(issuer) || 0;
+  }
+}
+
+---END---
+
+FILE: src/scoring/correlationDetector.ts
+---
+/**
+ * Correlation Detector
+ * Identifies coordinated pumps and correlated token movements
+ */
+
+import { info, warn } from '../utils/logger';
+
+interface TokenMovement {
+  currency: string;
+  issuer: string;
+  priceChange: number;
+  timestamp: number;
+  volume: number;
+}
+
+interface PumpCluster {
+  issuer: string;
+  tokens: string[];
+  startTime: number;
+  avgGain: number;
+  tokenCount: number;
+}
+
+export class CorrelationDetector {
+  private recentMovements: TokenMovement[] = [];
+  private readonly WINDOW_MS = 60 * 60 * 1000; // 1 hour window
+  private readonly MAX_MOVEMENTS = 1000;
+  private readonly MIN_CLUSTER_SIZE = 3; // Min tokens from same issuer to flag
+  private readonly MIN_GAIN_PERCENT = 20; // Min gain to consider significant
+
+  /**
+   * Record a token price movement
+   */
+  recordMovement(currency: string, issuer: string, priceChange: number, volume: number): void {
+    this.recentMovements.push({
+      currency,
+      issuer,
+      priceChange,
+      timestamp: Date.now(),
+      volume,
+    });
+
+    // Prune old movements
+    if (this.recentMovements.length > this.MAX_MOVEMENTS) {
+      this.recentMovements.splice(0, this.recentMovements.length - this.MAX_MOVEMENTS);
+    }
+
+    this.pruneOldMovements();
+  }
+
+  /**
+   * Check for coordinated pump patterns
+   * Returns clusters of tokens from same issuer pumping simultaneously
+   */
+  detectPumpClusters(): PumpCluster[] {
+    const now = Date.now();
+    const clusters: Map<string, PumpCluster> = new Map();
+
+    // Group significant gains by issuer
+    for (const movement of this.recentMovements) {
+      if (movement.priceChange < this.MIN_GAIN_PERCENT) continue;
+
+      let cluster = clusters.get(movement.issuer);
+      if (!cluster) {
+        cluster = {
+          issuer: movement.issuer,
+          tokens: [],
+          startTime: movement.timestamp,
+          avgGain: 0,
+          tokenCount: 0,
+        };
+        clusters.set(movement.issuer, cluster);
+      }
+
+      cluster.tokens.push(movement.currency);
+      cluster.tokenCount++;
+      cluster.avgGain = (cluster.avgGain * (cluster.tokenCount - 1) + movement.priceChange) / cluster.tokenCount;
+      cluster.startTime = Math.min(cluster.startTime, movement.timestamp);
+    }
+
+    // Filter to only significant clusters
+    return Array.from(clusters.values())
+      .filter(c => c.tokenCount >= this.MIN_CLUSTER_SIZE && c.avgGain >= this.MIN_GAIN_PERCENT)
+      .sort((a, b) => b.avgGain - a.avgGain);
+  }
+
+  /**
+   * Check if a specific token is part of a suspicious cluster
+   */
+  isInSuspiciousCluster(currency: string, issuer: string): boolean {
+    const clusters = this.detectPumpClusters();
+    return clusters.some(c =>
+      c.issuer === issuer && c.tokens.includes(currency)
+    );
+  }
+
+  /**
+   * Get correlation warning message for a token
+   */
+  getCorrelationWarning(currency: string, issuer: string): string | null {
+    const clusters = this.detectPumpClusters();
+    const matchingCluster = clusters.find(c =>
+      c.issuer === issuer && c.tokens.includes(currency)
+    );
+
+    if (!matchingCluster) return null;
+
+    return `⚠️ CORRELATED PUMP: ${matchingCluster.tokenCount} tokens from same issuer pumping (avg +${matchingCluster.avgGain.toFixed(0)}%). Possible coordinated manipulation.`;
+  }
+
+  /**
+   * Detect wash trading patterns (same wallet buying/selling repeatedly)
+   */
+  detectWashTrading(uniqueBuyers: number, uniqueSellers: number, buyVolume: number, sellVolume: number): boolean {
+    // Wash trading indicators:
+    // 1. Very few unique participants relative to volume
+    // 2. Similar buy/sell volumes (circular trading)
+    // 3. Low unique buyer/seller count
+
+    if (uniqueBuyers === 0 && uniqueSellers === 0) return false;
+
+    const totalUnique = uniqueBuyers + uniqueSellers;
+    const totalVolume = buyVolume + sellVolume;
+
+    // If volume is high but unique participants is very low, suspicious
+    if (totalVolume > 100 && totalUnique <= 2) {
+      return true;
+    }
+
+    // If buy and sell volumes are very similar (within 10%) and low unique count
+    if (totalUnique <= 3 && buyVolume > 0 && sellVolume > 0) {
+      const volumeRatio = Math.abs(buyVolume - sellVolume) / Math.max(buyVolume, sellVolume);
+      if (volumeRatio < 0.1) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Prune movements outside the time window
+   */
+  private pruneOldMovements(): void {
+    const cutoff = Date.now() - this.WINDOW_MS;
+    this.recentMovements = this.recentMovements.filter(m => m.timestamp > cutoff);
+  }
+
+  /**
+   * Get summary of detected correlations
+   */
+  getSummary(): { clusterCount: number; suspiciousIssuers: string[] } {
+    const clusters = this.detectPumpClusters();
+    return {
+      clusterCount: clusters.length,
+      suspiciousIssuers: clusters.map(c => c.issuer),
+    };
+  }
+}
+
+---END---
+
+FILE: src/scoring/issuerReputation.ts
+---
+/**
+ * Issuer Reputation Module
+ * Tracks issuer behavior patterns to identify trustworthy vs suspicious token creators
+ */
+
+import { info, warn } from '../utils/logger';
+
+interface IssuerStats {
+  address: string;
+  tokensLaunched: number;
+  tokensWithAMM: number;
+  tokensRugPulled: number; // Liquidity removed within 24h
+  tokensSurvived7d: number; // Tokens still active after 7 days
+  avgLiquidityXRP: number;
+  firstSeen: number;
+  lastUpdated: number;
+}
+
+export class IssuerReputation {
+  private issuers: Map<string, IssuerStats> = new Map();
+  private readonly RUG_PULL_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+  private readonly SURVIVAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+  /**
+   * Register a new token launch for an issuer
+   */
+  registerTokenLaunch(issuer: string, currency: string): void {
+    const stats = this.getOrCreateIssuer(issuer);
+    stats.tokensLaunched++;
+    stats.lastUpdated = Date.now();
+  }
+
+  /**
+   * Register AMM pool creation for a token
+   */
+  registerAMMPool(issuer: string, currency: string, liquidityXRP: number): void {
+    const stats = this.getOrCreateIssuer(issuer);
+    stats.tokensWithAMM++;
+    stats.avgLiquidityXRP = (stats.avgLiquidityXRP * (stats.tokensWithAMM - 1) + liquidityXRP) / stats.tokensWithAMM;
+    stats.lastUpdated = Date.now();
+  }
+
+  /**
+   * Register rug pull (liquidity removed within 24h of launch)
+   */
+  registerRugPull(issuer: string, currency: string): void {
+    const stats = this.getOrCreateIssuer(issuer);
+    stats.tokensRugPulled++;
+    stats.lastUpdated = Date.now();
+    warn(`🚨 Rug pull detected for issuer ${issuer} token ${currency}`);
+  }
+
+  /**
+   * Register token survival past 7 days
+   */
+  registerSurvival(issuer: string, currency: string): void {
+    const stats = this.getOrCreateIssuer(issuer);
+    stats.tokensSurvived7d++;
+    stats.lastUpdated = Date.now();
+  }
+
+  /**
+   * Get trust score for an issuer (0-100)
+   */
+  getTrustScore(issuer: string): number {
+    const stats = this.issuers.get(issuer);
+    if (!stats || stats.tokensLaunched === 0) return 50; // Neutral for unknown issuers
+
+    let score = 50; // Start neutral
+
+    // Factor 1: AMM creation rate (positive)
+    const ammRate = stats.tokensLaunched > 0 ? stats.tokensWithAMM / stats.tokensLaunched : 0;
+    score += ammRate * 20; // Up to +20 for 100% AMM rate
+
+    // Factor 2: Rug pull rate (negative)
+    const rugRate = stats.tokensLaunched > 0 ? stats.tokensRugPulled / stats.tokensLaunched : 0;
+    score -= rugRate * 40; // Up to -40 for 100% rug rate
+
+    // Factor 3: Survival rate (positive)
+    const survivalRate = stats.tokensLaunched > 0 ? stats.tokensSurvived7d / stats.tokensLaunched : 0;
+    score += survivalRate * 20; // Up to +20 for 100% survival
+
+    // Factor 4: Average liquidity (positive)
+    if (stats.avgLiquidityXRP > 10000) score += 10;
+    else if (stats.avgLiquidityXRP > 5000) score += 5;
+    else if (stats.avgLiquidityXRP < 1000) score -= 5;
+
+    // Clamp to 0-100
+    return Math.max(0, Math.min(100, Math.round(score)));
+  }
+
+  /**
+   * Get issuer stats
+   */
+  getStats(issuer: string): IssuerStats | null {
+    return this.issuers.get(issuer) || null;
+  }
+
+  /**
+   * Check if issuer is flagged as suspicious
+   */
+  isSuspicious(issuer: string): boolean {
+    const score = this.getTrustScore(issuer);
+    return score < 30;
+  }
+
+  /**
+   * Get or create issuer stats
+   */
+  private getOrCreateIssuer(issuer: string): IssuerStats {
+    let stats = this.issuers.get(issuer);
+    if (!stats) {
+      stats = {
+        address: issuer,
+        tokensLaunched: 0,
+        tokensWithAMM: 0,
+        tokensRugPulled: 0,
+        tokensSurvived7d: 0,
+        avgLiquidityXRP: 0,
+        firstSeen: Date.now(),
+        lastUpdated: Date.now(),
+      };
+      this.issuers.set(issuer, stats);
+    }
+    return stats;
+  }
+
+  /**
+   * Get total tracked issuers
+   */
+  getTrackedCount(): number {
+    return this.issuers.size;
+  }
+
+  /**
+   * Get summary of all issuers
+   */
+  getSummary(): Array<{ address: string; trustScore: number; tokensLaunched: number; rugPulls: number }> {
+    return Array.from(this.issuers.values()).map(stats => ({
+      address: stats.address,
+      trustScore: this.getTrustScore(stats.address),
+      tokensLaunched: stats.tokensLaunched,
+      rugPulls: stats.tokensRugPulled,
+    })).sort((a, b) => a.trustScore - b.trustScore);
+  }
+}
+
+---END---
+
+FILE: src/scoring/multiTimeframeScorer.ts
+---
+/**
+ * Multi-Timeframe Scorer
+ * Calculates separate scores for 5m, 15m, and 1h trends
+ */
+
+import { MarketSnapshot, TokenScore } from '../types';
+import { BotConfig } from '../config';
+
+export interface TimeframeScores {
+  score5m: number;   // Short-term momentum
+  score15m: number;  // Medium-term trend
+  score1h: number;   // Longer-term trend
+  consensus: number; // Weighted average
+  trend: 'bullish' | 'bearish' | 'neutral';
+}
+
+export class MultiTimeframeScorer {
+  private config: BotConfig;
+
+  constructor(config: BotConfig) {
+    this.config = config;
+  }
+
+  /**
+   * Calculate multi-timeframe scores from price changes
+   */
+  calculate(snapshot: MarketSnapshot | null, baseScore: number): TimeframeScores {
+    if (!snapshot) {
+      return {
+        score5m: baseScore,
+        score15m: baseScore,
+        score1h: baseScore,
+        consensus: baseScore,
+        trend: 'neutral',
+      };
+    }
+
+    // Adjust base score based on price momentum at each timeframe
+    const score5m = this.adjustForMomentum(baseScore, snapshot.priceChange5m, 0.3);
+    const score15m = this.adjustForMomentum(baseScore, snapshot.priceChange15m, 0.2);
+    const score1h = this.adjustForMomentum(baseScore, snapshot.priceChange1h, 0.1);
+
+    // Weighted consensus: 50% base, 20% 5m, 15% 15m, 15% 1h
+    const consensus = Math.round(
+      baseScore * 0.5 +
+      score5m * 0.2 +
+      score15m * 0.15 +
+      score1h * 0.15
+    );
+
+    // Determine trend
+    const trend = this.determineTrend(snapshot.priceChange5m, snapshot.priceChange15m, snapshot.priceChange1h);
+
+    return {
+      score5m: Math.round(score5m),
+      score15m: Math.round(score15m),
+      score1h: Math.round(score1h),
+      consensus: Math.max(0, Math.min(100, consensus)),
+      trend,
+    };
+  }
+
+  /**
+   * Adjust score based on price momentum
+   * @param baseScore - Original score
+   * @param priceChange - Price change percentage
+   * @param sensitivity - How much to adjust (0-1)
+   */
+  private adjustForMomentum(baseScore: number, priceChange: number | null, sensitivity: number): number {
+    if (priceChange === null) return baseScore;
+
+    // Positive momentum boosts score, negative reduces it
+    let adjustment = 0;
+
+    if (priceChange > 50) adjustment = 20;
+    else if (priceChange > 20) adjustment = 15;
+    else if (priceChange > 10) adjustment = 10;
+    else if (priceChange > 5) adjustment = 5;
+    else if (priceChange > 0) adjustment = 2;
+    else if (priceChange > -5) adjustment = -2;
+    else if (priceChange > -10) adjustment = -5;
+    else if (priceChange > -20) adjustment = -10;
+    else adjustment = -15;
+
+    // Apply sensitivity
+    adjustment *= sensitivity;
+
+    return Math.max(0, Math.min(100, baseScore + adjustment));
+  }
+
+  /**
+   * Determine overall trend from multiple timeframes
+   */
+  private determineTrend(
+    change5m: number | null,
+    change15m: number | null,
+    change1h: number | null
+  ): 'bullish' | 'bearish' | 'neutral' {
+    const changes = [change5m, change15m, change1h].filter(c => c !== null) as number[];
+    if (changes.length === 0) return 'neutral';
+
+    const positiveCount = changes.filter(c => c > 0).length;
+    const negativeCount = changes.filter(c => c < 0).length;
+
+    if (positiveCount >= 2) return 'bullish';
+    if (negativeCount >= 2) return 'bearish';
+    return 'neutral';
+  }
+
+  /**
+   * Check if timeframes agree (all bullish or all bearish)
+   */
+  hasConsensus(scores: TimeframeScores): boolean {
+    if (scores.trend === 'neutral') return false;
+
+    // All timeframes should point in same direction
+    const allBullish = scores.score5m > 60 && scores.score15m > 55 && scores.score1h > 50;
+    const allBearish = scores.score5m < 40 && scores.score15m < 45 && scores.score1h < 50;
+
+    return allBullish || allBearish;
+  }
+}
+
+---END---
+
+FILE: src/scoring/tokenScorer.ts
+---
+/**
+ * Token Scoring Module
+ * Scores tokens from 0-100 based on multiple factors
+ */
+
+import { TrackedToken, AMMPool, MarketSnapshot, RiskFlags, TokenScore } from '../types';
+import { BotConfig } from '../config';
+import { debug } from '../utils/logger';
+
+export class TokenScorer {
+  private config: BotConfig;
+
+  constructor(config: BotConfig) {
+    this.config = config;
+  }
+
+  /**
+   * Calculate comprehensive score for a token
+   */
+  score(
+    token: TrackedToken,
+    snapshot: MarketSnapshot | null,
+    pool: AMMPool | null,
+    riskFlags: RiskFlags
+  ): TokenScore {
+    const w = this.config.weights;
+
+    // Calculate individual component scores (each 0-100)
+    const liquidityScore = this.scoreLiquidity(snapshot);
+    const holderGrowthScore = this.scoreHolderGrowth(snapshot);
+    const buyPressureScore = this.scoreBuyPressure(snapshot);
+    const volumeAccelScore = this.scoreVolumeAcceleration(snapshot);
+    const devSafetyScore = this.scoreDevSafety(riskFlags);
+    const whitelistBoost = this.getWhitelistBoost(token); // Manual boost, default 0
+    const spreadScore = this.scoreSpread(snapshot);
+
+    // Weighted total
+    const totalScore =
+      (liquidityScore * w.liquidity +
+        holderGrowthScore * w.holderGrowth +
+        buyPressureScore * w.buyPressure +
+        volumeAccelScore * w.volumeAccel +
+        devSafetyScore * w.devSafety +
+        whitelistBoost * w.whitelistBoost +
+        spreadScore * w.spread) /
+      100;
+
+    // Clamp to 0-100
+    const clampedScore = Math.max(0, Math.min(100, totalScore));
+
+    return {
+      tokenCurrency: token.currency,
+      tokenIssuer: token.issuer,
+      timestamp: Date.now(),
+      totalScore: Math.round(clampedScore),
+      liquidityScore: Math.round(liquidityScore),
+      holderGrowthScore: Math.round(holderGrowthScore),
+      buyPressureScore: Math.round(buyPressureScore),
+      volumeAccelScore: Math.round(volumeAccelScore),
+      devSafetyScore: Math.round(devSafetyScore),
+      whitelistBoost: Math.round(whitelistBoost),
+      spreadScore: Math.round(spreadScore),
+    };
+  }
+
+  /**
+   * Score liquidity depth (0-100)
+   * Higher liquidity = higher score
+   */
+  private scoreLiquidity(snapshot: MarketSnapshot | null): number {
+    if (!snapshot || snapshot.liquidityXRP === null) return 0;
+
+    const liquidity = snapshot.liquidityXRP;
+
+    // Scale: 0 at min threshold, 100 at 50000 XRP
+    const minLiq = this.config.minLiquidityXRP;
+    const maxLiq = 50000;
+
+    if (liquidity <= minLiq) return 0;
+    if (liquidity >= maxLiq) return 100;
+
+    return ((liquidity - minLiq) / (maxLiq - minLiq)) * 100;
+  }
+
+  /**
+   * Score holder growth (0-100)
+   * TODO: Real implementation would track holder count over time
+   */
+  private scoreHolderGrowth(snapshot: MarketSnapshot | null): number {
+    if (!snapshot || snapshot.holderEstimate === null) {
+      return 30; // Neutral score when unknown
+    }
+
+    const holders = snapshot.holderEstimate;
+
+    // Scale: 0 at 0 holders, 100 at 1000+ holders
+    if (holders <= 0) return 0;
+    if (holders >= 1000) return 100;
+
+    // Logarithmic scale for early growth
+    return Math.min(100, Math.log2(holders + 1) * 10);
+  }
+
+  /**
+   * Score buy pressure (0-100)
+   * Based on buy/sell ratio, volume, and unique participants
+   */
+  private scoreBuyPressure(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 0;
+
+    const totalTransactions = snapshot.buyCount5m + snapshot.sellCount5m;
+    if (totalTransactions === 0) return 0;
+
+    // Buy ratio component (40% of score)
+    const buyRatio = snapshot.buyCount5m / totalTransactions;
+    const ratioScore = buyRatio * 100;
+
+    // Volume component (30% of score)
+    const totalVolume = snapshot.buyVolume5m + snapshot.sellVolume5m;
+    const volumeScore = Math.min(100, (totalVolume / 100) * 100);
+
+    // Unique buyers component (30% of score) - more unique buyers = healthier
+    const totalUnique = (snapshot.uniqueBuyers5m || 0) + (snapshot.uniqueSellers5m || 0);
+    const uniqueBuyerRatio = totalUnique > 0 ? (snapshot.uniqueBuyers5m || 0) / totalUnique : 0.5;
+    const uniqueScore = uniqueBuyerRatio * 100;
+
+    return (ratioScore * 0.4 + volumeScore * 0.3 + uniqueScore * 0.3);
+  }
+
+  /**
+   * Score volume acceleration (0-100)
+   * TODO: Real implementation would compare current vs historical volume
+   */
+  private scoreVolumeAcceleration(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 0;
+
+    // For MVP, use price change as proxy for momentum
+    const change1h = snapshot.priceChange1h;
+    if (change1h === null) return 50; // Neutral
+
+    // Positive price change suggests increasing demand
+    if (change1h > 50) return 100;
+    if (change1h > 20) return 80;
+    if (change1h > 10) return 60;
+    if (change1h > 0) return 40;
+    if (change1h > -10) return 20;
+    return 0;
+  }
+
+  /**
+   * Score dev/issuer safety (0-100)
+   * Lower risk flags = higher score
+   */
+  private scoreDevSafety(riskFlags: RiskFlags): number {
+    let score = 100;
+
+    // Deduct for each risk flag
+    if (riskFlags.devDumping) score -= 50;
+    if (riskFlags.concentratedSupply) score -= 30;
+    if (riskFlags.liquidityRemoved) score -= 40;
+    if (riskFlags.singleWalletPrice) score -= 25;
+
+    return Math.max(0, score);
+  }
+
+  /**
+   * Get manual whitelist boost (0-100)
+   * TODO: Implement whitelist system for verified projects
+   */
+  private getWhitelistBoost(token: TrackedToken): number {
+    // For MVP, no whitelist boost
+    return 0;
+  }
+
+  /**
+   * Score spread quality (0-100)
+   * Tighter spread = higher score
+   */
+  private scoreSpread(snapshot: MarketSnapshot | null): number {
+    if (!snapshot || snapshot.spreadPercent === null) return 0;
+
+    const spread = snapshot.spreadPercent;
+
+    // 0% spread = 100 score, 10%+ spread = 0 score
+    if (spread <= 0) return 100;
+    if (spread >= 10) return 0;
+
+    return ((10 - spread) / 10) * 100;
+  }
+}
+
+---END---
+
+FILE: src/telegram/alerts.ts
+---
+/**
+ * Telegram Alert Module
+ * Sends formatted alerts to Telegram
+ */
+
+import TelegramBot from 'node-telegram-bot-api';
+import { AlertPayload } from '../types';
+import { BotConfig } from '../config';
+import { info, warn, debug } from '../utils/logger';
+
+export class TelegramAlerter {
+  private bot: TelegramBot | null = null;
+  private chatId: string = '';
+  private enabled: boolean = false;
+  private lastAlertTime: Map<string, number> = new Map();
+  private alertCooldownMs: number = 5 * 60 * 1000; // 5 minutes cooldown per alert type+token
+
+  constructor(config: BotConfig) {
+    if (config.telegramBotToken && config.telegramChatId) {
+      try {
+        this.bot = new TelegramBot(config.telegramBotToken, { polling: false });
+        this.chatId = config.telegramChatId;
+        this.enabled = true;
+        info('Telegram bot initialized');
+      } catch (err) {
+        warn(`Failed to initialize Telegram bot: ${err}`);
+        this.enabled = false;
+      }
+    } else {
+      warn('Telegram not configured - alerts disabled');
+    }
+  }
+
+  /**
+   * Send an alert
+   */
+  async sendAlert(payload: AlertPayload): Promise<void> {
+    if (!this.enabled || !this.bot) {
+      debug(`Alert skipped (Telegram disabled): ${payload.type}`);
+      return;
+    }
+
+    // Check cooldown
+    const cooldownKey = `${payload.type}:${payload.tokenCurrency || 'global'}`;
+    const now = Date.now();
+    const lastSent = this.lastAlertTime.get(cooldownKey) || 0;
+
+    if (now - lastSent < this.alertCooldownMs) {
+      debug(`Alert cooldown active for ${cooldownKey}`);
+      return;
+    }
+
+    try {
+      const message = this.formatAlert(payload);
+      await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
+      this.lastAlertTime.set(cooldownKey, now);
+      info(`Alert sent: ${payload.type}`);
+    } catch (err) {
+      warn(`Failed to send Telegram alert: ${err}`);
+    }
+  }
+
+  /**
+   * Format alert message
+   */
+  private formatAlert(payload: AlertPayload): string {
+    switch (payload.type) {
+      case 'new_token':
+      case 'high_score':
+        return this.formatTokenAlert(payload);
+
+      case 'amm_pool':
+        return this.formatAMMPoolAlert(payload);
+
+      case 'liquidity_added':
+      case 'liquidity_removed':
+        return this.formatLiquidityAlert(payload);
+
+      case 'whale_buy':
+      case 'dev_sell':
+        return this.formatActivityAlert(payload);
+
+      case 'paper_trade_opened':
+        return this.formatPaperTradeOpen(payload);
+
+      case 'paper_trade_partial_close':
+        return this.formatPaperTradePartial(payload);
+
+      case 'paper_trade_closed':
+        return this.formatPaperTradeClose(payload);
+
+      case 'daily_summary':
+        return this.formatDailySummary(payload);
+
+      default:
+        return `<b>${payload.type}</b>\n${payload.message}`;
+    }
+  }
+
+  /**
+   * Format token discovery/high score alert
+   */
+  private formatTokenAlert(payload: AlertPayload): string {
+    const emoji = payload.type === 'high_score' ? '🔥' : '🆕';
+    const lines = [
+      `${emoji} <b>${payload.type === 'high_score' ? 'HIGH SCORE TOKEN' : 'NEW TOKEN DETECTED'}</b>`,
+      '',
+      `<b>Token:</b> ${payload.tokenCurrency || 'N/A'}`,
+      `<b>Issuer:</b> <code>${payload.tokenIssuer || 'N/A'}</code>`,
+      `<b>Score:</b> ${payload.score || 'N/A'}/100`,
+      `<b>Liquidity:</b> ${payload.liquidity !== null && payload.liquidity !== undefined ? `${payload.liquidity.toFixed(2)} XRP` : 'Unknown'}`,
+      `<b>Price:</b> ${payload.price !== null && payload.price !== undefined ? `${payload.price.toFixed(8)} XRP` : 'Unknown'}`,
+    ];
+
+    if (payload.change5m !== null && payload.change5m !== undefined) {
+      lines.push(`<b>5m change:</b> ${payload.change5m >= 0 ? '+' : ''}${payload.change5m.toFixed(2)}%`);
+    }
+    if (payload.change15m !== null && payload.change15m !== undefined) {
+      lines.push(`<b>15m change:</b> ${payload.change15m >= 0 ? '+' : ''}${payload.change15m.toFixed(2)}%`);
+    }
+    if (payload.change1h !== null && payload.change1h !== undefined) {
+      lines.push(`<b>1h change:</b> ${payload.change1h >= 0 ? '+' : ''}${payload.change1h.toFixed(2)}%`);
+    }
+
+    if (payload.holders !== null && payload.holders !== undefined) {
+      lines.push(`<b>Holders:</b> ${payload.holders}`);
+    }
+
+    if (payload.buyPressure) {
+      lines.push(`<b>Buy pressure:</b> ${payload.buyPressure}`);
+    }
+
+    if (payload.riskFlags && payload.riskFlags.length > 0) {
+      lines.push(`<b>Risk flags:</b> ${payload.riskFlags.join(', ')}`);
+    }
+
+    if (payload.action) {
+      lines.push('', `<b>Action:</b> ${payload.action}`);
+    }
+
+    if (payload.explorerLinks) {
+      lines.push('', '<b>Links:</b>');
+      if (payload.explorerLinks.token) {
+        lines.push(`• Token: ${payload.explorerLinks.token}`);
+      }
+      if (payload.explorerLinks.issuer) {
+        lines.push(`• Issuer: ${payload.explorerLinks.issuer}`);
+      }
+      if (payload.explorerLinks.amm) {
+        lines.push(`• AMM: ${payload.explorerLinks.amm}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  /**
+   * Format AMM pool alert
+   */
+  private formatAMMPoolAlert(payload: AlertPayload): string {
+    return [
+      '🏊 <b>NEW AMM POOL</b>',
+      '',
+      payload.message,
+    ].join('\n');
+  }
+
+  /**
+   * Format liquidity change alert
+   */
+  private formatLiquidityAlert(payload: AlertPayload): string {
+    const emoji = payload.type === 'liquidity_added' ? '💧' : '⚠️';
+    const action = payload.type === 'liquidity_added' ? 'ADDED' : 'REMOVED';
+
+    return [
+      `${emoji} <b>LIQUIDITY ${action}</b>`,
+      '',
+      `<b>Token:</b> ${payload.tokenCurrency || 'N/A'}`,
+      payload.message,
+    ].join('\n');
+  }
+
+  /**
+   * Format whale/dev activity alert
+   */
+  private formatActivityAlert(payload: AlertPayload): string {
+    const emoji = payload.type === 'whale_buy' ? '🐋' : '🚨';
+    const action = payload.type === 'whale_buy' ? 'WHALE BUY' : 'DEV SELL';
+
+    return [
+      `${emoji} <b>${action}</b>`,
+      '',
+      `<b>Token:</b> ${payload.tokenCurrency || 'N/A'}`,
+      payload.message,
+    ].join('\n');
+  }
+
+  /**
+   * Format paper trade opened alert
+   */
+  private formatPaperTradeOpen(payload: AlertPayload): string {
+    const trade = payload.paperTrade;
+    if (!trade) return 'Paper trade opened (no details)';
+
+    return [
+      '📈 <b>PAPER TRADE OPENED</b>',
+      '',
+      `<b>Token:</b> ${trade.tokenCurrency}`,
+      `<b>Entry:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
+      `<b>Size:</b> ${trade.entryAmountXRP.toFixed(2)} XRP`,
+      `<b>Score:</b> ${trade.entryScore}`,
+      `<b>Reason:</b> ${trade.entryReason}`,
+      `<b>Slippage:</b> ${(trade.slippageEstimate * 100).toFixed(2)}%`,
+    ].join('\n');
+  }
+
+  /**
+   * Format paper trade partial close alert
+   */
+  private formatPaperTradePartial(payload: AlertPayload): string {
+    const trade = payload.paperTrade;
+    if (!trade) return 'Paper trade partially closed (no details)';
+
+    const pnlEmoji = (trade.pnlXRP || 0) >= 0 ? '✅' : '❌';
+
+    return [
+      '📊 <b>PAPER TRADE PARTIAL CLOSE</b>',
+      '',
+      `<b>Token:</b> ${trade.tokenCurrency}`,
+      `<b>Remaining:</b> ${trade.remainingPosition}%`,
+      `${pnlEmoji} <b>PnL:</b> ${trade.pnlXRP?.toFixed(4) || 'N/A'} XRP (${trade.pnlPercent?.toFixed(2) || 'N/A'}%)`,
+    ].join('\n');
+  }
+
+  /**
+   * Format paper trade closed alert
+   */
+  private formatPaperTradeClose(payload: AlertPayload): string {
+    const trade = payload.paperTrade;
+    if (!trade) return 'Paper trade closed (no details)';
+
+    const pnlEmoji = (trade.pnlXRP || 0) >= 0 ? '✅' : '❌';
+
+    return [
+      `${pnlEmoji} <b>PAPER TRADE CLOSED</b>`,
+      '',
+      `<b>Token:</b> ${trade.tokenCurrency}`,
+      `<b>Entry:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
+      `<b>Exit:</b> ${trade.exitPriceXRP?.toFixed(8) || 'N/A'} XRP`,
+      `${pnlEmoji} <b>PnL:</b> ${trade.pnlXRP?.toFixed(4) || 'N/A'} XRP (${trade.pnlPercent?.toFixed(2) || 'N/A'}%)`,
+      `<b>Reason:</b> ${trade.exitReason || 'N/A'}`,
+      `<b>Fees:</b> ${trade.feesPaid.toFixed(4)} XRP`,
+    ].join('\n');
+  }
+
+  /**
+   * Format daily summary alert
+   */
+  private formatDailySummary(payload: AlertPayload): string {
+    return [
+      '📋 <b>DAILY P&L SUMMARY</b>',
+      '',
+      payload.message,
+    ].join('\n');
+  }
+
+  /**
+   * Send a test message
+   * FIX #18: Improved error messages for common failure modes
+   */
+  async sendTestMessage(): Promise<boolean> {
+    if (!this.enabled || !this.bot) {
+      warn('Cannot send test: Telegram not configured');
+      return false;
+    }
+
+    try {
+      await this.bot.sendMessage(this.chatId, '✅ XRPL Meme Bot is running!', { parse_mode: 'HTML' });
+      info('✅ Telegram test message sent successfully');
+      return true;
+    } catch (err: any) {
+      const errMsg = err.message || String(err);
+
+      // Provide helpful error messages for common issues
+      if (errMsg.includes('404')) {
+        warn('❌ Telegram test failed: Bot token or Chat ID is invalid');
+        warn('   - Verify TELEGRAM_BOT_TOKEN from @BotFather');
+        warn('   - Verify TELEGRAM_CHAT_ID (send /getid to your bot or use @userinfobot)');
+        warn('   - Make sure you have messaged the bot at least once');
+      } else if (errMsg.includes('403')) {
+        warn('❌ Telegram test failed: Bot is blocked or chat is inaccessible');
+        warn('   - Unblock the bot in Telegram');
+        warn('   - Send a message to the bot first');
+      } else if (errMsg.includes('429')) {
+        warn('⚠️ Telegram rate limit hit. Retrying later...');
+      } else {
+        warn(`❌ Telegram test failed: ${errMsg}`);
+      }
+
+      return false;
+    }
+  }
+}
+
+---END---
+
+FILE: src/types.ts
+---
+/**
+ * Core type definitions for XRPL Meme Bot
+ */
+
+// Token representation
+export interface TrackedToken {
+  currency: string;
+  issuer: string;
+  firstSeen: number; // Unix timestamp
+  lastUpdated: number;
+}
+
+// AMM Pool data
+export interface AMMPool {
+  asset1: { currency: string; issuer?: string };
+  asset2: { currency: string; issuer?: string };
+  amount1: string; // in drops or token units
+  amount2: string;
+  lpBalance: string;
+  tradingFee: number; // basis points
+  poolId: string;
+  createdAt: number;
+  lastUpdated: number;
+}
+
+// Market snapshot for a token
+export interface MarketSnapshot {
+  tokenCurrency: string;
+  tokenIssuer: string;
+  timestamp: number;
+  priceXRP: number | null;
+  liquidityXRP: number | null;
+  buyVolume5m: number;
+  sellVolume5m: number;
+  buyCount5m: number;
+  sellCount5m: number;
+  uniqueBuyers5m: number;
+  uniqueSellers5m: number;
+  priceChange5m: number | null; // percentage
+  priceChange15m: number | null;
+  priceChange1h: number | null;
+  holderEstimate: number | null;
+  spreadPercent: number | null;
+}
+
+// Risk assessment
+export interface RiskFlags {
+  lowLiquidity: boolean;
+  wideSpread: boolean;
+  concentratedSupply: boolean;
+  devDumping: boolean;
+  liquidityRemoved: boolean;
+  lowHolderCount: boolean;
+  noBuyActivity: boolean;
+  singleWalletPrice: boolean;
+  flags: string[];
+}
+
+// Token score
+export interface TokenScore {
+  tokenCurrency: string;
+  tokenIssuer: string;
+  timestamp: number;
+  totalScore: number; // 0-100
+  liquidityScore: number;
+  holderGrowthScore: number;
+  buyPressureScore: number;
+  volumeAccelScore: number;
+  devSafetyScore: number;
+  whitelistBoost: number;
+  spreadScore: number;
+}
+
+// Paper trade record
+export interface PaperTrade {
+  id?: number;
+  tokenCurrency: string;
+  tokenIssuer: string;
+  entryPriceXRP: number;
+  entryAmountXRP: number;
+  entryTimestamp: number;
+  entryScore: number;
+  entryReason: string;
+  exitPriceXRP: number | null;
+  exitTimestamp: number | null;
+  exitScore: number | null;
+  exitReason: string | null;
+  status: 'open' | 'closed' | 'partial';
+  pnlXRP: number | null;
+  pnlPercent: number | null;
+  slippageEstimate: number;
+  feesPaid: number;
+  tp1Hit: boolean;
+  tp2Hit: boolean;
+  trailingStopActive: boolean;
+  remainingPosition: number; // percentage 0-100
+}
+
+// Daily PnL summary
+export interface DailySummary {
+  date: string; // YYYY-MM-DD
+  tradesOpened: number;
+  tradesClosed: number;
+  totalPnLXRP: number;
+  winRate: number;
+  maxDrawdown: number;
+  bestTrade: number;
+  worstTrade: number;
+}
+
+// Alert payload
+export interface AlertPayload {
+  type:
+    | 'new_token'
+    | 'high_score'
+    | 'amm_pool'
+    | 'liquidity_added'
+    | 'liquidity_removed'
+    | 'whale_buy'
+    | 'dev_sell'
+    | 'paper_trade_opened'
+    | 'paper_trade_partial_close'
+    | 'paper_trade_closed'
+    | 'daily_summary';
+  tokenCurrency?: string;
+  tokenIssuer?: string;
+  score?: number;
+  liquidity?: number | null;
+  price?: number | null;
+  change5m?: number | null;
+  change15m?: number | null;
+  change1h?: number | null;
+  holders?: number | null;
+  buyPressure?: string;
+  riskFlags?: string[];
+  action?: string;
+  explorerLinks?: {
+    token: string;
+    issuer: string;
+    amm?: string;
+  };
+  paperTrade?: PaperTrade;
+  message: string;
+}
+
+// Configuration
+export interface BotConfig {
+  xrplWsUrl: string;
+  telegramBotToken: string;
+  telegramChatId: string;
+  mode: 'WATCH' | 'PAPER' | 'AUTO';
+  minLiquidityXRP: number;
+  minScoreAlert: number;
+  minScorePaperTrade: number;
+  startingBankrollXRP: number;
+  maxTradeXRP: number;
+  maxOpenTrades: number;
+  maxDailyLossXRP: number;
+  weights: {
+    liquidity: number;
+    holderGrowth: number;
+    buyPressure: number;
+    volumeAccel: number;
+    devSafety: number;
+    whitelistBoost: number;
+    spread: number;
+  };
+  logLevel: string;
+}
+
+// Transaction metadata wrapper
+export interface TxEvent {
+  hash: string;
+  ledgerIndex: number;
+  timestamp: number;
+  txType: string;
+  account: string;
+  meta: any;
+}
+
+---END---
+
+FILE: src/utils/logger.ts
+---
+/**
+ * Logger utility using winston
+ */
+
+import winston from 'winston';
+import path from 'path';
+
+const { combine, timestamp, printf, colorize } = winston.format;
+
+// Custom format for console and file
+const logFormat = printf(({ level, message, timestamp }) => {
+  return `[${timestamp}] ${level.toUpperCase()}: ${message}`;
+});
+
+let logger: winston.Logger | null = null;
+
+export function getLogger(logLevel: string = 'info'): winston.Logger {
+  if (logger) return logger;
+
+  const transports: winston.transport[] = [
+    // Console transport
+    new winston.transports.Console({
+      format: combine(colorize(), timestamp(), logFormat),
+      level: logLevel,
+    }),
+    // File transport for errors
+    new winston.transports.File({
+      filename: path.join(process.cwd(), 'logs', 'error.log'),
+      level: 'error',
+      maxsize: 5242880, // 5MB
+      maxFiles: 5,
+    }),
+    // File transport for all logs
+    new winston.transports.File({
+      filename: path.join(process.cwd(), 'logs', 'combined.log'),
+      maxsize: 5242880, // 5MB
+      maxFiles: 10,
+    }),
+  ];
+
+  logger = winston.createLogger({
+    level: logLevel,
+    format: combine(timestamp(), logFormat),
+    transports,
+    exitOnError: false,
+  });
+
+  return logger;
+}
+
+// Convenience exports
+export const info = (msg: string, meta?: any) => {
+  const l = getLogger();
+  if (meta) l.info(`${msg} ${JSON.stringify(meta)}`);
+  else l.info(msg);
+};
+
+export const warn = (msg: string, meta?: any) => {
+  const l = getLogger();
+  if (meta) l.warn(`${msg} ${JSON.stringify(meta)}`);
+  else l.warn(msg);
+};
+
+export const error = (msg: string, meta?: any) => {
+  const l = getLogger();
+  if (meta) l.error(`${msg} ${JSON.stringify(meta)}`);
+  else l.error(msg);
+};
+
+export const debug = (msg: string, meta?: any) => {
+  const l = getLogger();
+  if (meta) l.debug(`${msg} ${JSON.stringify(meta)}`);
+  else l.debug(msg);
+};
+
+---END---
+
+FILE: src/xrpl/client.ts
+---
+/**
+ * XRPL WebSocket client with auto-reconnect
+ */
+
+import { Client, LedgerStream } from 'xrpl';
+import { info, error, warn, debug } from '../utils/logger';
+
+export class XRPLClient {
+  private client: Client | null = null;
+  private wsUrl: string;
+  private reconnectAttempts = 0;
+  private maxReconnectAttempts = 10;
+  private reconnectDelay = 5000; // 5 seconds
+  private isConnected = false;
+  private ledgerHandler?: (ledger: any) => void;
+  private txHandler?: (tx: any) => void;
+
+  constructor(wsUrl: string) {
+    this.wsUrl = wsUrl;
+  }
+
+  /**
+   * Connect to XRPL WebSocket
+   */
+  async connect(): Promise<Client> {
+    try {
+      info(`Connecting to XRPL: ${this.wsUrl}`);
+      this.client = new Client(this.wsUrl);
+      await this.client.connect();
+      this.isConnected = true;
+      this.reconnectAttempts = 0;
+      info('Connected to XRPL successfully');
+
+      // Get server info
+      const serverInfo = await this.client.request({ command: 'server_info' });
+      const completeLedgers = serverInfo.result.info.complete_ledgers;
+      info(`XRPL Server: ${typeof completeLedgers === 'string' ? completeLedgers : JSON.stringify(completeLedgers)} ledgers`);
+
+      return this.client;
+    } catch (err) {
+      error(`Failed to connect to XRPL: ${err}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Subscribe to ledger stream for new ledger events
+   */
+  async subscribeLedger(handler: (ledger: any) => void): Promise<void> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    this.ledgerHandler = handler;
+
+    try {
+      await this.client.request({
+        command: 'subscribe',
+        streams: ['ledger'],
+      });
+      info('Subscribed to ledger stream');
+
+      this.client.on('ledgerClosed', (ledger) => {
+        if (this.ledgerHandler) {
+          this.ledgerHandler(ledger);
+        }
+      });
+    } catch (err) {
+      error(`Failed to subscribe to ledger stream: ${err}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Subscribe to transactions for a specific account or all transactions
+   */
+  async subscribeTransactions(handler: (tx: any) => void): Promise<void> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    this.txHandler = handler;
+
+    try {
+      // Subscribe to all transactions via the transactions stream
+      await this.client.request({
+        command: 'subscribe',
+        streams: ['transactions'],
+      });
+      info('Subscribed to transactions stream');
+
+      this.client.on('transaction', (tx) => {
+        if (this.txHandler) {
+          this.txHandler(tx);
+        }
+      });
+    } catch (err) {
+      error(`Failed to subscribe to transactions: ${err}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Get account info
+   */
+  async getAccountInfo(account: string): Promise<any> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    try {
+      const response = await this.client.request({
+        command: 'account_info',
+        account,
+        ledger_index: 'validated',
+      });
+      return response.result;
+    } catch (err) {
+      debug(`Account info failed for ${account}: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get account lines (trustlines)
+   */
+  async getAccountLines(account: string): Promise<any[]> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    try {
+      const response = await this.client.request({
+        command: 'account_lines',
+        account,
+        ledger_index: 'validated',
+      });
+      return response.result.lines || [];
+    } catch (err) {
+      debug(`Account lines failed for ${account}: ${err}`);
+      return [];
+    }
+  }
+
+  /**
+   * Get account lines with pagination marker
+   */
+  async getAccountLinesWithMarker(account: string, marker?: string): Promise<any> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    try {
+      const request: any = {
+        command: 'account_lines',
+        account,
+        ledger_index: 'validated',
+        limit: 400,
+      };
+
+      if (marker) {
+        request.marker = marker;
+      }
+
+      const response: any = await this.client.request(request);
+      const result = response.result || {};
+      return {
+        lines: result.lines || [],
+        marker: result.marker,
+      };
+    } catch (err) {
+      debug(`Account lines with marker failed for ${account}: ${err}`);
+      return { lines: [], marker: undefined };
+    }
+  }
+
+  /**
+   * Get AMM info for a token pair
+   */
+  async getAMMInfo(asset1: any, asset2: any): Promise<any> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    try {
+      const response = await this.client.request({
+        command: 'amm_info',
+        asset: asset1,
+        asset2: asset2,
+        ledger_index: 'validated',
+      });
+      return response.result.amm || null;
+    } catch (err) {
+      debug(`AMM info failed: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get book offers (order book depth)
+   */
+  async getBookOffers(takerGets: any, takerPays: any, limit: number = 20): Promise<any> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    try {
+      const response = await this.client.request({
+        command: 'book_offers',
+        taker_gets: takerGets,
+        taker_pays: takerPays,
+        ledger_index: 'validated',
+        limit,
+      });
+      return response.result;
+    } catch (err) {
+      debug(`Book offers failed: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get transaction by hash
+   */
+  async getTransaction(hash: string): Promise<any> {
+    if (!this.client || !this.isConnected) {
+      throw new Error('XRPL client not connected');
+    }
+
+    try {
+      const response = await this.client.request({
+        command: 'tx',
+        transaction: hash,
+      });
+      return response.result;
+    } catch (err) {
+      debug(`Transaction lookup failed for ${hash}: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * Check connection status
+   */
+  getStatus(): { connected: boolean; url: string } {
+    return {
+      connected: this.isConnected,
+      url: this.wsUrl,
+    };
+  }
+
+  /**
+   * Disconnect gracefully
+   */
+  async disconnect(): Promise<void> {
+    if (this.client && this.isConnected) {
+      try {
+        await this.client.disconnect();
+        this.isConnected = false;
+        info('Disconnected from XRPL');
+      } catch (err) {
+        error(`Error during disconnect: ${err}`);
+      }
+    }
+  }
+
+  /**
+   * Handle reconnection
+   * FIX #10: Added exponential backoff with jitter and max delay cap
+   */
+  private async handleDisconnect(): Promise<void> {
+    this.isConnected = false;
+    warn('XRPL connection lost');
+
+    if (this.reconnectAttempts < this.maxReconnectAttempts) {
+      this.reconnectAttempts++;
+
+      // Exponential backoff: 5s, 10s, 20s, 40s, capped at 60s
+      const baseDelay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 60000);
+      // Add jitter (±20%) to prevent thundering herd
+      const jitter = baseDelay * 0.2 * (Math.random() - 0.5) * 2;
+      const delay = baseDelay + jitter;
+
+      warn(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+
+      setTimeout(async () => {
+        try {
+          await this.connect();
+          info('Reconnected successfully');
+          this.reconnectAttempts = 0; // Reset on success
+
+          // Re-subscribe if handlers exist
+          if (this.ledgerHandler) {
+            await this.subscribeLedger(this.ledgerHandler);
+          }
+          if (this.txHandler) {
+            await this.subscribeTransactions(this.txHandler);
+          }
+        } catch (err) {
+          error(`Reconnection failed: ${err}`);
+          this.handleDisconnect();
+        }
+      }, delay);
+    } else {
+      error('Max reconnection attempts reached. Bot will stop.');
+      process.exit(1);
+    }
+  }
+
+  /**
+   * Get the underlying client (for advanced usage)
+   */
+  getClient(): Client | null {
+    return this.client;
+  }
+}
+
+---END---
+
