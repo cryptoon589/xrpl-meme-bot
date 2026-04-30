@@ -12,6 +12,8 @@ export class XRPLClient {
   private maxReconnectAttempts = 10;
   private reconnectDelay = 5000; // 5 seconds
   private isConnected = false;
+  private rawTxCount = 0;   // all raw txs from WS
+  private filteredTxCount = 0; // txs that passed isRelevant filter
   private ledgerHandler?: (ledger: any) => void;
   private txHandler?: (tx: any) => void;
 
@@ -125,8 +127,10 @@ export class XRPLClient {
       info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
 
       this.client.on('transaction', (tx) => {
+        this.rawTxCount++; // count every raw tx before filtering
         // Drop irrelevant transactions before they reach the queue
         if (this.txHandler && XRPLClient.isRelevant(tx)) {
+          this.filteredTxCount++;
           this.txHandler(tx);
         }
       });
@@ -283,6 +287,13 @@ export class XRPLClient {
       connected: this.isConnected,
       url: this.wsUrl,
     };
+  }
+
+  /**
+   * Get tx processing stats
+   */
+  getTxStats(): { raw: number; filtered: number } {
+    return { raw: this.rawTxCount, filtered: this.filteredTxCount };
   }
 
   /**

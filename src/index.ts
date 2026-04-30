@@ -37,6 +37,7 @@ let isRunning = false;
 let scanInterval: NodeJS.Timeout | null = null;
 let healthCheckInterval: NodeJS.Timeout | null = null;
 let healthServer: http.Server | null = null;
+let xrplClientRef: XRPLClient | null = null; // module-level ref for hourly timer
 
 // Transaction queue for rate limiting
 const MAX_TX_QUEUE_SIZE = parseInt(process.env.MAX_TX_QUEUE_SIZE || '500', 10);
@@ -45,6 +46,12 @@ let txQueue: any[] = [];
 let txProcessingTimer: NodeJS.Timeout | null = null;
 let droppedTxCount = 0;
 let lastDropLogTime = 0;
+let txProcessedCount = 0;      // transactions actually queued (passed filter)
+let txIgnoredCount = 0;        // transactions filtered at intake (XRPLClient)
+let newTokenDetections = 0;   // new trustline tokens discovered
+let hourlySummaryTimer: NodeJS.Timeout | null = null;
+let tokensScored = 0;          // number of score calculations this hour
+let topTokens: { currency: string; issuer: string; score: number; liquidity: number; change1h: number }[] = [];
 
 
 async function main() {
@@ -61,6 +68,7 @@ async function main() {
   // Initialize components
   const db = new Database();
   const xrplClient = new XRPLClient(config.xrplWsUrl);
+  xrplClientRef = xrplClient;
 
   try {
     await xrplClient.connect();
@@ -208,6 +216,7 @@ async function processSingleTransaction(
 ): Promise<void> {
   const newToken = await tokenDiscovery.processTransaction(tx);
   if (newToken) {
+    newTokenDetections++;
     // Track issuer reputation
     issuerReputation.registerTokenLaunch(newToken.issuer, newToken.currency);
 
@@ -407,6 +416,12 @@ function startPeriodicScan(
             db.saveRiskFlags(token.currency, token.issuer, risks);
             db.saveScore(score);
             totalProcessed++;
+              tokensScored++;
+
+              // Track top tokens for leaderboard
+              if (snapshot && score) {
+                topTokens.push({ currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 });
+              }
 
             // Hysteresis: only alert on upward threshold cross
             const lastScore = db.getLatestScore(token.currency, token.issuer);
@@ -488,6 +503,52 @@ function startPeriodicScan(
 
   scanTokens();
   scanInterval = setInterval(scanTokens, 60000);
+
+  // Hourly summary + hot token leaderboard
+  hourlySummaryTimer = setInterval(async () => {
+    const rawStats = xrplClientRef ? xrplClientRef.getTxStats() : { raw: 0, filtered: 0 };
+    const processed = rawStats.filtered;
+    const ignored = rawStats.raw - rawStats.filtered;
+    const total = rawStats.raw;
+
+    const top5 = topTokens
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+    topTokens = [];
+
+    const lines = [
+      '📊 <b>HOURLY REPORT</b>',
+      '',
+      '<b>Transactions:</b>',
+      '  Processed: ' + processed + ' (queued for scoring)',
+      '  Ignored: ' + ignored + ' (spam/NFT/XRP-only)',
+      '  Total seen: ' + total,
+      '',
+      '<b>Discoveries:</b>',
+      '  New tokens: ' + newTokenDetections,
+      '  Scored: ' + tokensScored + ' tokens',
+      '',
+      '<b>🔥 TOP 5 HOT TOKENS</b>',
+    ];
+
+    if (top5.length === 0) {
+      lines.push('  No tokens scored this hour');
+    } else {
+      top5.forEach((t, i) => {
+        const emoji = t.score >= 80 ? '🔥' : t.score >= 60 ? '⚡' : '📈';
+        const sign = t.change1h >= 0 ? '+' : '';
+        lines.push('  ' + emoji + ' #' + (i+1) + ' ' + t.currency + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + sign + t.change1h.toFixed(1) + '%');
+      });
+    }
+
+    newTokenDetections = 0;
+    tokensScored = 0;
+
+    await telegramAlerter.sendAlert({
+      type: 'hourly_summary',
+      message: lines.join("\n"),
+    });
+  }, 3600000);
 }
 
 async function sendHighScoreAlert(
