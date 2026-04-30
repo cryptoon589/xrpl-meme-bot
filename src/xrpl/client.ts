@@ -71,8 +71,44 @@ export class XRPLClient {
     }
   }
 
+  // Transaction types relevant to meme token activity - filter at intake
+  private static readonly RELEVANT_TX_TYPES = new Set([
+    'TrustSet',
+    'AMMCreate',
+    'AMMDeposit',
+    'AMMWithdraw',
+    'OfferCreate',
+    'Payment',
+  ]);
+
   /**
-   * Subscribe to transactions for a specific account or all transactions
+   * Returns true if this transaction is worth processing.
+   * Drops XRP-only payments, NFT activity, AccountSet, and all other spam
+   * at the WebSocket event level — before the handler or queue is touched.
+   */
+  private static isRelevant(tx: any): boolean {
+    const transaction = tx.transaction ?? tx.tx;
+    if (!transaction) return false;
+
+    const txType: string = transaction.TransactionType;
+    if (!XRPLClient.RELEVANT_TX_TYPES.has(txType)) return false;
+
+    // Payment: only pass issued-token payments (Amount is an object, currency != 'XRP')
+    if (txType === 'Payment') {
+      const amount = transaction.Amount;
+      if (typeof amount === 'string') return false;       // XRP drops — skip
+      if (!amount || amount.currency === 'XRP') return false;
+      return true;
+    }
+
+    // TrustSet, AMMCreate, AMMDeposit, AMMWithdraw, OfferCreate — always relevant
+    return true;
+  }
+
+  /**
+   * Subscribe to transactions stream.
+   * Filter runs at intake (WebSocket event handler) — handler is only called
+   * for relevant tx types, keeping the queue lean.
    */
   async subscribeTransactions(handler: (tx: any) => void): Promise<void> {
     if (!this.client || !this.isConnected) {
@@ -82,15 +118,15 @@ export class XRPLClient {
     this.txHandler = handler;
 
     try {
-      // Subscribe to all transactions via the transactions stream
       await this.client.request({
         command: 'subscribe',
         streams: ['transactions'],
       });
-      info('Subscribed to transactions stream');
+      info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
 
       this.client.on('transaction', (tx) => {
-        if (this.txHandler) {
+        // Drop irrelevant transactions before they reach the queue
+        if (this.txHandler && XRPLClient.isRelevant(tx)) {
           this.txHandler(tx);
         }
       });

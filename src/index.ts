@@ -46,15 +46,6 @@ let txProcessingTimer: NodeJS.Timeout | null = null;
 let droppedTxCount = 0;
 let lastDropLogTime = 0;
 
-// Transaction types we care about
-const RELEVANT_TX_TYPES = new Set([
-  'TrustSet',
-  'AMMCreate',
-  'AMMDeposit',
-  'AMMWithdraw',
-  'OfferCreate',
-  'Payment',
-]);
 
 async function main() {
   const config = loadConfig();
@@ -97,14 +88,8 @@ async function main() {
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
 
-  // Subscribe to transaction stream with filtering
-  info('Subscribing to XRPL transaction stream (filtered)...');
+  // Filtering happens inside xrplClient.subscribeTransactions — only relevant tx types reach here
   await xrplClient.subscribeTransactions((tx) => {
-    // Filter: only queue relevant transactions
-    if (!isRelevantTransaction(tx)) {
-      return; // Ignore irrelevant transactions silently
-    }
-
     if (txQueue.length < MAX_TX_QUEUE_SIZE) {
       txQueue.push(tx);
     } else {
@@ -141,42 +126,6 @@ async function main() {
   info('✅ XRPL Meme Bot is running!');
   info(`Tracking ${tokenDiscovery.getTokenCount()} tokens`);
   info(`Monitoring ${ammScanner.getPoolCount()} AMM pools`);
-}
-
-/**
- * Check if a transaction is relevant to our bot
- * Filters out XRP-only transfers, AccountSet, NFT activity, etc.
- */
-function isRelevantTransaction(tx: any): boolean {
-  const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
-  if (!txType) return false;
-
-  // Only process relevant transaction types
-  if (!RELEVANT_TX_TYPES.has(txType)) {
-    return false;
-  }
-
-  // For Payment transactions, only process if involving issued tokens (not XRP-only)
-  if (txType === 'Payment') {
-    const transaction = tx.tx || tx.transaction;
-    if (!transaction) return false;
-
-    const amount = transaction.Amount;
-    // Skip XRP-only payments (amount is a string for XRP)
-    if (typeof amount === 'string') return false;
-
-    // Skip if no currency field (shouldn't happen but safety check)
-    if (!amount.currency) return false;
-
-    // Skip XRP payments
-    if (amount.currency === 'XRP') return false;
-
-    // This is an issued token payment - process it
-    return true;
-  }
-
-  // All other relevant types (TrustSet, AMM*, OfferCreate) are kept
-  return true;
 }
 
 /**
