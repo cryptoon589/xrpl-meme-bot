@@ -64,7 +64,7 @@ export class TokenDiscovery {
    * Handle TrustSet transaction - detects new token relationships
    */
   private async handleTrustSet(tx: any): Promise<TrackedToken | null> {
-    const transaction = tx.tx || tx.transaction;
+    const transaction = tx.tx_json || tx.tx || tx.transaction;
     if (!transaction) return null;
 
     const limitAmount = transaction.LimitAmount;

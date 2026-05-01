@@ -61,7 +61,7 @@ export class AMMScanner {
    * Handle AMMCreate - new liquidity pool
    */
   private async handleAMMCreate(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
-    const transaction = tx.tx || tx.transaction;
+    const transaction = tx.tx_json || tx.tx || tx.transaction;
     if (!transaction) return null;
 
     const asset = transaction.Asset;
@@ -106,7 +106,7 @@ export class AMMScanner {
    * Handle AMMDeposit - liquidity added
    */
   private async handleAMMDeposit(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
-    const transaction = tx.tx || tx.transaction;
+    const transaction = tx.tx_json || tx.tx || tx.transaction;
     if (!transaction) return null;
 
     const asset = transaction.Asset;
@@ -144,7 +144,7 @@ export class AMMScanner {
    * Handle AMMWithdraw - liquidity removed
    */
   private async handleAMMWithdraw(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
-    const transaction = tx.tx || tx.transaction;
+    const transaction = tx.tx_json || tx.tx || tx.transaction;
     if (!transaction) return null;
 
     const asset = transaction.Asset;

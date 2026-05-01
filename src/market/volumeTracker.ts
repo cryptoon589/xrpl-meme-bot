@@ -37,7 +37,7 @@ export class VolumeTracker {
    * Handle Payment transaction
    */
   private handlePayment(tx: any): void {
-    const transaction = tx.tx || tx.transaction;
+    const transaction = tx.tx_json || tx.tx || tx.transaction;
     if (!transaction) return;
 
     const amount = transaction.Amount;
@@ -74,7 +74,7 @@ export class VolumeTracker {
    * Handle AMMTrade transaction
    */
   private handleAMMTrade(tx: any): void {
-    const transaction = tx.tx || tx.transaction;
+    const transaction = tx.tx_json || tx.tx || tx.transaction;
     if (!transaction) return;
 
     const asset = transaction.Asset;

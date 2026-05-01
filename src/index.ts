@@ -181,7 +181,7 @@ function startTransactionProcessor(
  * Record significant price movements for correlation detection
  */
 function recordPriceMovementIfRelevant(tx: any, correlationDetector: CorrelationDetector): void {
-  const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+  const txType = tx.tx_json?.TransactionType || tx.tx?.TransactionType || tx.transaction?.TransactionType;
   if (txType !== 'Payment' && txType !== 'AMMTrade') return;
 
   const transaction = tx.tx || tx.transaction;
