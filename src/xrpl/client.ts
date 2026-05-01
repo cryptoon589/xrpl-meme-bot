@@ -89,7 +89,7 @@ export class XRPLClient {
    * at the WebSocket event level — before the handler or queue is touched.
    */
   private static isRelevant(tx: any): boolean {
-    const transaction = tx.transaction ?? tx.tx;
+    const transaction = tx.tx_json ?? tx.transaction ?? tx.tx;
     if (!transaction) return false;
 
     const txType: string = transaction.TransactionType;
