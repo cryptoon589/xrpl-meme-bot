@@ -15,7 +15,14 @@ export class TokenScorer {
   }
 
   /**
-   * Calculate comprehensive score for a token
+   * Score a token for meme trading profit potential.
+   *
+   * Weights are tuned for catching pumps early:
+   *   - Buy pressure (35%): ratio of buys to sells in last 5 min
+   *   - New wallet inflow (25%): fresh wallets buying = strongest pump signal
+   *   - Momentum (20%): price direction across timeframes
+   *   - Liquidity (10%): enough depth to enter/exit without massive slippage
+   *   - Dev safety (10%): no rug flags
    */
   score(
     token: TrackedToken,
@@ -23,29 +30,19 @@ export class TokenScorer {
     pool: AMMPool | null,
     riskFlags: RiskFlags
   ): TokenScore {
-    const w = this.config.weights;
+    const buyPressureScore  = this.scoreBuyPressure(snapshot);   // 35%
+    const newWalletScore    = this.scoreNewWallets(snapshot);     // 25%
+    const momentumScore     = this.scoreMomentum(snapshot);       // 20%
+    const liquidityScore    = this.scoreLiquidity(snapshot);      // 10%
+    const devSafetyScore    = this.scoreDevSafety(riskFlags);     // 10%
 
-    // Calculate individual component scores (each 0-100)
-    const liquidityScore = this.scoreLiquidity(snapshot);
-    const holderGrowthScore = this.scoreHolderGrowth(snapshot);
-    const buyPressureScore = this.scoreBuyPressure(snapshot);
-    const volumeAccelScore = this.scoreVolumeAcceleration(snapshot);
-    const devSafetyScore = this.scoreDevSafety(riskFlags);
-    const whitelistBoost = this.getWhitelistBoost(token); // Manual boost, default 0
-    const spreadScore = this.scoreSpread(snapshot);
-
-    // Weighted total
     const totalScore =
-      (liquidityScore * w.liquidity +
-        holderGrowthScore * w.holderGrowth +
-        buyPressureScore * w.buyPressure +
-        volumeAccelScore * w.volumeAccel +
-        devSafetyScore * w.devSafety +
-        whitelistBoost * w.whitelistBoost +
-        spreadScore * w.spread) /
-      100;
+      buyPressureScore  * 0.35 +
+      newWalletScore    * 0.25 +
+      momentumScore     * 0.20 +
+      liquidityScore    * 0.10 +
+      devSafetyScore    * 0.10;
 
-    // Clamp to 0-100
     const clampedScore = Math.max(0, Math.min(100, totalScore));
 
     return {
@@ -54,12 +51,12 @@ export class TokenScorer {
       timestamp: Date.now(),
       totalScore: Math.round(clampedScore),
       liquidityScore: Math.round(liquidityScore),
-      holderGrowthScore: Math.round(holderGrowthScore),
+      holderGrowthScore: Math.round(newWalletScore),
       buyPressureScore: Math.round(buyPressureScore),
-      volumeAccelScore: Math.round(volumeAccelScore),
+      volumeAccelScore: Math.round(momentumScore),
       devSafetyScore: Math.round(devSafetyScore),
-      whitelistBoost: Math.round(whitelistBoost),
-      spreadScore: Math.round(spreadScore),
+      whitelistBoost: 0,
+      spreadScore: 0,
     };
   }
 
@@ -82,69 +79,89 @@ export class TokenScorer {
     return ((liquidity - minLiq) / (maxLiq - minLiq)) * 100;
   }
 
-  /**
-   * Score holder growth (0-100)
-   * TODO: Real implementation would track holder count over time
-   */
-  private scoreHolderGrowth(snapshot: MarketSnapshot | null): number {
-    if (!snapshot || snapshot.holderEstimate === null) {
-      return 30; // Neutral score when unknown
-    }
-
-    const holders = snapshot.holderEstimate;
-
-    // Scale: 0 at 0 holders, 100 at 1000+ holders
-    if (holders <= 0) return 0;
-    if (holders >= 1000) return 100;
-
-    // Logarithmic scale for early growth
-    return Math.min(100, Math.log2(holders + 1) * 10);
-  }
+  // (merged into scoreNewWallets)
 
   /**
    * Score buy pressure (0-100)
-   * Based on buy/sell ratio, volume, and unique participants
+   * Combines buy/sell ratio + volume dominance
    */
   private scoreBuyPressure(snapshot: MarketSnapshot | null): number {
     if (!snapshot) return 0;
 
-    const totalTransactions = snapshot.buyCount5m + snapshot.sellCount5m;
-    if (totalTransactions === 0) return 0;
+    const totalTx = (snapshot.buyCount5m || 0) + (snapshot.sellCount5m || 0);
+    if (totalTx === 0) return 0;
 
-    // Buy ratio component (40% of score)
-    const buyRatio = snapshot.buyCount5m / totalTransactions;
+    // Buy count ratio (60%)
+    const buyRatio = (snapshot.buyCount5m || 0) / totalTx;
     const ratioScore = buyRatio * 100;
 
-    // Volume component (30% of score)
-    const totalVolume = snapshot.buyVolume5m + snapshot.sellVolume5m;
-    const volumeScore = Math.min(100, (totalVolume / 100) * 100);
+    // Buy volume dominance (40%)
+    const totalVol = (snapshot.buyVolume5m || 0) + (snapshot.sellVolume5m || 0);
+    const volRatio = totalVol > 0 ? (snapshot.buyVolume5m || 0) / totalVol : 0.5;
+    const volScore = volRatio * 100;
 
-    // Unique buyers component (30% of score) - more unique buyers = healthier
-    const totalUnique = (snapshot.uniqueBuyers5m || 0) + (snapshot.uniqueSellers5m || 0);
-    const uniqueBuyerRatio = totalUnique > 0 ? (snapshot.uniqueBuyers5m || 0) / totalUnique : 0.5;
-    const uniqueScore = uniqueBuyerRatio * 100;
+    // Bonus: if many unique buyers (signals breadth, not wash)
+    const uniqueBuyers = snapshot.uniqueBuyers5m || 0;
+    const uniqueBonus = Math.min(20, uniqueBuyers * 2); // +2 pts per unique buyer, max +20
 
-    return (ratioScore * 0.4 + volumeScore * 0.3 + uniqueScore * 0.3);
+    return Math.min(100, ratioScore * 0.6 + volScore * 0.4 + uniqueBonus);
   }
 
   /**
-   * Score volume acceleration (0-100)
-   * TODO: Real implementation would compare current vs historical volume
+   * Score new wallet inflow (0-100) — strongest pump predictor
+   * Fresh wallets buying = new capital entering, not just churning
    */
-  private scoreVolumeAcceleration(snapshot: MarketSnapshot | null): number {
+  private scoreNewWallets(snapshot: MarketSnapshot | null): number {
     if (!snapshot) return 0;
 
-    // For MVP, use price change as proxy for momentum
-    const change1h = snapshot.priceChange1h;
-    if (change1h === null) return 50; // Neutral
+    const newWalletBuys = (snapshot as any).newWalletBuys || 0;
+    const newWalletPct  = (snapshot as any).newWalletPercent || 0;
+    const uniqueBuyers  = snapshot.uniqueBuyers5m || 0;
 
-    // Positive price change suggests increasing demand
-    if (change1h > 50) return 100;
-    if (change1h > 20) return 80;
-    if (change1h > 10) return 60;
-    if (change1h > 0) return 40;
-    if (change1h > -10) return 20;
-    return 0;
+    if (uniqueBuyers === 0) return 0;
+
+    // Base: new wallet percentage (0-100)
+    const pctScore = newWalletPct; // already 0-100
+
+    // Multiplier: more new wallets = stronger signal
+    const countBonus = Math.min(30, newWalletBuys * 5); // +5 per new wallet, max 30
+
+    return Math.min(100, pctScore * 0.7 + countBonus);
+  }
+
+  /**
+   * Score momentum across timeframes (0-100)
+   * Rewards consistent upward movement across 5m, 15m, 1h
+   */
+  private scoreMomentum(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 0;
+
+    const c5  = snapshot.priceChange5m;
+    const c15 = snapshot.priceChange15m;
+    const c1h = snapshot.priceChange1h;
+
+    let score = 50; // neutral baseline
+    let count = 0;
+
+    const addChange = (change: number | null, weight: number) => {
+      if (change === null) return;
+      count++;
+      if (change > 50)  score += 30 * weight;
+      else if (change > 20) score += 20 * weight;
+      else if (change > 10) score += 15 * weight;
+      else if (change > 5)  score += 10 * weight;
+      else if (change > 0)  score += 5 * weight;
+      else if (change > -5) score -= 5 * weight;
+      else if (change > -15)score -= 15 * weight;
+      else score -= 25 * weight;
+    };
+
+    addChange(c5,  1.0);  // 5m most important
+    addChange(c15, 0.6);  // 15m secondary
+    addChange(c1h, 0.4);  // 1h context
+
+    if (count === 0) return 50;
+    return Math.max(0, Math.min(100, score));
   }
 
   /**
@@ -163,28 +180,5 @@ export class TokenScorer {
     return Math.max(0, score);
   }
 
-  /**
-   * Get manual whitelist boost (0-100)
-   * TODO: Implement whitelist system for verified projects
-   */
-  private getWhitelistBoost(token: TrackedToken): number {
-    // For MVP, no whitelist boost
-    return 0;
-  }
 
-  /**
-   * Score spread quality (0-100)
-   * Tighter spread = higher score
-   */
-  private scoreSpread(snapshot: MarketSnapshot | null): number {
-    if (!snapshot || snapshot.spreadPercent === null) return 0;
-
-    const spread = snapshot.spreadPercent;
-
-    // 0% spread = 100 score, 10%+ spread = 0 score
-    if (spread <= 0) return 100;
-    if (spread >= 10) return 0;
-
-    return ((10 - spread) / 10) * 100;
-  }
 }

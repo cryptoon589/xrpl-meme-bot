@@ -32,6 +32,8 @@ import { AlertPayload } from './types';
 import { PositionSizer } from './paper/positionSizer';
 import { CorrelationDetector } from './scoring/correlationDetector';
 import { ActiveDiscovery } from './scanner/activeDiscovery';
+import { AMMPriceFetcher } from './market/ammPriceFetcher';
+import { BuyPressureTracker } from './market/buyPressureTracker';
 
 // Global state
 let isRunning = false;
@@ -82,6 +84,8 @@ async function main() {
   const tokenDiscovery = new TokenDiscovery(xrplClient, db);
   const ammScanner = new AMMScanner(xrplClient, db);
   const activeDiscovery = new ActiveDiscovery(xrplClient, db);
+  const ammPriceFetcher = new AMMPriceFetcher(xrplClient);
+  const buyPressureTracker = new BuyPressureTracker();
   const marketData = new MarketDataCollector(xrplClient, db);
   const volumeTracker = new VolumeTracker();
   const holderCounter = new HolderCounter(xrplClient);
@@ -100,7 +104,10 @@ async function main() {
 
   // Subscribe to live tx stream — activeDiscovery handles token extraction
   await xrplClient.subscribeTransactions((tx) => {
-    // Run active discovery on every relevant tx (no queue needed for discovery)
+    // Real-time buy pressure tracking (runs on every tx, no queue)
+    buyPressureTracker.processTransaction(tx);
+
+    // Token discovery
     const discovered = activeDiscovery.processLiveTx(tx);
     if (discovered) {
       newTokenDetections++;
@@ -145,7 +152,8 @@ async function main() {
   startPeriodicScan(
     tokenDiscovery, ammScanner, marketData, volumeTracker, holderCounter,
     issuerReputation, multiTimeframeScorer, correlationDetector,
-    riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config
+    riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
+    ammPriceFetcher, buyPressureTracker
   );
 
   startHealthCheck(xrplClient);
@@ -320,7 +328,9 @@ function startPeriodicScan(
   paperTrader: PaperTrader | null,
   telegramAlerter: TelegramAlerter,
   db: Database,
-  config: any
+  config: any,
+  ammPriceFetcher: AMMPriceFetcher,
+  buyPressureTracker: BuyPressureTracker
 ): void {
   const MAX_TRACKED_TOKENS = 500;
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
@@ -383,14 +393,39 @@ function startPeriodicScan(
 
               const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
 
-              // Get real volume data
-              const vol = volumeTracker.getVolume(token.currency, token.issuer);
+              // Fix 1: Get price directly from AMM pool
+              const ammPrice = await ammPriceFetcher.getPrice(token.currency, token.issuer);
+
+              // Fix 2: Get real-time buy pressure
+              const pressure = buyPressureTracker.getSnapshot(token.currency, token.issuer);
+
+              // Merge buy pressure into volume data
+              const vol = {
+                buyVolume: pressure.buyVolumeXRP,
+                sellVolume: pressure.sellVolumeXRP,
+                buyCount: pressure.buyCount,
+                sellCount: pressure.sellCount,
+                uniqueBuyers: pressure.uniqueBuyers,
+                uniqueSellers: pressure.uniqueSellers,
+              };
 
               // Get holder count (cached)
               const holders = await holderCounter.getHolderCount(token.currency, token.issuer);
 
               const snapshot = await marketData.collectMarketDataWithExtras(token, pool, vol, holders);
               if (!snapshot) return { token, snapshot: null };
+
+              // Inject AMM price (overrides order book price)
+              if (ammPrice) {
+                snapshot.priceXRP = ammPrice.priceXRP;
+                snapshot.liquidityXRP = ammPrice.liquidityXRP;
+              }
+
+              // Fix 3: Inject new wallet data into snapshot for scorer
+              (snapshot as any).newWalletBuys = pressure.newWalletBuys;
+              (snapshot as any).newWalletPercent = pressure.newWalletPercent;
+              (snapshot as any).buySellRatio = pressure.buySellRatio;
+              (snapshot as any).lastActivityMs = pressure.lastActivityMs;
 
               const risks = riskFilter.evaluate(token, snapshot, pool);
               const baseScore = tokenScorer.score(token, snapshot, pool, risks);
@@ -443,33 +478,29 @@ function startPeriodicScan(
                 topTokens.push({ currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 });
               }
 
-            // Hysteresis: only alert on upward threshold cross
-            const lastScore = db.getLatestScore(token.currency, token.issuer);
-            const crossedThreshold = score.totalScore >= config.minScoreAlert &&
-              (!lastScore || lastScore.totalScore < config.minScoreAlert);
+            // Fix 4: Multi-signal gate — require 3+ signals firing together
+            const pressure = buyPressureTracker.getSnapshot(token.currency, token.issuer);
+            const signals = {
+              highScore:     score.totalScore >= config.minScoreAlert,
+              buyDominant:   pressure.buySellRatio >= 0.65 && pressure.buyCount >= 3,
+              momentum:      (snapshot.priceChange5m || 0) >= 8,
+              newWallets:    pressure.newWalletBuys >= 2,
+              volDominant:   pressure.volumeRatio >= 0.65 && pressure.buyVolumeXRP > 0,
+              recentActivity:(pressure.lastActivityMs || Infinity) < 3 * 60 * 1000,
+            };
+            const signalCount = Object.values(signals).filter(Boolean).length;
 
-            // Momentum spike: price up >10% in 5m with positive buy pressure
-            const buyCount = snapshot.buyCount5m || 0;
-            const sellCount = snapshot.sellCount5m || 0;
-            const momentum5m = snapshot.priceChange5m || 0;
-            const momentumSpike = momentum5m >= 10 &&
-              buyCount > sellCount &&
-              buyCount >= 3 &&
+            // Alert if 3+ signals OR a very strong individual signal
+            const strongSingle = (snapshot.priceChange5m || 0) >= 25 && pressure.buyCount >= 5;
+            const shouldAlert = (signalCount >= 3 || strongSingle) &&
               (snapshot.liquidityXRP || 0) >= 500;
 
-            // Volume acceleration: buying picking up fast
-            const volAccel = (snapshot.buyVolume5m || 0) > (snapshot.sellVolume5m || 0) * 1.5 &&
-              buyCount >= 5 &&
-              momentum5m > 0;
-
-            const shouldAlert = crossedThreshold || momentumSpike || volAccel;
-
-            // Cooldown: don't spam same token (30 min)
-            const lastAlertTime = db.getLastAlertTime?.(token.currency, token.issuer) || 0;
+            // Cooldown: 30 min per token
+            const lastAlertTime = db.getLastAlertTime(token.currency, token.issuer);
             const alertCooldown = Date.now() - lastAlertTime > 30 * 60 * 1000;
 
             if (shouldAlert && alertCooldown && riskFilter.isSafe(risks)) {
-              db.setLastAlertTime?.(token.currency, token.issuer, Date.now());
+              db.setLastAlertTime(token.currency, token.issuer, Date.now());
               setTimeout(() => sendHighScoreAlert(
                 telegramAlerter, db, token, snapshot, risks, score, result.value.tfScores, config
               ), 0);
@@ -598,11 +629,21 @@ async function sendHighScoreAlert(
   tfScores: any,
   config: any
 ): Promise<void> {
-  const action = score.totalScore >= config.minScorePaperTrade
-    ? 'HIGH SCORE - Eligible for paper trading'
-    : 'Strong signal - monitoring';
+  // Build fired-signals list for the alert
+  const newWallets = (snapshot as any).newWalletBuys || 0;
+  const newWalletPct = (snapshot as any).newWalletPercent || 0;
+  const buySellRatio = (snapshot as any).buySellRatio || 0;
+  const lastActivityMs = (snapshot as any).lastActivityMs || Infinity;
 
-  const tfInfo = tfScores ? ` | 5m:${tfScores.score5m} 15m:${tfScores.score15m} 1h:${tfScores.score1h} (${tfScores.trend})` : '';
+  const signalLines: string[] = [];
+  if (score.totalScore >= config.minScoreAlert)   signalLines.push('📊 High score');
+  if (buySellRatio >= 0.65)                       signalLines.push('💚 Buy dominant (' + (buySellRatio * 100).toFixed(0) + '% buys)');
+  if ((snapshot.priceChange5m || 0) >= 8)         signalLines.push('📈 Momentum +' + (snapshot.priceChange5m || 0).toFixed(1) + '% (5m)');
+  if (newWallets >= 2)                            signalLines.push('🆕 ' + newWallets + ' new wallets buying (' + newWalletPct.toFixed(0) + '% of buyers)');
+  if (lastActivityMs < 60000)                     signalLines.push('⚡ Active right now');
+
+  const buyPressureStr = `${snapshot.buyCount5m || 0} buys / ${snapshot.sellCount5m || 0} sells` +
+    (newWallets > 0 ? ` | ${newWallets} new wallets` : '');
 
   await sendAlert(alerter, db, {
     type: 'high_score',
@@ -615,14 +656,14 @@ async function sendHighScoreAlert(
     change15m: snapshot.priceChange15m,
     change1h: snapshot.priceChange1h,
     holders: snapshot.holderEstimate,
-    buyPressure: `${snapshot.buyCount5m} buys / ${snapshot.sellCount5m} sells`,
+    buyPressure: buyPressureStr,
     riskFlags: risks.flags,
-    action,
+    action: signalLines.join('\n'),
     explorerLinks: {
       token: `https://livenet.xrpl.org/accounts/${token.issuer}`,
       issuer: `https://livenet.xrpl.org/accounts/${token.issuer}`,
     },
-    message: `Score: ${score.totalScore}/100${tfInfo}`,
+    message: `Score: ${score.totalScore}/100`,
   }, config);
 }
 
