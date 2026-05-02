@@ -87,7 +87,7 @@ export class Database {
    * Initialize database schema
    */
   private initializeSchema(): void {
-    // Create tables with retry
+    // Create tables
     for (const [name, sql] of Object.entries(SCHEMA)) {
       try {
         this.execWithRetry(sql);
@@ -96,12 +96,26 @@ export class Database {
       }
     }
 
-    // Create indexes with retry
+    // Create indexes
     for (const indexSql of INDEXES) {
       try {
         this.execWithRetry(indexSql);
       } catch (err) {
         warn(`Error creating index: ${err}`);
+      }
+    }
+
+    // Migrations: add columns that may be missing from older DB files
+    const migrations = [
+      `ALTER TABLE market_snapshots ADD COLUMN unique_buyers_5m INTEGER DEFAULT 0`,
+      `ALTER TABLE market_snapshots ADD COLUMN unique_sellers_5m INTEGER DEFAULT 0`,
+      `ALTER TABLE tracked_tokens ADD COLUMN raw_currency TEXT`,
+    ];
+    for (const sql of migrations) {
+      try {
+        this.db.exec(sql);
+      } catch {
+        // Column already exists — ignore
       }
     }
   }

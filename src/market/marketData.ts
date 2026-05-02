@@ -73,30 +73,36 @@ export class MarketDataCollector {
     token: TrackedToken,
     ammPool: AMMPool | null | undefined,
     volumeData: { buyVolume: number; sellVolume: number; buyCount: number; sellCount: number; uniqueBuyers: number; uniqueSellers: number },
-    holderCount: number | null
+    holderCount: number | null,
+    ammPrice?: { priceXRP: number; liquidityXRP: number } | null  // pre-fetched AMM price
   ): Promise<MarketSnapshot | null> {
     try {
       const key = `${token.currency}:${token.issuer}`;
+      const rawCurrency = token.rawCurrency || token.currency;
 
-      // Get current price and liquidity
-      let priceXRP: number | null = null;
-      let liquidityXRP: number | null = null;
+      // Fix 5+6: Use pre-fetched AMM price when available (correct price for history/changes)
+      let priceXRP: number | null = ammPrice?.priceXRP ?? null;
+      let liquidityXRP: number | null = ammPrice?.liquidityXRP ?? null;
 
-      if (ammPool) {
-        const result = this.calculatePriceFromAMM(ammPool, token.currency, token.issuer);
-        priceXRP = result.price;
-        liquidityXRP = result.liquidity;
-      } else {
-        const bookResult = await this.getPriceFromBookOffers(token.currency, token.issuer);
-        priceXRP = bookResult.price;
-        liquidityXRP = bookResult.liquidity;
+      // Fall back to AMM pool object, then order book (with raw currency)
+      if (priceXRP === null) {
+        if (ammPool) {
+          const result = this.calculatePriceFromAMM(ammPool, token.currency, token.issuer);
+          priceXRP = result.price;
+          liquidityXRP = result.liquidity;
+        } else {
+          // Fix 1: use rawCurrency for book_offers
+          const bookResult = await this.getPriceFromBookOffers(rawCurrency, token.issuer);
+          priceXRP = bookResult.price;
+          liquidityXRP = bookResult.liquidity;
+        }
       }
 
-      // Calculate price changes
+      // Calculate price changes (now using correct price)
       const priceChanges = this.calculatePriceChanges(key, priceXRP);
 
-      // Calculate spread
-      const spreadPercent = await this.calculateSpread(token.currency, token.issuer);
+      // Fix 3: use rawCurrency for spread; Fix 4: null spread = not wide
+      const spreadPercent = await this.calculateSpread(rawCurrency, token.issuer);
 
       const snapshot: MarketSnapshot = {
         tokenCurrency: token.currency,
@@ -429,8 +435,9 @@ export class MarketDataCollector {
         }
       }
 
-      // Only use if within reasonable time window (2 minutes)
-      if (closest && minDiff < 2 * 60 * 1000) {
+      // Accept price points within half the target window
+      // e.g. for 5m target: accept within 2.5m; for 1h target: accept within 30m
+      if (closest && minDiff < Math.abs(now - targetTime) * 0.5) {
         return closest.price;
       }
       return null;

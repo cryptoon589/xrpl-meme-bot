@@ -427,14 +427,10 @@ function startPeriodicScan(
               // Get holder count (cached) — pass rawCurrency so comparison works for hex-encoded tokens
               const holders = await holderCounter.getHolderCount(token.currency, token.issuer, token.rawCurrency);
 
-              const snapshot = await marketData.collectMarketDataWithExtras(token, pool, vol, holders);
+              // Fix 5: pass ammPrice into collectMarketDataWithExtras so price history
+              // and priceChange calculations use the correct AMM price from the start
+              const snapshot = await marketData.collectMarketDataWithExtras(token, pool, vol, holders, ammPrice);
               if (!snapshot) return { token, snapshot: null };
-
-              // Inject AMM price (overrides order book price)
-              if (ammPrice) {
-                snapshot.priceXRP = ammPrice.priceXRP;
-                snapshot.liquidityXRP = ammPrice.liquidityXRP;
-              }
 
               // Fix 3: Inject new wallet data into snapshot for scorer
               (snapshot as any).newWalletBuys = pressure.newWalletBuys;

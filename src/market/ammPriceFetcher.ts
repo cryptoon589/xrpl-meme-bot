@@ -25,7 +25,7 @@ export class AMMPriceFetcher {
   private xrplClient: XRPLClient;
   // Cache: key = "currency:issuer", value = { price, fetchedAt }
   private cache: Map<string, { price: TokenPrice; fetchedAt: number }> = new Map();
-  private readonly CACHE_TTL_MS = 15_000; // 15s cache — AMM prices move fast
+  private readonly CACHE_TTL_MS = 45_000; // 45s cache — covers one full scan cycle batch
 
   constructor(xrplClient: XRPLClient) {
     this.xrplClient = xrplClient;

@@ -77,7 +77,8 @@ export class RiskFilter {
    * Check if spread is too wide (>8% default)
    */
   private checkWideSpread(snapshot: MarketSnapshot | null): boolean {
-    if (!snapshot || snapshot.spreadPercent === null) return true;
+    // Fix: null spread = AMM-only token (no order book) = unknown, not wide
+    if (!snapshot || snapshot.spreadPercent === null) return false;
     return snapshot.spreadPercent > 8;
   }
 

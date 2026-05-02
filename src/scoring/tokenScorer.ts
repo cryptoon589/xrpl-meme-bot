@@ -112,13 +112,13 @@ export class TokenScorer {
    * Fresh wallets buying = new capital entering, not just churning
    */
   private scoreNewWallets(snapshot: MarketSnapshot | null): number {
-    if (!snapshot) return 0;
+    if (!snapshot) return 50; // no data = neutral, not penalty
 
     const newWalletBuys = (snapshot as any).newWalletBuys || 0;
     const newWalletPct  = (snapshot as any).newWalletPercent || 0;
     const uniqueBuyers  = snapshot.uniqueBuyers5m || 0;
 
-    if (uniqueBuyers === 0) return 0;
+    if (uniqueBuyers === 0) return 50; // no live data yet = neutral
 
     // Base: new wallet percentage (0-100)
     const pctScore = newWalletPct; // already 0-100
@@ -160,7 +160,7 @@ export class TokenScorer {
     addChange(c15, 0.6);  // 15m secondary
     addChange(c1h, 0.4);  // 1h context
 
-    if (count === 0) return 50;
+    if (count === 0) return 0; // no price history = unknown, not neutral
     return Math.max(0, Math.min(100, score));
   }
 
