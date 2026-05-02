@@ -496,20 +496,26 @@ function startPeriodicScan(
 
             // Fix 4: Multi-signal gate — require 3+ signals firing together
             const pressure = buyPressureTracker.getSnapshot(token.currency, token.issuer);
+            // Has the tracker accumulated data yet? (at least 1 event observed)
+            const hasLiveData = pressure.buyCount + pressure.sellCount > 0;
+
             const signals = {
               highScore:     score.totalScore >= config.minScoreAlert,
-              buyDominant:   pressure.buySellRatio >= 0.65 && pressure.buyCount >= 3,
-              momentum:      (snapshot.priceChange5m || 0) >= 8,
-              newWallets:    pressure.newWalletBuys >= 2,
-              volDominant:   pressure.volumeRatio >= 0.65 && pressure.buyVolumeXRP > 0,
-              recentActivity:(pressure.lastActivityMs || Infinity) < 3 * 60 * 1000,
+              buyDominant:   hasLiveData && pressure.buySellRatio >= 0.60 && pressure.buyCount >= 2,
+              momentum:      (snapshot.priceChange5m || 0) >= 5,
+              newWallets:    pressure.newWalletBuys >= 1,
+              volDominant:   hasLiveData && pressure.volumeRatio >= 0.60 && pressure.buyVolumeXRP > 0,
+              recentActivity:(pressure.lastActivityMs || Infinity) < 5 * 60 * 1000,
             };
             const signalCount = Object.values(signals).filter(Boolean).length;
 
-            // Alert if 3+ signals OR a very strong individual signal
-            const strongSingle = (snapshot.priceChange5m || 0) >= 25 && pressure.buyCount >= 5;
-            const shouldAlert = (signalCount >= 3 || strongSingle) &&
-              (snapshot.liquidityXRP || 0) >= 500;
+            // Alert needs: high score + at least 1 other signal
+            // OR momentum spike + buy dominant
+            // OR 3+ any signals
+            const strongSingle = (snapshot.priceChange5m || 0) >= 20 && pressure.buyCount >= 3;
+            const highScorePlusOne = signals.highScore && signalCount >= 2;
+            const shouldAlert = (signalCount >= 3 || strongSingle || highScorePlusOne) &&
+              (snapshot.liquidityXRP || 0) >= config.minLiquidityXRP;
 
             // Cooldown: 30 min per token
             const lastAlertTime = db.getLastAlertTime(token.currency, token.issuer);

@@ -28,6 +28,7 @@ export class PaperTrader {
   private positionSizer: PositionSizer;
   private bankrollXRP: number;
   private openPositions: Map<string, OpenPosition> = new Map();
+  private lastCloseTime: Map<string, number> = new Map();
   private dailyPnL: number = 0;
   private tradesToday: number = 0;
   private lastResetDate: string = '';
@@ -100,6 +101,13 @@ export class PaperTrader {
     // Don't double-enter same token
     if (this.openPositions.has(key)) {
       debug(`Already have open position for ${key}`);
+      return null;
+    }
+
+    // Cooldown: don't re-enter a token within 30 minutes of last close
+    const lastClose = this.lastCloseTime?.get(key) || 0;
+    if (Date.now() - lastClose < 30 * 60 * 1000) {
+      debug(`Cooldown active for ${key}, skipping re-entry`);
       return null;
     }
 
@@ -311,6 +319,7 @@ export class PaperTrader {
 
     // Remove from open positions
     this.openPositions.delete(key);
+    this.lastCloseTime.set(key, Date.now());
 
     // Save to DB
     this.db.updatePaperTrade(trade);
