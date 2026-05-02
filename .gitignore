@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 data/*.db
+data/*.db-shm
+data/*.db-wal
 logs/*.log
 *.tsbuildinfo
 .DS_Store
