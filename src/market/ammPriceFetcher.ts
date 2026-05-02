@@ -125,38 +125,77 @@ export class AMMPriceFetcher {
   }
 
   /**
-   * Fetch price from DEX order book (fallback).
+   * Fetch price from DEX order book (fallback for tokens with no AMM pool).
+   *
+   * Queries the SELL side: taker_gets=XRP, taker_pays=token
+   * These are offers where someone wants XRP and is selling the token.
+   * TakerGets = XRP drops, TakerPays = token amount -> price = XRP / tokens
+   *
+   * Also queries the BUY side for liquidity depth estimation.
    */
   private async fetchFromOrderBook(currency: string, issuer: string): Promise<TokenPrice | null> {
     try {
-      const result = await this.xrplClient.getBookOffers(
-        { currency, issuer },
+      // SELL side: people selling tokens for XRP
+      // taker_gets = XRP (what taker receives), taker_pays = token (what taker gives)
+      const sellSide = await this.xrplClient.getBookOffers(
         { currency: 'XRP' },
-        5
+        { currency, issuer },
+        10
       );
 
-      if (!result?.offers?.length) return null;
+      // BUY side: people buying tokens with XRP
+      // taker_gets = token, taker_pays = XRP
+      const buySide = await this.xrplClient.getBookOffers(
+        { currency, issuer },
+        { currency: 'XRP' },
+        10
+      );
 
-      let totalXRP = 0;
-      let totalTokens = 0;
-
-      for (const offer of result.offers.slice(0, 5)) {
-        const xrp = this.parseDrops(offer.TakerPays);
-        const tokens = this.parseTokenUnits(offer.TakerGets);
-        if (xrp > 0 && tokens > 0) {
-          totalXRP += xrp;
-          totalTokens += tokens;
+      // Parse sell side (TakerGets=XRP drops, TakerPays=token)
+      let bestAskXRP = 0;
+      let totalSellLiqXRP = 0;
+      if (sellSide?.offers?.length) {
+        for (const offer of sellSide.offers.slice(0, 5)) {
+          const xrp = this.parseDrops(offer.TakerGets);
+          const tokens = this.parseTokenUnits(offer.TakerPays);
+          if (xrp > 0 && tokens > 0) {
+            if (bestAskXRP === 0) bestAskXRP = xrp / tokens; // best ask = first offer
+            totalSellLiqXRP += xrp;
+          }
         }
       }
 
-      if (totalTokens <= 0) return null;
+      // Parse buy side (TakerGets=token, TakerPays=XRP drops)
+      let bestBidXRP = 0;
+      let totalBuyLiqXRP = 0;
+      if (buySide?.offers?.length) {
+        for (const offer of buySide.offers.slice(0, 5)) {
+          const xrp = this.parseDrops(offer.TakerPays);
+          const tokens = this.parseTokenUnits(offer.TakerGets);
+          if (xrp > 0 && tokens > 0) {
+            if (bestBidXRP === 0) bestBidXRP = xrp / tokens; // best bid = first offer
+            totalBuyLiqXRP += xrp;
+          }
+        }
+      }
 
-      const priceXRP = totalXRP / totalTokens;
+      // Need at least one side to have data
+      if (bestAskXRP === 0 && bestBidXRP === 0) return null;
+
+      // Mid price: average of best bid and ask, or whichever side has data
+      const priceXRP = bestAskXRP > 0 && bestBidXRP > 0
+        ? (bestAskXRP + bestBidXRP) / 2
+        : bestAskXRP || bestBidXRP;
+
+      const totalLiqXRP = totalSellLiqXRP + totalBuyLiqXRP;
+
+      debug(`DEX price for ${currency}: ask=${bestAskXRP.toFixed(8)} bid=${bestBidXRP.toFixed(8)} liq=${totalLiqXRP.toFixed(0)} XRP`);
+
       return {
         priceXRP,
-        liquidityXRP: totalXRP * 2,
-        poolXRP: totalXRP,
-        poolTokens: totalTokens,
+        liquidityXRP: totalLiqXRP,
+        poolXRP: totalBuyLiqXRP,
+        poolTokens: totalBuyLiqXRP / (priceXRP || 1),
         tradingFee: 0,
         source: 'orderbook',
       };

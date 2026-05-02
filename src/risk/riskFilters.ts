@@ -66,10 +66,14 @@ export class RiskFilter {
   }
 
   /**
-   * Check if liquidity is below minimum threshold
+   * Check if liquidity is below minimum threshold.
+   * null liquidityXRP means price fetch failed (no AMM + no DEX data yet) —
+   * treat as UNKNOWN, not confirmed low. Don't penalise tokens we simply
+   * haven't got data for yet.
    */
   private checkLowLiquidity(snapshot: MarketSnapshot | null): boolean {
-    if (!snapshot || snapshot.liquidityXRP === null) return true;
+    if (!snapshot) return true;                  // no snapshot at all = skip
+    if (snapshot.liquidityXRP === null) return false; // no data → don't flag
     return snapshot.liquidityXRP < this.config.minLiquidityXRP;
   }
 
@@ -91,11 +95,14 @@ export class RiskFilter {
   }
 
   /**
-   * Check if there's no real buy activity
+   * Check if there's no real buy activity.
+   * Only flag if we have price data AND confirmed zero buys.
+   * If price is null (data fetch failed), we can't distinguish "no buys"
+   * from "we didn't get data" — don't flag.
    */
   private checkNoBuyActivity(snapshot: MarketSnapshot | null): boolean {
     if (!snapshot) return true;
-    // If both buy count and volume are zero, flag it
+    if (snapshot.priceXRP === null) return false; // no data → don't flag
     return snapshot.buyCount5m === 0 && snapshot.buyVolume5m === 0;
   }
 
