@@ -132,7 +132,10 @@ export class PaperTrader {
       score
     );
 
-    const tradeSizeXRP = Math.min(sizeRecommendation.sizeXRP, this.config.maxTradeXRP);
+    const tradeSizeXRP = Math.min(
+      Math.max(sizeRecommendation.sizeXRP, this.config.minTradeXRP),
+      this.config.maxTradeXRP
+    );
     const entryPrice = snapshot.priceXRP;
     const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
     const effectivePrice = entryPrice * (1 + slippage);
@@ -165,7 +168,11 @@ export class PaperTrader {
     // Deduct from bankroll
     this.bankrollXRP -= tradeSizeXRP + fees;
 
-    debug(`Position sizing: ${sizeRecommendation.method} | Size: ${tradeSizeXRP.toFixed(2)} XRP | ${sizeRecommendation.reasoning}`);
+    const kellySize = sizeRecommendation.sizeXRP;
+    const clampNote = kellySize < this.config.minTradeXRP
+      ? ` (Kelly suggested ${kellySize.toFixed(2)} XRP, raised to min ${this.config.minTradeXRP} XRP)`
+      : '';
+    debug(`Position sizing: ${sizeRecommendation.method} | Size: ${tradeSizeXRP.toFixed(2)} XRP${clampNote} | ${sizeRecommendation.reasoning}`);
 
     // Track position
     this.openPositions.set(key, {

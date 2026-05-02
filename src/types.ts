@@ -155,6 +155,7 @@ export interface BotConfig {
   minScoreAlert: number;
   minScorePaperTrade: number;
   startingBankrollXRP: number;
+  minTradeXRP: number;
   maxTradeXRP: number;
   maxOpenTrades: number;
   maxDailyLossXRP: number;

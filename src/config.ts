@@ -27,6 +27,7 @@ export function loadConfig(): BotConfig {
     minScoreAlert: parseInt(process.env.MIN_SCORE_ALERT || '75', 10),
     minScorePaperTrade: parseInt(process.env.MIN_SCORE_PAPER_TRADE || '80', 10),
     startingBankrollXRP: parseInt(process.env.STARTING_BANKROLL_XRP || '100', 10),
+    minTradeXRP: parseInt(process.env.MIN_TRADE_XRP || '5', 10),
     maxTradeXRP: parseInt(process.env.MAX_TRADE_XRP || '25', 10),
     maxOpenTrades: parseInt(process.env.MAX_OPEN_TRADES || '5', 10),
     maxDailyLossXRP: parseInt(process.env.MAX_DAILY_LOSS_XRP || '30', 10),
