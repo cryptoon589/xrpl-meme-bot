@@ -15,11 +15,10 @@ interface OpenPosition {
   tokensHeld: number;
   remainingPercent: number; // 100 = full position
   highestPriceSinceEntry: number;
-  // FIX #24: Track risk state for emergency exit decisions
   entryRiskFlags: string[];
   lastRiskCheck: number;
-  // Improved exit: track volatility for dynamic stops
   priceHistory: number[]; // Last 10 prices for volatility calculation
+  openedAt: number;       // Timestamp of entry — used to enforce minimum hold time
 }
 
 export class PaperTrader {
@@ -175,11 +174,11 @@ export class PaperTrader {
       tokensHeld: tokensBought,
       remainingPercent: 100,
       highestPriceSinceEntry: entryPrice,
-      // FIX #24: Store initial risk state
       entryRiskFlags: [],
       lastRiskCheck: Date.now(),
-      // Improved exit: initialize price history
       priceHistory: [entryPrice],
+      // Timestamp used to enforce minimum hold time before exits are checked
+      openedAt: Date.now(),
     });
 
     // Save to DB
@@ -217,6 +216,14 @@ export class PaperTrader {
 
       // Skip already-closing positions
       if (keysToClose.includes(key)) continue;
+
+      // Minimum hold time: don't exit within 3 minutes of opening
+      // Prevents instant close on the same scan cycle that opened the trade
+      const MIN_HOLD_MS = 3 * 60 * 1000;
+      if (Date.now() - (position.openedAt || 0) < MIN_HOLD_MS) {
+        debug(`Hold time not met for ${key}, skipping exit check`);
+        continue;
+      }
 
       // Update highest price and price history
       if (currentPrice > position.highestPriceSinceEntry) {
@@ -576,6 +583,7 @@ export class PaperTrader {
       entryRiskFlags: [],
       lastRiskCheck: Date.now(),
       priceHistory: [trade.entryPriceXRP],
+      openedAt: trade.entryTimestamp || 0,
     });
   }
 
@@ -603,11 +611,11 @@ export class PaperTrader {
         tokensHeld,
         remainingPercent: trade.remainingPosition,
         highestPriceSinceEntry: trade.entryPriceXRP,
-        // FIX #24: Initialize risk tracking for loaded positions
         entryRiskFlags: [],
         lastRiskCheck: Date.now(),
-        // Improved exit: initialize price history
         priceHistory: [trade.entryPriceXRP],
+        // Loaded from DB = already past hold time; set openedAt far in the past
+        openedAt: trade.entryTimestamp || 0,
       });
     }
 

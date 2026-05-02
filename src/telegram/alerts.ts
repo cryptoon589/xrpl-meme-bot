@@ -248,13 +248,17 @@ export class TelegramAlerter {
     if (!trade) return 'Paper trade partially closed (no details)';
 
     const pnlEmoji = (trade.pnlXRP || 0) >= 0 ? '✅' : '❌';
+    const soldPct = 100 - trade.remainingPosition;
+    const xrpSold = (soldPct / 100) * trade.entryAmountXRP;
 
     return [
       '📊 <b>PAPER TRADE PARTIAL CLOSE</b>',
       '',
       `<b>Token:</b> ${trade.tokenCurrency}`,
-      `<b>Remaining:</b> ${trade.remainingPosition}%`,
-      `${pnlEmoji} <b>PnL:</b> ${trade.pnlXRP?.toFixed(4) || 'N/A'} XRP (${trade.pnlPercent?.toFixed(2) || 'N/A'}%)`,
+      `<b>Sold:</b> ${soldPct.toFixed(0)}% of position (~${xrpSold.toFixed(2)} XRP)`,
+      `<b>Remaining:</b> ${trade.remainingPosition.toFixed(0)}%`,
+      `<b>Exit price:</b> ${trade.exitPriceXRP?.toFixed(8) ?? 'N/A'} XRP`,
+      `${pnlEmoji} <b>PnL on this close:</b> ${trade.pnlXRP?.toFixed(4) ?? 'N/A'} XRP (${trade.pnlPercent?.toFixed(2) ?? 'N/A'}%)`,
     ].join('\n');
   }
 
@@ -265,16 +269,39 @@ export class TelegramAlerter {
     const trade = payload.paperTrade;
     if (!trade) return 'Paper trade closed (no details)';
 
-    const pnlEmoji = (trade.pnlXRP || 0) >= 0 ? '✅' : '❌';
+    const pnlXRP = trade.pnlXRP ?? null;
+    const pnlPct = trade.pnlPercent ?? null;
+    const pnlEmoji = (pnlXRP ?? 0) >= 0 ? '✅' : '❌';
+
+    // Human-readable exit reason
+    const reasonMap: Record<string, string> = {
+      take_profit_1:           'Take Profit 1 hit (+35%)',
+      take_profit_2:           'Take Profit 2 hit (+75%)',
+      stop_loss_or_trailing:   'Stop loss / trailing stop',
+      stop_loss:               'Stop loss',
+      trailing_stop:           'Trailing stop',
+      duplicate_removed:       'Duplicate position cleaned up',
+    };
+    const exitReason = trade.exitReason
+      ? (reasonMap[trade.exitReason] || trade.exitReason)
+      : 'Unknown';
+
+    // XRP value in / out
+    const valueIn = trade.entryAmountXRP.toFixed(2);
+    const valueOut = trade.exitPriceXRP != null
+      ? ((trade.exitPriceXRP / trade.entryPriceXRP) * trade.entryAmountXRP * (1 - trade.slippageEstimate) - trade.feesPaid).toFixed(2)
+      : null;
 
     return [
       `${pnlEmoji} <b>PAPER TRADE CLOSED</b>`,
       '',
       `<b>Token:</b> ${trade.tokenCurrency}`,
-      `<b>Entry:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
-      `<b>Exit:</b> ${trade.exitPriceXRP?.toFixed(8) || 'N/A'} XRP`,
-      `${pnlEmoji} <b>PnL:</b> ${trade.pnlXRP?.toFixed(4) || 'N/A'} XRP (${trade.pnlPercent?.toFixed(2) || 'N/A'}%)`,
-      `<b>Reason:</b> ${trade.exitReason || 'N/A'}`,
+      `<b>Entry price:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
+      `<b>Exit price:</b>  ${trade.exitPriceXRP?.toFixed(8) ?? 'N/A'} XRP`,
+      `<b>XRP in:</b>  ${valueIn} XRP`,
+      `<b>XRP out:</b> ${valueOut ?? 'N/A'} XRP`,
+      `${pnlEmoji} <b>PnL:</b> ${pnlXRP != null ? pnlXRP.toFixed(4) + ' XRP' : 'N/A'} (${pnlPct != null ? pnlPct.toFixed(2) + '%' : 'N/A'})`,
+      `<b>Reason:</b> ${exitReason}`,
       `<b>Fees:</b> ${trade.feesPaid.toFixed(4)} XRP`,
     ].join('\n');
   }
