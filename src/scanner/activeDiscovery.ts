@@ -182,10 +182,7 @@ export class ActiveDiscovery {
     // Already known
     if (this.knownTokens.has(key)) {
       // Update liquidity if better info
-      const existing = this.knownTokens.get(key)!;
-      if (liquidityXRP > existing.liquidityXRP!) {
-        existing.liquidityXRP = liquidityXRP;
-      }
+      // Token already known — don't overwrite real pool data with offer size
       return null;
     }
 
@@ -203,14 +200,79 @@ export class ActiveDiscovery {
       currency,
       issuer,
       source,
-      liquidityXRP,
+      liquidityXRP: 0,   // placeholder — real value fetched async below
       discoveredAt: Date.now(),
     };
 
     this.knownTokens.set(key, token);
-    info(`🔍 New token discovered via ${source}: ${currency} (issuer: ${issuer.slice(0, 12)}...) ${liquidityXRP > 0 ? `| Liq: ${liquidityXRP.toFixed(0)} XRP` : ''}`);
+
+    // Fetch real AMM pool liquidity asynchronously (don't block discovery)
+    this.fetchRealLiquidity(currency, issuer, token);
 
     return token;
+  }
+
+  /**
+   * Fetch real pool liquidity via amm_info and update the token record.
+   * Called async after discovery so it never blocks the tx stream.
+   */
+  private async fetchRealLiquidity(currency: string, issuer: string, token: DiscoveredToken): Promise<void> {
+    const client = this.xrplClient.getClient();
+    if (!client) return;
+
+    try {
+      const res: any = await client.request({
+        command: 'amm_info',
+        asset:  { currency: 'XRP' },
+        asset2: { currency, issuer },
+        ledger_index: 'validated',
+      });
+
+      const amm = res?.result?.amm;
+      if (!amm) {
+        // No AMM pool — check order book depth as fallback
+        try {
+          const bookRes: any = await client.request({
+            command: 'book_offers',
+            taker_gets: { currency: 'XRP' },
+            taker_pays: { currency, issuer },
+            limit: 20,
+            ledger_index: 'validated',
+          });
+          const offers = bookRes?.result?.offers || [];
+          let totalXRP = 0;
+          for (const o of offers) {
+            if (typeof o.TakerGets === 'string') totalXRP += parseInt(o.TakerGets) / 1_000_000;
+          }
+          token.liquidityXRP = totalXRP;
+          info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | Liq: ${totalXRP.toFixed(0)} XRP (order book, no AMM)`);
+        } catch {
+          info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | No pool data`);
+        }
+        return;
+      }
+
+      // Parse AMM pool reserves
+      const xrpReserve = amm.amount && typeof amm.amount === 'string'
+        ? parseInt(amm.amount) / 1_000_000
+        : 0;
+      const tokenReserve = amm.amount2 && typeof amm.amount2 === 'object'
+        ? parseFloat(amm.amount2.value || '0')
+        : 0;
+
+      // TVL = XRP side * 2 (constant-product pool, both sides equal in value)
+      const price = tokenReserve > 0 ? xrpReserve / tokenReserve : 0;
+      const tvlXRP = xrpReserve * 2;
+      const tradingFee = (amm.trading_fee || 0) / 1000;  // basis points → percent
+
+      token.liquidityXRP = tvlXRP;
+      token.poolId = amm.account;
+
+      info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | Pool TVL: ${tvlXRP.toFixed(0)} XRP | Price: ${price.toFixed(8)} XRP | Fee: ${tradingFee.toFixed(2)}%`);
+
+    } catch {
+      info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | No AMM pool found`);
+    }
   }
 
   /**
