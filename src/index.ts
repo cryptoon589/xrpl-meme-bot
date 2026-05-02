@@ -445,14 +445,31 @@ function startPeriodicScan(
 
             // Hysteresis: only alert on upward threshold cross
             const lastScore = db.getLatestScore(token.currency, token.issuer);
-            const shouldAlert = score.totalScore >= config.minScoreAlert &&
+            const crossedThreshold = score.totalScore >= config.minScoreAlert &&
               (!lastScore || lastScore.totalScore < config.minScoreAlert);
 
-            // Require multi-timeframe consensus for alerts
-            const hasConsensus = result.value.tfScores?.trend === 'bullish' ||
-              (result.value.tfScores?.score5m > 60 && result.value.tfScores?.score15m > 55);
+            // Momentum spike: price up >10% in 5m with positive buy pressure
+            const buyCount = snapshot.buyCount5m || 0;
+            const sellCount = snapshot.sellCount5m || 0;
+            const momentum5m = snapshot.priceChange5m || 0;
+            const momentumSpike = momentum5m >= 10 &&
+              buyCount > sellCount &&
+              buyCount >= 3 &&
+              (snapshot.liquidityXRP || 0) >= 500;
 
-            if (shouldAlert && hasConsensus) {
+            // Volume acceleration: buying picking up fast
+            const volAccel = (snapshot.buyVolume5m || 0) > (snapshot.sellVolume5m || 0) * 1.5 &&
+              buyCount >= 5 &&
+              momentum5m > 0;
+
+            const shouldAlert = crossedThreshold || momentumSpike || volAccel;
+
+            // Cooldown: don't spam same token (30 min)
+            const lastAlertTime = db.getLastAlertTime?.(token.currency, token.issuer) || 0;
+            const alertCooldown = Date.now() - lastAlertTime > 30 * 60 * 1000;
+
+            if (shouldAlert && alertCooldown && riskFilter.isSafe(risks)) {
+              db.setLastAlertTime?.(token.currency, token.issuer, Date.now());
               setTimeout(() => sendHighScoreAlert(
                 telegramAlerter, db, token, snapshot, risks, score, result.value.tfScores, config
               ), 0);
@@ -461,7 +478,7 @@ function startPeriodicScan(
 
             // Paper trade entry - require higher consensus
             if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
-                riskFilter.isSafe(risks) && hasConsensus) {
+                riskFilter.isSafe(risks)) {
               const trade = paperTrader.tryOpenTrade(
                 token, snapshot, score.totalScore,
                 `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`

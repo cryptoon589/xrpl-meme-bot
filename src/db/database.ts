@@ -568,6 +568,17 @@ export class Database {
     return this.db.transaction(fn)();
   }
 
+  // In-memory alert cooldown tracker (no DB write needed)
+  private alertTimes: Map<string, number> = new Map();
+
+  getLastAlertTime(currency: string, issuer: string): number {
+    return this.alertTimes.get(`${currency}:${issuer}`) || 0;
+  }
+
+  setLastAlertTime(currency: string, issuer: string, ts: number): void {
+    this.alertTimes.set(`${currency}:${issuer}`, ts);
+  }
+
   /**
    * Close database connection
    */

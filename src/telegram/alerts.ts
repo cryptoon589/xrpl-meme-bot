@@ -98,57 +98,83 @@ export class TelegramAlerter {
   }
 
   /**
-   * Format token discovery/high score alert
+   * Format token alert as an actionable trading signal
    */
   private formatTokenAlert(payload: AlertPayload): string {
-    const emoji = payload.type === 'high_score' ? '🔥' : '🆕';
-    const lines = [
-      `${emoji} <b>${payload.type === 'high_score' ? 'HIGH SCORE TOKEN' : 'NEW TOKEN DETECTED'}</b>`,
+    const isSignal = payload.type === 'high_score';
+    const score = payload.score || 0;
+    const price = payload.price;
+    const liq = payload.liquidity;
+
+    // Signal strength label
+    const strength = score >= 85 ? '🚀 STRONG BUY SIGNAL'
+      : score >= 75 ? '🔥 BUY SIGNAL'
+      : score >= 65 ? '⚡ WATCH SIGNAL'
+      : '🆕 NEW TOKEN';
+
+    const lines: string[] = [
+      `${strength}`,
       '',
-      `<b>Token:</b> ${payload.tokenCurrency || 'N/A'}`,
-      `<b>Issuer:</b> <code>${payload.tokenIssuer || 'N/A'}</code>`,
-      `<b>Score:</b> ${payload.score || 'N/A'}/100`,
-      `<b>Liquidity:</b> ${payload.liquidity !== null && payload.liquidity !== undefined ? `${payload.liquidity.toFixed(2)} XRP` : 'Unknown'}`,
-      `<b>Price:</b> ${payload.price !== null && payload.price !== undefined ? `${payload.price.toFixed(8)} XRP` : 'Unknown'}`,
+      `<b>Token:</b> <code>${payload.tokenCurrency || 'N/A'}</code>`,
+      `<b>Signal Score:</b> ${score}/100`,
     ];
 
-    if (payload.change5m !== null && payload.change5m !== undefined) {
-      lines.push(`<b>5m change:</b> ${payload.change5m >= 0 ? '+' : ''}${payload.change5m.toFixed(2)}%`);
-    }
-    if (payload.change15m !== null && payload.change15m !== undefined) {
-      lines.push(`<b>15m change:</b> ${payload.change15m >= 0 ? '+' : ''}${payload.change15m.toFixed(2)}%`);
-    }
-    if (payload.change1h !== null && payload.change1h !== undefined) {
-      lines.push(`<b>1h change:</b> ${payload.change1h >= 0 ? '+' : ''}${payload.change1h.toFixed(2)}%`);
+    // Price line
+    if (price != null) {
+      lines.push(`<b>Current Price:</b> ${price.toFixed(8)} XRP`);
     }
 
-    if (payload.holders !== null && payload.holders !== undefined) {
+    // Liquidity
+    if (liq != null) {
+      const liqLabel = liq >= 10000 ? '🟢 High' : liq >= 3000 ? '🟡 Medium' : '🔴 Low';
+      lines.push(`<b>Liquidity:</b> ${liq.toFixed(0)} XRP ${liqLabel}`);
+    }
+
+    // Price momentum
+    const c5 = payload.change5m, c15 = payload.change15m, c1h = payload.change1h;
+    if (c5 != null || c15 != null || c1h != null) {
+      lines.push('');
+      lines.push('<b>📈 Price Momentum:</b>');
+      if (c5 != null)  lines.push(`  5m:  ${c5  >= 0 ? '+' : ''}${c5.toFixed(1)}%`);
+      if (c15 != null) lines.push(`  15m: ${c15 >= 0 ? '+' : ''}${c15.toFixed(1)}%`);
+      if (c1h != null) lines.push(`  1h:  ${c1h >= 0 ? '+' : ''}${c1h.toFixed(1)}%`);
+    }
+
+    // Buy pressure
+    if (payload.buyPressure) {
+      lines.push(`<b>Buy Pressure:</b> ${payload.buyPressure}`);
+    }
+
+    // Actionable entry/exit levels (only for real signals)
+    if (isSignal && price != null && score >= 65) {
+      const stopLoss  = price * 0.85;  // -15%
+      const target1   = price * 1.35;  // +35%
+      const target2   = price * 1.75;  // +75%
+      lines.push('');
+      lines.push('<b>💰 Trade Levels:</b>');
+      lines.push(`  Entry:    ${price.toFixed(8)} XRP  ← buy here`);
+      lines.push(`  Stop:     ${stopLoss.toFixed(8)} XRP  (-15%)`);
+      lines.push(`  Target 1: ${target1.toFixed(8)} XRP  (+35%) — take 40%`);
+      lines.push(`  Target 2: ${target2.toFixed(8)} XRP  (+75%) — take 30%`);
+      lines.push(`  Trail:    move stop to entry after T1 hit`);
+    }
+
+    // Risk flags — shown prominently
+    if (payload.riskFlags && payload.riskFlags.length > 0) {
+      lines.push('');
+      lines.push(`<b>⚠️ Risks:</b> ${payload.riskFlags.join(' | ')}`);
+    }
+
+    // Holders
+    if (payload.holders != null) {
       lines.push(`<b>Holders:</b> ${payload.holders}`);
     }
 
-    if (payload.buyPressure) {
-      lines.push(`<b>Buy pressure:</b> ${payload.buyPressure}`);
-    }
-
-    if (payload.riskFlags && payload.riskFlags.length > 0) {
-      lines.push(`<b>Risk flags:</b> ${payload.riskFlags.join(', ')}`);
-    }
-
-    if (payload.action) {
-      lines.push('', `<b>Action:</b> ${payload.action}`);
-    }
-
+    // Links
     if (payload.explorerLinks) {
-      lines.push('', '<b>Links:</b>');
-      if (payload.explorerLinks.token) {
-        lines.push(`• Token: ${payload.explorerLinks.token}`);
-      }
-      if (payload.explorerLinks.issuer) {
-        lines.push(`• Issuer: ${payload.explorerLinks.issuer}`);
-      }
-      if (payload.explorerLinks.amm) {
-        lines.push(`• AMM: ${payload.explorerLinks.amm}`);
-      }
+      lines.push('');
+      const issuer = payload.tokenIssuer || '';
+      lines.push(`<a href="https://firstledger.net/token/${issuer}/${payload.tokenCurrency}">FirstLedger</a> | <a href="https://xmagnetic.org/tokens/${payload.tokenCurrency}+${issuer}">xMagnetic</a> | <a href="https://livenet.xrpl.org/accounts/${issuer}">Explorer</a>`);
     }
 
     return lines.join('\n');
