@@ -147,8 +147,18 @@ export class RiskFilter {
    * Check if token passes all critical risk filters
    */
   isSafe(riskFlags: RiskFlags): boolean {
-    // Critical flags that must be false
-    return !riskFlags.lowLiquidity && !riskFlags.wideSpread;
+    // Hard blocks: confirmed rug signals only
+    // devDumping, liquidityRemoved, concentratedSupply = immediate danger
+    if (riskFlags.devDumping) return false;
+    if (riskFlags.liquidityRemoved) return false;
+    if (riskFlags.concentratedSupply) return false;
+
+    // Low liquidity alone is NOT a hard block — DEX tokens and new tokens
+    // legitimately start with low liquidity and can still be great entries.
+    // Wide spread (>8%) IS a block since it means terrible execution cost.
+    if (riskFlags.wideSpread) return false;
+
+    return true;
   }
 
   /**

@@ -30,18 +30,38 @@ export class TokenScorer {
     pool: AMMPool | null,
     riskFlags: RiskFlags
   ): TokenScore {
-    const buyPressureScore  = this.scoreBuyPressure(snapshot);   // 35%
-    const newWalletScore    = this.scoreNewWallets(snapshot);     // 25%
-    const momentumScore     = this.scoreMomentum(snapshot);       // 20%
-    const liquidityScore    = this.scoreLiquidity(snapshot);      // 10%
-    const devSafetyScore    = this.scoreDevSafety(riskFlags);     // 10%
+    const buyPressureScore  = this.scoreBuyPressure(snapshot);
+    const newWalletScore    = this.scoreNewWallets(snapshot);
+    const momentumScore     = this.scoreMomentum(snapshot);
+    const liquidityScore    = this.scoreLiquidity(snapshot);
+    const devSafetyScore    = this.scoreDevSafety(riskFlags);
+    const tokenAgeScore     = this.scoreTokenAge(token);
 
-    const totalScore =
-      buyPressureScore  * 0.35 +
-      newWalletScore    * 0.25 +
-      momentumScore     * 0.20 +
-      liquidityScore    * 0.10 +
-      devSafetyScore    * 0.10;
+    // Adaptive weighting: if buy pressure has live data, weight it heavily.
+    // If no live data yet (window empty), shift weight to momentum + liquidity
+    // so tokens aren't permanently zeroed waiting for tracker data.
+    const hasBuyData = buyPressureScore > 0;
+    const hasNewWalletData = (snapshot as any)?.uniqueBuyers5m > 0;
+
+    let totalScore: number;
+    if (hasBuyData || hasNewWalletData) {
+      // Full live-data mode
+      totalScore =
+        buyPressureScore  * 0.30 +
+        newWalletScore    * 0.20 +
+        momentumScore     * 0.20 +
+        liquidityScore    * 0.15 +
+        devSafetyScore    * 0.10 +
+        tokenAgeScore     * 0.05;
+    } else {
+      // No live pressure data yet — weight on momentum + liquidity + age
+      totalScore =
+        momentumScore     * 0.35 +
+        liquidityScore    * 0.30 +
+        devSafetyScore    * 0.15 +
+        tokenAgeScore     * 0.10 +
+        newWalletScore    * 0.10;
+    }
 
     const clampedScore = Math.max(0, Math.min(100, totalScore));
 
@@ -58,6 +78,23 @@ export class TokenScorer {
       whitelistBoost: 0,
       spreadScore: 0,
     };
+  }
+
+  /**
+   * Score token age (0-100) — newer tokens get a bonus.
+   * A 1-hour-old token with buy activity is much more significant.
+   */
+  private scoreTokenAge(token: TrackedToken): number {
+    const ageMs = Date.now() - (token.firstSeen || Date.now());
+    const ageHours = ageMs / (1000 * 60 * 60);
+    // Peak bonus for tokens under 6 hours old, decays over 48h
+    if (ageHours < 1)  return 100;
+    if (ageHours < 3)  return 85;
+    if (ageHours < 6)  return 70;
+    if (ageHours < 12) return 55;
+    if (ageHours < 24) return 40;
+    if (ageHours < 48) return 25;
+    return 10;
   }
 
   /**

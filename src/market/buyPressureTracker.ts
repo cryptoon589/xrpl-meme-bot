@@ -41,7 +41,9 @@ export class BuyPressureTracker {
   // Per-token: last trade timestamp
   private lastTrade: Map<string, number> = new Map();
 
-  private readonly WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+  private readonly WINDOW_MS = 15 * 60 * 1000; // 15-minute window — catches more activity
+  private readonly MAX_KNOWN_WALLETS = 500;      // cap per token to prevent memory leak
+  private readonly MAX_TOKENS_TRACKED = 300;     // prune least-active tokens above this
 
   /**
    * Process a transaction from the live stream.
@@ -127,11 +129,21 @@ export class BuyPressureTracker {
     if (!this.knownWallets.has(key)) this.knownWallets.set(key, new Set());
 
     this.events.get(key)!.push({ wallet, side, volumeXRP, timestamp: now });
-    this.knownWallets.get(key)!.add(wallet);
+
+    // Cap knownWallets per token to prevent unbounded memory growth
+    const known = this.knownWallets.get(key)!;
+    if (known.size < this.MAX_KNOWN_WALLETS) {
+      known.add(wallet);
+    }
     this.lastTrade.set(key, now);
 
     // Prune old events beyond window
     this.pruneOldEvents(key, now);
+
+    // Prune least-active tokens if we're tracking too many
+    if (this.events.size > this.MAX_TOKENS_TRACKED) {
+      this.pruneLeastActiveTokens();
+    }
   }
 
   private pruneOldEvents(key: string, now: number): void {
@@ -239,5 +251,24 @@ export class BuyPressureTracker {
 
   getTrackedTokenCount(): number {
     return this.events.size;
+  }
+
+  /**
+   * Prune the least-recently-active tokens to keep memory bounded.
+   * Keeps the most recently traded tokens.
+   */
+  private pruneLeastActiveTokens(): void {
+    // Sort by last trade time, oldest first
+    const sorted = Array.from(this.lastTrade.entries())
+      .sort((a, b) => a[1] - b[1]);
+
+    // Remove oldest 20% to make room
+    const removeCount = Math.floor(this.MAX_TOKENS_TRACKED * 0.2);
+    for (let i = 0; i < removeCount && i < sorted.length; i++) {
+      const key = sorted[i][0];
+      this.events.delete(key);
+      this.lastTrade.delete(key);
+      // Keep knownWallets for historical "new wallet" detection if token returns
+    }
   }
 }
