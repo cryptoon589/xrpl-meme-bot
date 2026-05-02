@@ -4,9 +4,10 @@
 
 // Token representation
 export interface TrackedToken {
-  currency: string;
+  currency: string;      // decoded display name
+  rawCurrency?: string;  // original hex code (used for API calls)
   issuer: string;
-  firstSeen: number; // Unix timestamp
+  firstSeen: number;
   lastUpdated: number;
 }
 

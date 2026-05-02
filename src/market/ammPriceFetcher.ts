@@ -35,22 +35,25 @@ export class AMMPriceFetcher {
    * Get the current price of a token in XRP.
    * Tries AMM first, falls back to order book.
    */
-  async getPrice(currency: string, issuer: string): Promise<TokenPrice | null> {
+  async getPrice(currency: string, issuer: string, rawCurrency?: string): Promise<TokenPrice | null> {
     const key = `${currency}:${issuer}`;
     const cached = this.cache.get(key);
     if (cached && Date.now() - cached.fetchedAt < this.CACHE_TTL_MS) {
       return cached.price;
     }
 
+    // Use rawCurrency (hex) for API calls — decoded name causes "Issue is malformed"
+    const apiCurrency = rawCurrency || currency;
+
     // Try AMM pool first
-    const ammPrice = await this.fetchFromAMM(currency, issuer);
+    const ammPrice = await this.fetchFromAMM(apiCurrency, issuer);
     if (ammPrice) {
       this.cache.set(key, { price: ammPrice, fetchedAt: Date.now() });
       return ammPrice;
     }
 
     // Fall back to order book
-    const bookPrice = await this.fetchFromOrderBook(currency, issuer);
+    const bookPrice = await this.fetchFromOrderBook(apiCurrency, issuer);
     if (bookPrice) {
       this.cache.set(key, { price: bookPrice, fetchedAt: Date.now() });
       return bookPrice;

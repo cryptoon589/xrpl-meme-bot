@@ -409,8 +409,8 @@ function startPeriodicScan(
 
               const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
 
-              // Fix 1: Get price directly from AMM pool
-              const ammPrice = await ammPriceFetcher.getPrice(token.currency, token.issuer);
+              // Fix 1: Get price directly from AMM pool (rawCurrency avoids "Issue is malformed")
+              const ammPrice = await ammPriceFetcher.getPrice(token.currency, token.issuer, token.rawCurrency);
 
               // Fix 2: Get real-time buy pressure
               const pressure = buyPressureTracker.getSnapshot(token.currency, token.issuer);

@@ -15,7 +15,8 @@ import { TrackedToken } from '../types';
 import { info, warn, debug } from '../utils/logger';
 
 export interface DiscoveredToken {
-  currency: string;
+  currency: string;       // decoded display name (e.g. "Laugh")
+  rawCurrency: string;    // original hex or 3-char code as received from XRPL (used for API calls)
   issuer: string;
   source: 'amm_pool' | 'offer_create' | 'token_payment' | 'ledger_sweep';
   liquidityXRP?: number;
@@ -98,72 +99,72 @@ export class ActiveDiscovery {
   }
 
   private extractFromAMMCreate(t: any, meta: any): DiscoveredToken | null {
-    // AMMCreate has Amount and Amount2 fields
     const amt1 = t.Amount;
     const amt2 = t.Amount2;
 
+    let rawCurrency: string | null = null;
     let currency: string | null = null;
     let issuer: string | null = null;
-    let liquidityXRP = 0;
 
     if (typeof amt1 === 'string' && amt2 && typeof amt2 === 'object') {
+      rawCurrency = amt2.currency;
       currency = this.decodeCurrency(amt2.currency);
       issuer = amt2.issuer;
-      liquidityXRP = parseInt(amt1) / 1_000_000;
     } else if (typeof amt2 === 'string' && amt1 && typeof amt1 === 'object') {
+      rawCurrency = amt1.currency;
       currency = this.decodeCurrency(amt1.currency);
       issuer = amt1.issuer;
-      liquidityXRP = parseInt(amt2) / 1_000_000;
     }
 
-    if (!currency || !issuer) return null;
+    if (!currency || !issuer || !rawCurrency) return null;
     if (this.STABLECOINS.has(currency)) return null;
 
-    return this.registerToken(currency, issuer, 'amm_pool', liquidityXRP);
+    return this.registerToken(currency, rawCurrency, issuer, 'amm_pool');
   }
 
   private extractFromOffer(t: any, meta: any): DiscoveredToken | null {
     const gets = t.TakerGets;
     const pays = t.TakerPays;
 
+    let rawCurrency: string | null = null;
     let currency: string | null = null;
     let issuer: string | null = null;
-    let xrpSide = 0;
 
     if (typeof gets === 'string' && pays && typeof pays === 'object') {
+      rawCurrency = pays.currency;
       currency = this.decodeCurrency(pays.currency);
       issuer = pays.issuer;
-      xrpSide = parseInt(gets) / 1_000_000;
     } else if (typeof pays === 'string' && gets && typeof gets === 'object') {
+      rawCurrency = gets.currency;
       currency = this.decodeCurrency(gets.currency);
       issuer = gets.issuer;
-      xrpSide = parseInt(pays) / 1_000_000;
     }
 
-    if (!currency || !issuer) return null;
+    if (!currency || !issuer || !rawCurrency) return null;
     if (this.STABLECOINS.has(currency)) return null;
-    if (xrpSide < 1) return null;
 
-    return this.registerToken(currency, issuer, 'offer_create', xrpSide);
+    return this.registerToken(currency, rawCurrency, issuer, 'offer_create');
   }
 
   private extractFromPayment(t: any): DiscoveredToken | null {
     const amount = t.Amount;
     if (!amount || typeof amount === 'string') return null;
-    const currency = this.decodeCurrency(amount.currency);
+    const rawCurrency = amount.currency;
+    const currency = this.decodeCurrency(rawCurrency);
     if (this.STABLECOINS.has(currency)) return null;
 
-    return this.registerToken(currency, amount.issuer, 'token_payment', 0);
+    return this.registerToken(currency, rawCurrency, amount.issuer, 'token_payment');
   }
 
   private extractFromTrustSet(t: any): DiscoveredToken | null {
     const limit = t.LimitAmount;
     if (!limit || typeof limit !== 'object') return null;
-    const currency = this.decodeCurrency(limit.currency);
+    const rawCurrency = limit.currency;
+    const currency = this.decodeCurrency(rawCurrency);
     if (this.STABLECOINS.has(currency)) return null;
     if (limit.issuer === t.Account) return null;
 
-    return this.registerToken(currency, limit.issuer, 'token_payment', 0);
+    return this.registerToken(currency, rawCurrency, limit.issuer, 'token_payment');
   }
 
   /**
@@ -171,20 +172,15 @@ export class ActiveDiscovery {
    */
   private registerToken(
     currency: string,
+    rawCurrency: string,
     issuer: string,
-    source: DiscoveredToken['source'],
-    liquidityXRP: number
+    source: DiscoveredToken['source']
   ): DiscoveredToken | null {
     if (!currency || !issuer) return null;
 
     const key = `${currency}:${issuer}`;
 
-    // Already known
-    if (this.knownTokens.has(key)) {
-      // Update liquidity if better info
-      // Token already known — don't overwrite real pool data with offer size
-      return null;
-    }
+    if (this.knownTokens.has(key)) return null;
 
     // Spam detection
     if (this.spamIssuers.has(issuer)) return null;
@@ -198,16 +194,17 @@ export class ActiveDiscovery {
 
     const token: DiscoveredToken = {
       currency,
+      rawCurrency,
       issuer,
       source,
-      liquidityXRP: 0,   // placeholder — real value fetched async below
+      liquidityXRP: 0,
       discoveredAt: Date.now(),
     };
 
     this.knownTokens.set(key, token);
 
-    // Fetch real AMM pool liquidity asynchronously (don't block discovery)
-    this.fetchRealLiquidity(currency, issuer, token);
+    // Async: fetch real AMM pool TVL — pass rawCurrency so amm_info gets the correct hex
+    this.fetchRealLiquidity(rawCurrency, issuer, token);
 
     return token;
   }
@@ -216,7 +213,7 @@ export class ActiveDiscovery {
    * Fetch real pool liquidity via amm_info and update the token record.
    * Called async after discovery so it never blocks the tx stream.
    */
-  private async fetchRealLiquidity(currency: string, issuer: string, token: DiscoveredToken): Promise<void> {
+  private async fetchRealLiquidity(rawCurrency: string, issuer: string, token: DiscoveredToken): Promise<void> {
     const client = this.xrplClient.getClient();
     if (!client) return;
 
@@ -224,7 +221,7 @@ export class ActiveDiscovery {
       const res: any = await client.request({
         command: 'amm_info',
         asset:  { currency: 'XRP' },
-        asset2: { currency, issuer },
+        asset2: { currency: rawCurrency, issuer },  // must use raw hex, not decoded name
         ledger_index: 'validated',
       });
 
@@ -235,7 +232,7 @@ export class ActiveDiscovery {
           const bookRes: any = await client.request({
             command: 'book_offers',
             taker_gets: { currency: 'XRP' },
-            taker_pays: { currency, issuer },
+            taker_pays: { currency: rawCurrency, issuer },  // raw hex for API
             limit: 20,
             ledger_index: 'validated',
           });
@@ -245,9 +242,9 @@ export class ActiveDiscovery {
             if (typeof o.TakerGets === 'string') totalXRP += parseInt(o.TakerGets) / 1_000_000;
           }
           token.liquidityXRP = totalXRP;
-          info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | Liq: ${totalXRP.toFixed(0)} XRP (order book, no AMM)`);
+          info(`🔍 New token: ${token.currency} (${issuer.slice(0, 12)}...) | Liq: ${totalXRP.toFixed(0)} XRP (order book, no AMM)`);
         } catch {
-          info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | No pool data`);
+          info(`🔍 New token: ${token.currency} (${issuer.slice(0, 12)}...) | No pool data`);
         }
         return;
       }
@@ -260,18 +257,17 @@ export class ActiveDiscovery {
         ? parseFloat(amm.amount2.value || '0')
         : 0;
 
-      // TVL = XRP side * 2 (constant-product pool, both sides equal in value)
       const price = tokenReserve > 0 ? xrpReserve / tokenReserve : 0;
       const tvlXRP = xrpReserve * 2;
-      const tradingFee = (amm.trading_fee || 0) / 1000;  // basis points → percent
+      const tradingFee = (amm.trading_fee || 0) / 1000;
 
       token.liquidityXRP = tvlXRP;
       token.poolId = amm.account;
 
-      info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | Pool TVL: ${tvlXRP.toFixed(0)} XRP | Price: ${price.toFixed(8)} XRP | Fee: ${tradingFee.toFixed(2)}%`);
+      info(`🔍 New token: ${token.currency} (${issuer.slice(0, 12)}...) | Pool TVL: ${tvlXRP.toFixed(0)} XRP | Price: ${price.toFixed(8)} XRP | Fee: ${tradingFee.toFixed(2)}%`);
 
     } catch {
-      info(`🔍 New token: ${currency} (${issuer.slice(0, 12)}...) | No AMM pool found`);
+      info(`🔍 New token: ${token.currency} (${issuer.slice(0, 12)}...) | No AMM pool found`);
     }
   }
 
@@ -315,23 +311,26 @@ export class ActiveDiscovery {
 
           // We want XRP/token pairs
           let currency: string | null = null;
+          let rawCurrency: string | null = null;
           let issuer: string | null = null;
 
           if (asset1.currency === 'XRP' && asset2.currency && asset2.issuer) {
+            rawCurrency = asset2.currency;
             currency = this.decodeCurrency(asset2.currency);
             issuer = asset2.issuer;
           } else if (asset2.currency === 'XRP' && asset1.currency && asset1.issuer) {
+            rawCurrency = asset1.currency;
             currency = this.decodeCurrency(asset1.currency);
             issuer = asset1.issuer;
           }
 
-          if (!currency || !issuer) continue;
+          if (!currency || !issuer || !rawCurrency) continue;
           if (this.STABLECOINS.has(currency)) continue;
           if (this.knownAMMs.has(`${currency}:${issuer}`)) continue;
 
           this.knownAMMs.add(`${currency}:${issuer}`);
 
-          const token = this.registerToken(currency, issuer, 'ledger_sweep', 0);
+          const token = this.registerToken(currency, rawCurrency, issuer, 'ledger_sweep');
           if (token) found.push(token);
         }
 
@@ -356,6 +355,7 @@ export class ActiveDiscovery {
   toTrackedToken(dt: DiscoveredToken): TrackedToken {
     return {
       currency: dt.currency,
+      rawCurrency: dt.rawCurrency,
       issuer: dt.issuer,
       firstSeen: dt.discoveredAt,
       lastUpdated: dt.discoveredAt,
