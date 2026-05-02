@@ -167,6 +167,7 @@ export interface BotConfig {
     spread: number;
   };
   logLevel: string;
+  liveTrading: boolean;       // true = real txs, false = dry-run simulation
 }
 
 // Transaction metadata wrapper

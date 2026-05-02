@@ -291,6 +291,18 @@ export class TelegramAlerter {
   }
 
   /**
+   * Send a pre-formatted HTML message directly (used by TradeExecutor)
+   */
+  async sendRaw(html: string): Promise<void> {
+    if (!this.enabled || !this.bot) return;
+    try {
+      await this.bot.sendMessage(this.chatId, html, { parse_mode: 'HTML', disable_web_page_preview: true });
+    } catch (err) {
+      warn(`Failed to send raw Telegram message: ${err}`);
+    }
+  }
+
+  /**
    * Send a test message
    * FIX #18: Improved error messages for common failure modes
    */

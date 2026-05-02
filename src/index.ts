@@ -34,6 +34,7 @@ import { CorrelationDetector } from './scoring/correlationDetector';
 import { ActiveDiscovery } from './scanner/activeDiscovery';
 import { AMMPriceFetcher } from './market/ammPriceFetcher';
 import { BuyPressureTracker } from './market/buyPressureTracker';
+import { TradeExecutor } from './execution/tradeExecutor';
 
 // Global state
 let isRunning = false;
@@ -98,6 +99,20 @@ async function main() {
   const paperTrader = config.mode === 'PAPER' ? new PaperTrader(config, db) : null;
   const telegramAlerter = new TelegramAlerter(config);
 
+  // Trade executor — dry-run unless LIVE_TRADING=true in .env
+  let tradeExecutor: TradeExecutor | null = null;
+  if (process.env.TRADING_WALLET_SEED) {
+    const dryRun = !config.liveTrading;
+    tradeExecutor = new TradeExecutor(config, telegramAlerter, dryRun);
+    info(`Trade executor: ${dryRun ? 'DRY-RUN mode (set LIVE_TRADING=true to go live)' : '🔴 LIVE TRADING ENABLED'}`);
+    tradeExecutor.startMonitor(async (currency, issuer) => {
+      const p = await ammPriceFetcher.getPrice(currency, issuer);
+      return p?.priceXRP ?? null;
+    });
+  } else {
+    info('TRADING_WALLET_SEED not set — auto-execution disabled');
+  }
+
   await tokenDiscovery.initialize();
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
@@ -153,7 +168,7 @@ async function main() {
     tokenDiscovery, ammScanner, marketData, volumeTracker, holderCounter,
     issuerReputation, multiTimeframeScorer, correlationDetector,
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
-    ammPriceFetcher, buyPressureTracker
+    ammPriceFetcher, buyPressureTracker, tradeExecutor
   );
 
   startHealthCheck(xrplClient);
@@ -330,7 +345,8 @@ function startPeriodicScan(
   db: Database,
   config: any,
   ammPriceFetcher: AMMPriceFetcher,
-  buyPressureTracker: BuyPressureTracker
+  buyPressureTracker: BuyPressureTracker,
+  tradeExecutor: TradeExecutor | null
 ): void {
   const MAX_TRACKED_TOKENS = 500;
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
@@ -501,10 +517,33 @@ function startPeriodicScan(
 
             if (shouldAlert && alertCooldown && riskFilter.isSafe(risks)) {
               db.setLastAlertTime(token.currency, token.issuer, Date.now());
+
+              // Send Telegram signal alert
               setTimeout(() => sendHighScoreAlert(
                 telegramAlerter, db, token, snapshot, risks, score, result.value.tfScores, config
               ), 0);
               totalAlerts++;
+
+              // Auto-execute trade if executor is configured
+              if (tradeExecutor && snapshot.priceXRP) {
+                const tradeSize = Math.min(
+                  config.maxTradeXRP,
+                  config.startingBankrollXRP * 0.1   // max 10% of bankroll per trade
+                );
+                tradeExecutor.openTrade(
+                  token.currency,
+                  token.issuer,
+                  tradeSize,
+                  snapshot.priceXRP,
+                  score.totalScore
+                ).then(result => {
+                  if (result.success) {
+                    info(`✅ Auto-trade opened: ${token.currency} | ${tradeSize} XRP | tx: ${result.txHash}`);
+                  } else {
+                    warn(`⚠️ Auto-trade skipped: ${token.currency} | ${result.error}`);
+                  }
+                }).catch(err => warn(`Auto-trade error: ${err}`));
+              }
             }
 
             // Paper trade entry - require higher consensus
@@ -738,6 +777,7 @@ function setupGracefulShutdown(xrplClient: XRPLClient, db: Database): void {
     if (healthCheckInterval) clearInterval(healthCheckInterval);
     if (txProcessingTimer) clearInterval(txProcessingTimer);
     if (healthServer) healthServer.close();
+    if (hourlySummaryTimer) clearInterval(hourlySummaryTimer);
 
     await xrplClient.disconnect();
     db.close();
