@@ -463,6 +463,23 @@ export class Database {
     }
   }
 
+  /**
+   * DB-level check: is there already an open/partial trade for this token?
+   * Used as a hard guard against duplicate entries even across restarts.
+   */
+  hasOpenTradeForToken(currency: string, issuer: string): boolean {
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM paper_trades
+        WHERE token_currency = ? AND token_issuer = ? AND status IN ('open', 'partial')
+      `).get(currency, issuer) as any;
+      return row.cnt > 0;
+    } catch (err) {
+      warn(`Error checking open trade: ${err}`);
+      return false;
+    }
+  }
+
   getTradesForDate(date: string): PaperTrade[] {
     try {
       const startOfDay = new Date(date).getTime();

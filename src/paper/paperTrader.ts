@@ -98,9 +98,16 @@ export class PaperTrader {
 
     const key = `${token.currency}:${token.issuer}`;
 
-    // Don't double-enter same token
+    // Don't double-enter same token — check both in-memory map AND DB
+    // The DB check guards against race conditions and post-restart duplicates
     if (this.openPositions.has(key)) {
-      debug(`Already have open position for ${key}`);
+      debug(`Already have open position for ${key} (in-memory)`);
+      return null;
+    }
+    if (this.db.hasOpenTradeForToken(token.currency, token.issuer)) {
+      warn(`Blocked duplicate trade for ${key} — already open in DB`);
+      // Sync in-memory state from DB to avoid future misses
+      this.loadOpenPositionFromDB(token.currency, token.issuer);
       return null;
     }
 
@@ -535,6 +542,29 @@ export class PaperTrader {
     };
 
     this.db.saveDailySummary(summary);
+  }
+
+  /**
+   * Sync a single open position from DB into the in-memory map.
+   * Called when we detect a DB open trade that isn't in memory (e.g. after restart race).
+   */
+  private loadOpenPositionFromDB(currency: string, issuer: string): void {
+    const key = `${currency}:${issuer}`;
+    if (this.openPositions.has(key)) return; // already loaded
+    const openTrades = this.db.getOpenTrades();
+    const trade = openTrades.find(t => t.tokenCurrency === currency && t.tokenIssuer === issuer);
+    if (!trade) return;
+    const tokensHeld = trade.entryAmountXRP / trade.entryPriceXRP;
+    this.openPositions.set(key, {
+      trade,
+      entryPriceXRP: trade.entryPriceXRP,
+      tokensHeld,
+      remainingPercent: trade.remainingPosition,
+      highestPriceSinceEntry: trade.entryPriceXRP,
+      entryRiskFlags: [],
+      lastRiskCheck: Date.now(),
+      priceHistory: [trade.entryPriceXRP],
+    });
   }
 
   /**
