@@ -378,9 +378,8 @@ function startPeriodicScan(
 
       // Periodic holder count update
       if (scanCycle % HOLDER_SCAN_INTERVAL === 0 && tokens.length > 0) {
-        holderCounter.batchUpdateHolders(tokens).catch(err => {
-          warn(`Holder batch update failed: ${err}`);
-        });
+        // batchUpdateHolders removed — per-token fetch in scan loop now handles this
+        Promise.resolve();
         holderCounter.pruneCache();
       }
 
@@ -425,8 +424,8 @@ function startPeriodicScan(
                 uniqueSellers: pressure.uniqueSellers,
               };
 
-              // Get holder count (cached)
-              const holders = await holderCounter.getHolderCount(token.currency, token.issuer);
+              // Get holder count (cached) — pass rawCurrency so comparison works for hex-encoded tokens
+              const holders = await holderCounter.getHolderCount(token.currency, token.issuer, token.rawCurrency);
 
               const snapshot = await marketData.collectMarketDataWithExtras(token, pool, vol, holders);
               if (!snapshot) return { token, snapshot: null };

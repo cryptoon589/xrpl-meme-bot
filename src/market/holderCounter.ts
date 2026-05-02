@@ -1,10 +1,15 @@
 /**
- * Holder Counter Module
- * Counts actual trustline holders for a token by scanning issuer's account_lines
+ * Holder Counter
+ *
+ * Counts real trustline holders for a token by paginating account_lines
+ * on the ISSUER account.
+ *
+ * Key fix: account_lines returns currency as raw hex for non-standard codes.
+ * We must compare both the raw currency AND the decoded name to match correctly.
  */
 
 import { XRPLClient } from '../xrpl/client';
-import { info, warn, debug } from '../utils/logger';
+import { warn, debug } from '../utils/logger';
 
 interface HolderCache {
   count: number;
@@ -14,141 +19,121 @@ interface HolderCache {
 export class HolderCounter {
   private xrplClient: XRPLClient;
   private cache: Map<string, HolderCache> = new Map();
-  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // Cache for 10 minutes
-  private readonly MAX_ISSUERS_PER_SCAN = 20; // Max issuers to scan per cycle
+  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
+  private readonly MAX_PAGES = 25;                  // 25 × 400 = up to 10,000 holders
 
   constructor(xrplClient: XRPLClient) {
     this.xrplClient = xrplClient;
   }
 
-  /**
-   * Get holder count for a token (cached)
-   */
-  async getHolderCount(currency: string, issuer: string): Promise<number | null> {
+  async getHolderCount(currency: string, issuer: string, rawCurrency?: string): Promise<number | null> {
     const key = `${currency}:${issuer}`;
     const cached = this.cache.get(key);
 
-    // Return cached value if fresh
     if (cached && Date.now() - cached.lastUpdated < this.CACHE_TTL_MS) {
       return cached.count;
     }
 
-    // Fetch fresh count
     try {
-      const count = await this.fetchHolderCount(issuer, currency);
+      const count = await this.fetchHolderCount(issuer, currency, rawCurrency);
       this.cache.set(key, { count, lastUpdated: Date.now() });
       debug(`Holder count for ${key}: ${count}`);
       return count;
     } catch (err) {
       warn(`Failed to fetch holder count for ${key}: ${err}`);
-      // Return cached value even if stale
-      return cached?.count || null;
+      return cached?.count ?? null;
     }
   }
 
   /**
-   * Fetch holder count by scanning issuer's account_lines
+   * Count holders by paginating account_lines on the issuer.
+   *
+   * XRPL returns trustlines as the counterparty's perspective:
+   *   - line.currency may be raw hex (e.g. "4C6175676800...") or 3-char (e.g. "USD")
+   *   - A positive balance means the holder OWNS tokens (issuer sees it as negative)
+   *     but from the issuer's account_lines, it's shown as NEGATIVE balance
+   *   - We count lines where abs(balance) > 0 AND currency matches
+   *
+   * Match logic: compare line.currency against BOTH the raw hex AND decoded name.
    */
-  private async fetchHolderCount(issuer: string, currency: string): Promise<number> {
+  private async fetchHolderCount(
+    issuer: string,
+    currency: string,       // decoded display name, e.g. "Laugh"
+    rawCurrency?: string    // original hex, e.g. "4C61756768..."
+  ): Promise<number> {
+    const client = this.xrplClient.getClient();
+    if (!client) throw new Error('No XRPL client');
+
+    // Build a set of currency strings to match against
+    // (some nodes return hex, some return decoded, handle both)
+    const matchSet = new Set<string>();
+    matchSet.add(currency);
+    if (rawCurrency) matchSet.add(rawCurrency);
+
+    // Also add the hex encoding of the display name in case we have a 3-char
+    if (currency.length <= 3) {
+      matchSet.add(currency.toUpperCase());
+    } else {
+      // Add hex version of display name (in case we only have decoded)
+      const hex = Buffer.from(currency).toString('hex').toUpperCase().padEnd(40, '0');
+      matchSet.add(hex);
+    }
+
     let holders = 0;
-    let marker: string | undefined;
-    let iterations = 0;
-    const MAX_ITERATIONS = 10; // Safety limit
+    let marker: any = undefined;
+    let pages = 0;
 
     do {
-      iterations++;
-      if (iterations > MAX_ITERATIONS) {
-        warn(`Holder count scan exceeded max iterations for ${issuer}`);
+      pages++;
+      if (pages > this.MAX_PAGES) {
+        warn(`Holder count capped at ${this.MAX_PAGES} pages for ${issuer}`);
         break;
       }
 
-      const result = await this.xrplClient.getAccountLinesWithMarker(issuer, marker);
-      const lines = result.lines || [];
-      if (lines.length === 0) break;
+      const req: any = {
+        command: 'account_lines',
+        account: issuer,
+        ledger_index: 'validated',
+        limit: 400,
+      };
+      if (marker) req.marker = marker;
 
-      // Count lines matching our currency
-      for (const line of lines) {
-        if (line.currency === currency && parseFloat(line.balance || '0') > 0) {
-          holders++;
-        }
+      let result: any;
+      try {
+        const res: any = await client.request(req);
+        result = res?.result;
+      } catch (err: any) {
+        warn(`account_lines failed for ${issuer}: ${err.message}`);
+        break;
       }
 
-      marker = result.marker;
+      const lines: any[] = result?.lines || [];
+      marker = result?.marker;
+
+      for (const line of lines) {
+        // Match currency (handle both hex and decoded)
+        if (!matchSet.has(line.currency)) continue;
+
+        // From issuer's perspective, balance is negative when holder has tokens.
+        // Count anyone with a non-zero balance (either direction).
+        const bal = parseFloat(line.balance || '0');
+        if (bal !== 0) holders++;
+      }
+
+      if (lines.length === 0) break;
+
     } while (marker);
 
     return holders;
   }
 
-  /**
-   * Batch update holders for multiple tokens
-   * Scans up to MAX_ISSUERS_PER_SCAN issuers per call
-   */
-  async batchUpdateHolders(tokens: Array<{ currency: string; issuer: string }>): Promise<Map<string, number>> {
-    const results = new Map<string, number>();
-    const uniqueIssuers = new Set(tokens.map(t => t.issuer));
-
-    // Limit to MAX_ISSUERS_PER_SCAN issuers
-    const issuersToScan = Array.from(uniqueIssuers).slice(0, this.MAX_ISSUERS_PER_SCAN);
-
-    info(`Scanning holders for ${issuersToScan.length} issuers...`);
-
-    for (const issuer of issuersToScan) {
-      const issuerTokens = tokens.filter(t => t.issuer === issuer);
-
-      try {
-        const lines = await this.xrplClient.getAccountLines(issuer);
-
-        // Count holders for each token from this issuer
-        const tokenCounts = new Map<string, number>();
-
-        for (const line of lines) {
-          if (parseFloat(line.balance || '0') > 0) {
-            const key = `${line.currency}:${issuer}`;
-            tokenCounts.set(key, (tokenCounts.get(key) || 0) + 1);
-          }
-        }
-
-        // Update cache and results
-        for (const token of issuerTokens) {
-          const key = `${token.currency}:${token.issuer}`;
-          const count = tokenCounts.get(key) || 0;
-          this.cache.set(key, { count, lastUpdated: Date.now() });
-          results.set(key, count);
-        }
-      } catch (err) {
-        warn(`Failed to scan holders for issuer ${issuer}: ${err}`);
-      }
-
-      // Rate limit between issuers
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
-
-    info(`Holder scan complete: ${results.size} tokens updated`);
-    return results;
-  }
-
-  /**
-   * Prune stale cache entries
-   */
   pruneCache(): void {
     const now = Date.now();
-    let pruned = 0;
-
-    for (const [key, cache] of this.cache.entries()) {
-      if (now - cache.lastUpdated > this.CACHE_TTL_MS * 2) { // 2x TTL
-        this.cache.delete(key);
-        pruned++;
-      }
-    }
-
-    if (pruned > 0) {
-      debug(`Pruned ${pruned} stale holder cache entries`);
+    for (const [key, c] of this.cache.entries()) {
+      if (now - c.lastUpdated > this.CACHE_TTL_MS * 2) this.cache.delete(key);
     }
   }
 
-  /**
-   * Get cache size
-   */
   getCacheSize(): number {
     return this.cache.size;
   }
