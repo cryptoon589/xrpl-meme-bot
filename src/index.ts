@@ -31,6 +31,7 @@ import { Database } from './db/database';
 import { AlertPayload } from './types';
 import { PositionSizer } from './paper/positionSizer';
 import { CorrelationDetector } from './scoring/correlationDetector';
+import { ActiveDiscovery } from './scanner/activeDiscovery';
 
 // Global state
 let isRunning = false;
@@ -80,6 +81,7 @@ async function main() {
 
   const tokenDiscovery = new TokenDiscovery(xrplClient, db);
   const ammScanner = new AMMScanner(xrplClient, db);
+  const activeDiscovery = new ActiveDiscovery(xrplClient, db);
   const marketData = new MarketDataCollector(xrplClient, db);
   const volumeTracker = new VolumeTracker();
   const holderCounter = new HolderCounter(xrplClient);
@@ -96,28 +98,47 @@ async function main() {
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
 
-  // Filtering happens inside xrplClient.subscribeTransactions — only relevant tx types reach here
+  // Subscribe to live tx stream — activeDiscovery handles token extraction
   await xrplClient.subscribeTransactions((tx) => {
+    // Run active discovery on every relevant tx (no queue needed for discovery)
+    const discovered = activeDiscovery.processLiveTx(tx);
+    if (discovered) {
+      newTokenDetections++;
+      const tracked = activeDiscovery.toTrackedToken(discovered);
+      tokenDiscovery.addTrackedToken(tracked);
+    }
+
+    // Queue for scoring/volume tracking
     if (txQueue.length < MAX_TX_QUEUE_SIZE) {
       txQueue.push(tx);
     } else {
-      // Drop oldest 10% when full
       const dropCount = Math.floor(MAX_TX_QUEUE_SIZE * 0.1);
       txQueue.splice(0, dropCount);
       txQueue.push(tx);
-
-      // Log drop rate (max once per minute)
       droppedTxCount++;
       const now = Date.now();
       if (now - lastDropLogTime > 60000) {
-        warn(`Transaction queue full: dropped ${droppedTxCount} tx in last minute (queue size: ${MAX_TX_QUEUE_SIZE})`);
+        warn(`Transaction queue full: dropped ${droppedTxCount} tx in last minute`);
         droppedTxCount = 0;
         lastDropLogTime = now;
       }
     }
   });
 
+  // Immediate AMM sweep on startup — finds all existing pools right away
+  info('🔍 Running initial AMM pool sweep...');
+  const sweepResults = await activeDiscovery.sweepAMMPools();
+  sweepResults.forEach(dt => tokenDiscovery.addTrackedToken(activeDiscovery.toTrackedToken(dt)));
+  info(`Initial sweep complete: ${sweepResults.length} new tokens from AMM pools`);
+
   startTransactionProcessor(tokenDiscovery, ammScanner, volumeTracker, issuerReputation, correlationDetector, telegramAlerter, db);
+
+  // Periodic AMM sweep every 10 minutes to catch newly created pools
+  setInterval(async () => {
+    const results = await activeDiscovery.sweepAMMPools();
+    results.forEach(dt => tokenDiscovery.addTrackedToken(activeDiscovery.toTrackedToken(dt)));
+    if (results.length > 0) info(`AMM sweep: ${results.length} new tokens added`);
+  }, 10 * 60 * 1000);
 
   // Start periodic scanning with parallel batches
   isRunning = true;
@@ -216,7 +237,6 @@ async function processSingleTransaction(
 ): Promise<void> {
   const newToken = await tokenDiscovery.processTransaction(tx);
   if (newToken) {
-    newTokenDetections++;
     // Track issuer reputation
     issuerReputation.registerTokenLaunch(newToken.issuer, newToken.currency);
 

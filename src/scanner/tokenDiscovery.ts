@@ -174,6 +174,17 @@ export class TokenDiscovery {
   }
 
   /**
+   * Add a token discovered externally (e.g. from ActiveDiscovery AMM sweep)
+   */
+  addTrackedToken(token: TrackedToken): boolean {
+    const key = `${token.currency}:${token.issuer}`;
+    if (this.trackedTokens.has(key)) return false; // already known
+    this.trackedTokens.set(key, token);
+    this.db.saveToken(token);
+    return true;
+  }
+
+  /**
    * Get token count
    */
   getTokenCount(): number {
