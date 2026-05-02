@@ -191,9 +191,9 @@ export class PaperTrader {
   }
 
   /**
-   * Check all open positions for exit conditions
-   * FIX #4: Collect keys to close first, then delete after iteration to avoid
-   * modifying Map during iteration
+   * Check the open position for a specific token for exit conditions.
+   * Only evaluates the token matching the snapshot — avoids duplicate
+   * close events when multiple tokens are scanned in the same cycle.
    */
   checkExits(snapshot: MarketSnapshot | null): PaperTrade[] {
     const closedTrades: PaperTrade[] = [];
@@ -205,9 +205,15 @@ export class PaperTrader {
 
     const currentPrice = snapshot.priceXRP;
 
-    // First pass: evaluate all positions and collect actions
+    // Only evaluate the position matching this snapshot's token
+    const snapshotKey = `${snapshot.tokenCurrency}:${snapshot.tokenIssuer}`;
+
+    // First pass: evaluate matching position only
     for (const [key, position] of this.openPositions.entries()) {
       const trade = position.trade;
+
+      // Skip positions that don't match this snapshot's token
+      if (key !== snapshotKey) continue;
 
       // Skip already-closing positions
       if (keysToClose.includes(key)) continue;
@@ -270,12 +276,18 @@ export class PaperTrader {
       }
     }
 
-    // Second pass: delete closed positions after iteration
+    // Second pass: properly close positions (sets exit price, PnL, fees) then remove
+    // Must happen after the iteration loop to avoid mutating the Map mid-loop
+    const finalClosed: PaperTrade[] = [];
     for (const key of keysToClose) {
-      this.openPositions.delete(key);
+      this.closePosition(key, currentPrice, 'stop_loss_or_trailing', snapshot);
+      // closePosition already deleted from openPositions and updated the trade object
+      // retrieve the updated trade from the original closedTrades reference
+      const ref = closedTrades.find(t => `${t.tokenCurrency}:${t.tokenIssuer}` === key);
+      if (ref) finalClosed.push(ref);
     }
 
-    return closedTrades;
+    return finalClosed;
   }
 
   /**
