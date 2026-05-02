@@ -110,6 +110,8 @@ export class Database {
       `ALTER TABLE market_snapshots ADD COLUMN unique_buyers_5m INTEGER DEFAULT 0`,
       `ALTER TABLE market_snapshots ADD COLUMN unique_sellers_5m INTEGER DEFAULT 0`,
       `ALTER TABLE tracked_tokens ADD COLUMN raw_currency TEXT`,
+      // whale_wallets and execution_validation are created via SCHEMA (CREATE TABLE IF NOT EXISTS)
+      // so no ALTER TABLE needed; these are no-op guards for idempotency
     ];
     for (const sql of migrations) {
       try {
@@ -608,6 +610,181 @@ export class Database {
 
   setLastAlertTime(currency: string, issuer: string, ts: number): void {
     this.alertTimes.set(`${currency}:${issuer}`, ts);
+  }
+
+  // ==================== SCORES (QUERY FOR BACKTEST) ====================
+
+  getScoresInRange(startTs: number, endTs: number): TokenScore[] {
+    try {
+      const rows = this.db.prepare(`
+        SELECT * FROM scores
+        WHERE timestamp >= ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+      `).all(startTs, endTs) as any[];
+      return rows.map(row => ({
+        tokenCurrency: row.token_currency,
+        tokenIssuer: row.token_issuer,
+        timestamp: row.timestamp,
+        totalScore: row.total_score,
+        liquidityScore: row.liquidity_score,
+        holderGrowthScore: row.holder_growth_score,
+        buyPressureScore: row.buy_pressure_score,
+        volumeAccelScore: row.volume_accel_score,
+        devSafetyScore: row.dev_safety_score,
+        whitelistBoost: row.whitelist_boost,
+        spreadScore: row.spread_score,
+      }));
+    } catch (err) {
+      warn(`Error getting scores in range: ${err}`);
+      return [];
+    }
+  }
+
+  getSnapshotsForToken(
+    currency: string,
+    issuer: string,
+    startTs: number,
+    endTs: number
+  ): MarketSnapshot[] {
+    try {
+      const rows = this.db.prepare(`
+        SELECT * FROM market_snapshots
+        WHERE token_currency = ? AND token_issuer = ?
+          AND timestamp >= ? AND timestamp <= ?
+        ORDER BY timestamp ASC
+      `).all(currency, issuer, startTs, endTs) as any[];
+      return rows.map(row => ({
+        tokenCurrency: row.token_currency,
+        tokenIssuer: row.token_issuer,
+        timestamp: row.timestamp,
+        priceXRP: row.price_xrp,
+        liquidityXRP: row.liquidity_xrp,
+        buyVolume5m: row.buy_volume_5m,
+        sellVolume5m: row.sell_volume_5m,
+        buyCount5m: row.buy_count_5m,
+        sellCount5m: row.sell_count_5m,
+        uniqueBuyers5m: row.unique_buyers_5m || 0,
+        uniqueSellers5m: row.unique_sellers_5m || 0,
+        priceChange5m: row.price_change_5m,
+        priceChange15m: row.price_change_15m,
+        priceChange1h: row.price_change_1h,
+        holderEstimate: row.holder_estimate,
+        spreadPercent: row.spread_percent,
+      }));
+    } catch (err) {
+      warn(`Error getting snapshots for token: ${err}`);
+      return [];
+    }
+  }
+
+  // ==================== WHALE WALLETS ====================
+
+  upsertWhaleWallet(
+    address: string,
+    wins: number,
+    totalXrpProfit: number,
+    firstSeen: number,
+    lastSeen: number
+  ): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO whale_wallets (address, wins, total_xrp_profit, first_seen, last_seen)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(address) DO UPDATE SET
+          wins = wins + excluded.wins,
+          total_xrp_profit = total_xrp_profit + excluded.total_xrp_profit,
+          last_seen = excluded.last_seen
+      `);
+      this.runWithRetry(stmt, [address, wins, totalXrpProfit, firstSeen, lastSeen]);
+    } catch (err) {
+      warn(`Error upserting whale wallet: ${err}`);
+    }
+  }
+
+  getWhaleWallets(): { address: string; wins: number; totalXrpProfit: number; firstSeen: number; lastSeen: number }[] {
+    try {
+      const rows = this.db.prepare('SELECT * FROM whale_wallets').all() as any[];
+      return rows.map(row => ({
+        address: row.address,
+        wins: row.wins,
+        totalXrpProfit: row.total_xrp_profit,
+        firstSeen: row.first_seen,
+        lastSeen: row.last_seen,
+      }));
+    } catch (err) {
+      warn(`Error getting whale wallets: ${err}`);
+      return [];
+    }
+  }
+
+  // ==================== EXECUTION VALIDATION ====================
+
+  saveIntendedPrice(
+    currency: string,
+    issuer: string,
+    intendedPrice: number,
+    sizeXrp: number
+  ): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO execution_validation
+        (token_currency, token_issuer, timestamp, intended_price, size_xrp)
+        VALUES (?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [currency, issuer, Date.now(), intendedPrice, sizeXrp]);
+    } catch (err) {
+      warn(`Error saving intended price: ${err}`);
+    }
+  }
+
+  updateActualFill(
+    currency: string,
+    issuer: string,
+    actualPrice: number
+  ): void {
+    try {
+      // Update the most recent unfilled record for this token
+      const stmt = this.db.prepare(`
+        UPDATE execution_validation
+        SET actual_price = ?,
+            slippage_pct = ABS((? - intended_price) / intended_price) * 100
+        WHERE token_currency = ? AND token_issuer = ?
+          AND actual_price IS NULL
+        ORDER BY timestamp DESC
+        LIMIT 1
+      `);
+      this.runWithRetry(stmt, [actualPrice, actualPrice, currency, issuer]);
+    } catch (err) {
+      warn(`Error updating actual fill: ${err}`);
+    }
+  }
+
+  getExecutionValidationRecords(): {
+    id: number;
+    tokenCurrency: string;
+    tokenIssuer: string;
+    timestamp: number;
+    intendedPrice: number;
+    actualPrice: number | null;
+    slippagePct: number | null;
+    sizeXrp: number;
+  }[] {
+    try {
+      const rows = this.db.prepare('SELECT * FROM execution_validation ORDER BY timestamp DESC').all() as any[];
+      return rows.map(row => ({
+        id: row.id,
+        tokenCurrency: row.token_currency,
+        tokenIssuer: row.token_issuer,
+        timestamp: row.timestamp,
+        intendedPrice: row.intended_price,
+        actualPrice: row.actual_price ?? null,
+        slippagePct: row.slippage_pct ?? null,
+        sizeXrp: row.size_xrp,
+      }));
+    } catch (err) {
+      warn(`Error getting execution validation records: ${err}`);
+      return [];
+    }
   }
 
   /**

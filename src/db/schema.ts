@@ -140,6 +140,29 @@ export const SCHEMA = {
       worst_trade REAL DEFAULT 0
     )
   `,
+
+  whaleWallets: `
+    CREATE TABLE IF NOT EXISTS whale_wallets (
+      address TEXT PRIMARY KEY,
+      wins INTEGER DEFAULT 0,
+      total_xrp_profit REAL DEFAULT 0,
+      first_seen INTEGER NOT NULL,
+      last_seen INTEGER NOT NULL
+    )
+  `,
+
+  executionValidation: `
+    CREATE TABLE IF NOT EXISTS execution_validation (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      timestamp INTEGER NOT NULL,
+      intended_price REAL NOT NULL,
+      actual_price REAL,
+      slippage_pct REAL,
+      size_xrp REAL NOT NULL
+    )
+  `,
 };
 
 // Index definitions for performance

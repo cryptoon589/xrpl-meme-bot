@@ -6,29 +6,51 @@
 import { TrackedToken, AMMPool, MarketSnapshot, RiskFlags, TokenScore } from '../types';
 import { BotConfig } from '../config';
 import { debug } from '../utils/logger';
+import { WhaleTracker } from './whaleTracker';
+import { SocialDetector } from './socialDetector';
 
 export class TokenScorer {
   private config: BotConfig;
+  private whaleTracker: WhaleTracker | null = null;
+  private socialDetector: SocialDetector | null = null;
 
   constructor(config: BotConfig) {
     this.config = config;
   }
 
   /**
+   * Attach optional whale tracker for score boosts from whale wallet activity.
+   */
+  setWhaleTracker(tracker: WhaleTracker): void {
+    this.whaleTracker = tracker;
+  }
+
+  /**
+   * Attach optional social detector for on-chain social signal scoring.
+   */
+  setSocialDetector(detector: SocialDetector): void {
+    this.socialDetector = detector;
+  }
+
+  /**
    * Score a token for meme trading profit potential.
    *
    * Weights are tuned for catching pumps early:
-   *   - Buy pressure (35%): ratio of buys to sells in last 5 min
-   *   - New wallet inflow (25%): fresh wallets buying = strongest pump signal
-   *   - Momentum (20%): price direction across timeframes
+   *   - Buy pressure (28%): ratio of buys to sells in last 5 min
+   *   - New wallet inflow (19%): fresh wallets buying = strongest pump signal
+   *   - Momentum (19%): price direction across timeframes
    *   - Liquidity (10%): enough depth to enter/exit without massive slippage
-   *   - Dev safety (10%): no rug flags
+   *   - Dev safety (9%): no rug flags
+   *   - Whale boost (5%): smart-money wallets present
+   *   - Social signals (8%): on-chain domain/email/age/market-makers
    */
   score(
     token: TrackedToken,
     snapshot: MarketSnapshot | null,
     pool: AMMPool | null,
-    riskFlags: RiskFlags
+    riskFlags: RiskFlags,
+    whaleScore = 0,
+    socialScore = 0
   ): TokenScore {
     const buyPressureScore  = this.scoreBuyPressure(snapshot);
     const newWalletScore    = this.scoreNewWallets(snapshot);
@@ -36,6 +58,10 @@ export class TokenScorer {
     const liquidityScore    = this.scoreLiquidity(snapshot);
     const devSafetyScore    = this.scoreDevSafety(riskFlags);
     const tokenAgeScore     = this.scoreTokenAge(token);
+
+    // Clamp external scores to 0-100 range
+    const clampedWhale  = Math.max(0, Math.min(100, whaleScore));
+    const clampedSocial = Math.max(0, Math.min(100, socialScore));
 
     // Adaptive weighting: if buy pressure has live data, weight it heavily.
     // If no live data yet (window empty), shift weight to momentum + liquidity
@@ -45,22 +71,25 @@ export class TokenScorer {
 
     let totalScore: number;
     if (hasBuyData || hasNewWalletData) {
-      // Full live-data mode
+      // Full live-data mode — weights reduced slightly to accommodate whale + social
       totalScore =
-        buyPressureScore  * 0.30 +
-        newWalletScore    * 0.20 +
-        momentumScore     * 0.20 +
-        liquidityScore    * 0.15 +
+        buyPressureScore  * 0.28 +
+        newWalletScore    * 0.19 +
+        momentumScore     * 0.19 +
+        liquidityScore    * 0.11 +
         devSafetyScore    * 0.10 +
-        tokenAgeScore     * 0.05;
+        tokenAgeScore     * 0.05 +
+        clampedWhale      * 0.05 +
+        clampedSocial     * 0.08 * (clampedSocial / 100); // social weighted by own confidence
     } else {
       // No live pressure data yet — weight on momentum + liquidity + age
       totalScore =
-        momentumScore     * 0.35 +
-        liquidityScore    * 0.30 +
-        devSafetyScore    * 0.15 +
+        momentumScore     * 0.33 +
+        liquidityScore    * 0.28 +
+        devSafetyScore    * 0.14 +
         tokenAgeScore     * 0.10 +
-        newWalletScore    * 0.10;
+        newWalletScore    * 0.10 +
+        clampedSocial     * 0.05;
     }
 
     const clampedScore = Math.max(0, Math.min(100, totalScore));
