@@ -90,7 +90,8 @@ export class TelegramAlerter {
         return this.formatPaperTradeClose(payload);
 
       case 'daily_summary':
-        return this.formatDailySummary(payload);
+      case 'hourly_summary':
+        return payload.message; // already fully formatted HTML
 
       default:
         return `<b>${payload.type}</b>\n${payload.message}`;

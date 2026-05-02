@@ -484,9 +484,19 @@ function startPeriodicScan(
             totalProcessed++;
               tokensScored++;
 
-              // Track top tokens for leaderboard
+              // Track top tokens for leaderboard — keep only the best score per token
               if (snapshot && score) {
-                topTokens.push({ currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 });
+                const existingIdx = topTokens.findIndex(
+                  t => t.currency === token.currency && t.issuer === token.issuer
+                );
+                if (existingIdx >= 0) {
+                  // Update if this scan produced a better score
+                  if (score.totalScore > topTokens[existingIdx].score) {
+                    topTokens[existingIdx] = { currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 };
+                  }
+                } else {
+                  topTokens.push({ currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 });
+                }
               }
 
             // Fix 4: Multi-signal gate — require 3+ signals firing together
@@ -504,13 +514,17 @@ function startPeriodicScan(
             };
             const signalCount = Object.values(signals).filter(Boolean).length;
 
-            // Alert needs: high score + at least 1 other signal
-            // OR momentum spike + buy dominant
-            // OR 3+ any signals
-            const strongSingle = (snapshot.priceChange5m || 0) >= 20 && pressure.buyCount >= 3;
+            // Alert conditions (any one sufficient):
+            //  A) Score >= 75 with decent liquidity — high conviction, no extra signals needed
+            //  B) Score >= threshold + at least 1 other signal firing
+            //  C) Momentum spike (20%+) with active buying
+            //  D) 3+ any signals together
+            const highConviction  = score.totalScore >= 75;
+            const strongSingle    = (snapshot.priceChange5m || 0) >= 20 && pressure.buyCount >= 3;
             const highScorePlusOne = signals.highScore && signalCount >= 2;
-            const shouldAlert = (signalCount >= 3 || strongSingle || highScorePlusOne) &&
-              (snapshot.liquidityXRP || 0) >= config.minLiquidityXRP;
+            const shouldAlert = (
+              highConviction || strongSingle || highScorePlusOne || signalCount >= 3
+            ) && (snapshot.liquidityXRP || 0) >= config.minLiquidityXRP;
 
             // Cooldown: 30 min per token
             const lastAlertTime = db.getLastAlertTime(token.currency, token.issuer);
@@ -619,6 +633,7 @@ function startPeriodicScan(
     const ignored = rawStats.raw - rawStats.filtered;
     const total = rawStats.raw;
 
+    // Deduplicated top 5 — topTokens already has one entry per token
     const top5 = topTokens
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
@@ -647,6 +662,21 @@ function startPeriodicScan(
         const sign = t.change1h >= 0 ? '+' : '';
         lines.push('  ' + emoji + ' #' + (i+1) + ' ' + t.currency + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + sign + t.change1h.toFixed(1) + '%');
       });
+    }
+
+    // Paper trading summary
+    if (paperTrader) {
+      const state = paperTrader.getState();
+      const openPositions = paperTrader.getOpenPositions();
+      const pnlEmoji = state.dailyPnL >= 0 ? '✅' : '❌';
+      lines.push('');
+      lines.push('<b>💼 PAPER TRADING</b>');
+      lines.push('  Bankroll: ' + state.bankrollXRP.toFixed(2) + ' XRP');
+      lines.push('  Open positions: ' + state.openPositions);
+      lines.push('  ' + pnlEmoji + ' Daily PnL: ' + (state.dailyPnL >= 0 ? '+' : '') + state.dailyPnL.toFixed(4) + ' XRP');
+      if (openPositions.length > 0) {
+        lines.push('  Holding: ' + openPositions.map(p => p.tokenCurrency).join(', '));
+      }
     }
 
     newTokenDetections = 0;
