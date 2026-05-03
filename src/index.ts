@@ -116,9 +116,19 @@ async function main() {
   const telegramAlerter = new TelegramAlerter(config);
   const burstDetector = new BurstDetector(xrplClient, telegramAlerter, db);
 
+  // Tokens that should never be burst-traded (native chain tokens, stablecoins, etc.)
+  const BURST_TRADE_BLOCKLIST = new Set([
+    'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+    'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP',
+  ]);
+
   // Hook burst detector into paper trader — opens a burst trade on every confirmed burst
   if (paperTrader) {
     burstDetector.onBurst = (currency, issuer, rawCurrency, poolXRP, priceXRP) => {
+      if (BURST_TRADE_BLOCKLIST.has(currency)) {
+        debug(`Burst trade skipped — blocklisted token: ${currency}`);
+        return;
+      }
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
       const snapshot = {
         tokenCurrency: currency,
@@ -746,6 +756,25 @@ function startPeriodicScan(
         });
 
         await sleep(50); // Rate limit between batches
+      }
+
+      // Check exits for ALL open positions — catches orphaned positions
+      // (tokens that got pruned from the scan list but still have open trades)
+      if (paperTrader && paperTrader.getOpenPositions().length > 0) {
+        const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer) => {
+          const p = await ammPriceFetcher.getPrice(currency, issuer);
+          return p?.priceXRP ?? null;
+        });
+        for (const ct of orphanClosed) {
+          totalTrades++;
+          setTimeout(() => sendAlert(telegramAlerter, db, {
+            type: 'paper_trade_closed',
+            tokenCurrency: ct.tokenCurrency,
+            tokenIssuer: ct.tokenIssuer,
+            paperTrade: ct,
+            message: `Closed ${ct.tokenCurrency}: ${ct.pnlPercent?.toFixed(1)}% PnL`,
+          }, config), 0);
+        }
       }
 
       const elapsed = Date.now() - startTime;

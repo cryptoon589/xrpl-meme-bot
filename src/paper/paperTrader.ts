@@ -804,6 +804,32 @@ export class PaperTrader {
   /**
    * Get current state
    */
+  /**
+   * Check exits for ALL open positions using a live price fetcher.
+   * Called every scan cycle to catch orphaned positions (tokens pruned from scan list).
+   */
+  async checkAllOpenExits(
+    getPrice: (currency: string, issuer: string) => Promise<number | null>
+  ): Promise<PaperTrade[]> {
+    const allClosed: PaperTrade[] = [];
+    for (const [key, position] of this.openPositions.entries()) {
+      const { trade } = position;
+      const price = await getPrice(trade.tokenCurrency, trade.tokenIssuer);
+      if (!price || price <= 0) continue;
+      const fakeSnapshot = {
+        tokenCurrency: trade.tokenCurrency,
+        tokenIssuer: trade.tokenIssuer,
+        priceXRP: price,
+        liquidityXRP: null,
+        buyCount5m: 0,
+        sellCount5m: 0,
+      } as any;
+      const closed = this.checkExits(fakeSnapshot);
+      allClosed.push(...closed);
+    }
+    return allClosed;
+  }
+
   getState(): {
     bankrollXRP: number;
     openPositions: number;
