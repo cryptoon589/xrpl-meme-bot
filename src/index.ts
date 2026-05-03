@@ -32,6 +32,7 @@ import { AlertPayload } from './types';
 import { PositionSizer } from './paper/positionSizer';
 import { CorrelationDetector } from './scoring/correlationDetector';
 import { ActiveDiscovery } from './scanner/activeDiscovery';
+import { BurstDetector } from './scanner/burstDetector';
 import { AMMPriceFetcher } from './market/ammPriceFetcher';
 import { BuyPressureTracker } from './market/buyPressureTracker';
 import { TradeExecutor } from './execution/tradeExecutor';
@@ -110,6 +111,7 @@ async function main() {
   const correlationDetector = new CorrelationDetector();
   const paperTrader = config.mode === 'PAPER' ? new PaperTrader(config, db) : null;
   const telegramAlerter = new TelegramAlerter(config);
+  const burstDetector = new BurstDetector(xrplClient, telegramAlerter, db);
 
   // Trade executor — dry-run unless LIVE_TRADING=true in .env
   let tradeExecutor: TradeExecutor | null = null;
@@ -133,6 +135,10 @@ async function main() {
   await xrplClient.subscribeTransactions((tx) => {
     // Real-time buy pressure tracking (runs on every tx, no queue)
     buyPressureTracker.processTransaction(tx);
+
+    // Burst detection — fires early alerts on buy-velocity spikes
+    // Watches ALL tokens including ones not yet in the main tracked list
+    burstDetector.processTransaction(tx);
 
     // Token discovery
     const discovered = activeDiscovery.processLiveTx(tx);
