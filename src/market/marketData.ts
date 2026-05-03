@@ -269,7 +269,8 @@ export class MarketDataCollector {
 
       if (asset1IsToken) {
         tokenAmount = this.parseAmount(pool.amount1);
-        xrpAmount = this.parseAmount(pool.amount2);
+        // XRP amounts from ledger are in drops — divide by 1e6
+        xrpAmount = this.parseAmount(pool.amount2) / 1_000_000;
 
         // FIX #6: Verify the other asset is XRP
         if (pool.asset2.currency !== 'XRP') {
@@ -278,7 +279,8 @@ export class MarketDataCollector {
         }
       } else if (asset2IsToken) {
         tokenAmount = this.parseAmount(pool.amount2);
-        xrpAmount = this.parseAmount(pool.amount1);
+        // XRP amounts from ledger are in drops — divide by 1e6
+        xrpAmount = this.parseAmount(pool.amount1) / 1_000_000;
 
         // FIX #6: Verify the other asset is XRP
         if (pool.asset1.currency !== 'XRP') {
