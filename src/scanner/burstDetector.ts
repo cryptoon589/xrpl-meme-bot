@@ -316,15 +316,19 @@ export class BurstDetector {
         const amm = res.result?.amm;
         if (!amm) return null; // token has no AMM pool — don't retry
 
-        // XRP side: string in drops if XRP is amount, else amount2
+        // XRP side is always a string (drops), token side is always an object
         let xrpDrops: number;
         let tokenValue: number;
-        if (typeof amm.amount === 'string') {
+        if (typeof amm.amount === 'string' && typeof amm.amount2 === 'object') {
+          // Normal: amount=XRP drops, amount2=token object
           xrpDrops   = parseInt(amm.amount, 10);
           tokenValue = parseFloat(amm.amount2?.value || '0');
-        } else {
+        } else if (typeof amm.amount2 === 'string' && typeof amm.amount === 'object') {
+          // Reversed: amount2=XRP drops, amount=token object
           xrpDrops   = parseInt(amm.amount2, 10);
           tokenValue = parseFloat(amm.amount?.value || '0');
+        } else {
+          return null; // unexpected shape
         }
 
         if (!xrpDrops || !tokenValue) return null;

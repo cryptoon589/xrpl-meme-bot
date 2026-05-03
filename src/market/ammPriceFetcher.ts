@@ -102,10 +102,14 @@ export class AMMPriceFetcher {
       let xrpDrops: number;
       let tokenUnits: number;
 
-      if (typeof amount1 === 'string') {
+      // XRPL AMM: XRP side is always a string (drops), token side is always an object
+      // amount1 is XRP (string) and amount2 is the token (object) — or vice versa
+      if (typeof amount1 === 'string' && typeof amount2 === 'object') {
+        // Normal layout: amount1=XRP drops, amount2=token
         xrpDrops = parseInt(amount1);
         tokenUnits = parseFloat(amount2?.value || '0');
-      } else if (typeof amount2 === 'string') {
+      } else if (typeof amount2 === 'string' && typeof amount1 === 'object') {
+        // Reversed layout: amount2=XRP drops, amount1=token
         xrpDrops = parseInt(amount2);
         tokenUnits = parseFloat(amount1?.value || '0');
       } else {
