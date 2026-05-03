@@ -39,6 +39,7 @@ import { TradeExecutor } from './execution/tradeExecutor';
 import { WhaleTracker } from './scoring/whaleTracker';
 import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
+import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 
 // Global state
 let isRunning = false;
@@ -855,6 +856,51 @@ function startPeriodicScan(
       message: lines.join("\n"),
     });
   }, 3600000);
+
+  // ── Trade analysis cron: runs every 6h ────────────────────────────
+  const tradeAnalyzer = new TradeAnalyzer(db);
+
+  // Also expose manual trigger via a simple check at startup
+  const runAnalysis = async () => {
+    const recs = tradeAnalyzer.analyze();
+    if (!recs) return; // Not enough trades yet
+
+    // Format Telegram message
+    const lines: string[] = [
+      `🧠 <b>TRADE ANALYSIS REPORT</b>`,
+      ``,
+      `📊 <b>${recs.tradesAnalyzed} trades</b> | Win rate: <b>${recs.overallWinRate}%</b>`,
+      ``,
+      `<b>Key insights:</b>`,
+      ...recs.insights.slice(0, 8).map(i => `• ${i}`),
+      ``,
+      `<b>Recommended params:</b>`,
+      `• Min liquidity: ${recs.minLiquidityXRP} XRP`,
+      `• Burst stop loss: ${recs.burstStopLossPercent}%`,
+      `• Burst TP1: +${recs.burstTp1Percent}%`,
+      `• Trailing activation: +${recs.burstTrailingActivation}%`,
+      ``,
+      recs.autoApplyReady
+        ? `✅ Ready to auto-apply. Reply <b>apply trade recommendations</b> to activate.`
+        : `⏳ Need ${Math.max(0, 30 - recs.tradesAnalyzed)} more trades + 50% win rate for auto-apply.`,
+    ];
+
+    await telegramAlerter.sendAlert({
+      type: 'hourly_summary', // reuse summary type for plain HTML send
+      message: lines.join('\n'),
+    });
+
+    // Auto-apply if ready and win rate is solid
+    if (recs.autoApplyReady) {
+      info('TradeAnalyzer: auto-apply threshold met — applying recommendations');
+      const configPath = process.env.CONFIG_PATH || './bot-config.json';
+      tradeAnalyzer.applyRecommendations(recs, configPath);
+    }
+  };
+
+  setInterval(runAnalysis, 6 * 60 * 60 * 1000); // every 6 hours
+  // Also run once after 30 min (first meaningful data after startup)
+  setTimeout(runAnalysis, 30 * 60 * 1000);
 }
 
 async function sendHighScoreAlert(
