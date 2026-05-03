@@ -25,7 +25,10 @@ export class AMMPriceFetcher {
   private xrplClient: XRPLClient;
   // Cache: key = "currency:issuer", value = { price, fetchedAt }
   private cache: Map<string, { price: TokenPrice; fetchedAt: number }> = new Map();
-  private readonly CACHE_TTL_MS = 45_000; // 45s cache — covers one full scan cycle batch
+  // Null cache: tokens confirmed to have no price source — skip retrying for 5 min
+  private nullCache: Map<string, number> = new Map();
+  private readonly CACHE_TTL_MS = 90_000;      // 90s price cache
+  private readonly NULL_CACHE_TTL_MS = 300_000; // 5 min null cache — don't retry no-price tokens
 
   constructor(xrplClient: XRPLClient) {
     this.xrplClient = xrplClient;
@@ -37,9 +40,18 @@ export class AMMPriceFetcher {
    */
   async getPrice(currency: string, issuer: string, rawCurrency?: string): Promise<TokenPrice | null> {
     const key = `${currency}:${issuer}`;
+    const now = Date.now();
+
+    // Return cached price if fresh
     const cached = this.cache.get(key);
-    if (cached && Date.now() - cached.fetchedAt < this.CACHE_TTL_MS) {
+    if (cached && now - cached.fetchedAt < this.CACHE_TTL_MS) {
       return cached.price;
+    }
+
+    // Skip tokens that previously returned no price — avoid hammering the network
+    const nullTs = this.nullCache.get(key);
+    if (nullTs && now - nullTs < this.NULL_CACHE_TTL_MS) {
+      return null;
     }
 
     // Use rawCurrency (hex) for API calls — decoded name causes "Issue is malformed"
@@ -48,17 +60,19 @@ export class AMMPriceFetcher {
     // Try AMM pool first
     const ammPrice = await this.fetchFromAMM(apiCurrency, issuer);
     if (ammPrice) {
-      this.cache.set(key, { price: ammPrice, fetchedAt: Date.now() });
+      this.cache.set(key, { price: ammPrice, fetchedAt: now });
       return ammPrice;
     }
 
     // Fall back to order book
     const bookPrice = await this.fetchFromOrderBook(apiCurrency, issuer);
     if (bookPrice) {
-      this.cache.set(key, { price: bookPrice, fetchedAt: Date.now() });
+      this.cache.set(key, { price: bookPrice, fetchedAt: now });
       return bookPrice;
     }
 
+    // Cache the null result so we don't retry for 5 minutes
+    this.nullCache.set(key, now);
     return null;
   }
 
