@@ -22,8 +22,27 @@ export class HolderCounter {
   private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
   private readonly MAX_PAGES = 25;                  // 25 × 400 = up to 10,000 holders
 
+  // Semaphore: max 8 concurrent account_lines requests to avoid WebSocket flood
+  private readonly MAX_CONCURRENT = 8;
+  private activeRequests = 0;
+  private waitQueue: Array<() => void> = [];
+
   constructor(xrplClient: XRPLClient) {
     this.xrplClient = xrplClient;
+  }
+
+  private async acquireSemaphore(): Promise<void> {
+    if (this.activeRequests < this.MAX_CONCURRENT) {
+      this.activeRequests++;
+      return;
+    }
+    return new Promise(resolve => this.waitQueue.push(() => { this.activeRequests++; resolve(); }));
+  }
+
+  private releaseSemaphore(): void {
+    this.activeRequests--;
+    const next = this.waitQueue.shift();
+    if (next) next();
   }
 
   async getHolderCount(currency: string, issuer: string, rawCurrency?: string): Promise<number | null> {
@@ -34,6 +53,7 @@ export class HolderCounter {
       return cached.count;
     }
 
+    await this.acquireSemaphore();
     try {
       const count = await this.fetchHolderCount(issuer, currency, rawCurrency);
       this.cache.set(key, { count, lastUpdated: Date.now() });
@@ -42,6 +62,8 @@ export class HolderCounter {
     } catch (err) {
       warn(`Failed to fetch holder count for ${key}: ${err}`);
       return cached?.count ?? null;
+    } finally {
+      this.releaseSemaphore();
     }
   }
 

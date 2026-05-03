@@ -57,7 +57,7 @@ export class TokenScorer {
     const momentumScore     = this.scoreMomentum(snapshot);
     const liquidityScore    = this.scoreLiquidity(snapshot);
     const devSafetyScore    = this.scoreDevSafety(riskFlags);
-    const tokenAgeScore     = this.scoreTokenAge(token);
+    const tokenAgeScore     = this.scoreTokenAge(token, snapshot);
 
     // Clamp external scores to 0-100 range
     const clampedWhale  = Math.max(0, Math.min(100, whaleScore));
@@ -113,17 +113,29 @@ export class TokenScorer {
    * Score token age (0-100) — newer tokens get a bonus.
    * A 1-hour-old token with buy activity is much more significant.
    */
-  private scoreTokenAge(token: TrackedToken): number {
+  private scoreTokenAge(token: TrackedToken, snapshot?: MarketSnapshot | null): number {
     const ageMs = Date.now() - (token.firstSeen || Date.now());
     const ageHours = ageMs / (1000 * 60 * 60);
-    // Peak bonus for tokens under 6 hours old, decays over 48h
-    if (ageHours < 1)  return 100;
-    if (ageHours < 3)  return 85;
-    if (ageHours < 6)  return 70;
-    if (ageHours < 12) return 55;
-    if (ageHours < 24) return 40;
-    if (ageHours < 48) return 25;
-    return 10;
+
+    // Base age score — peak for new tokens, decays over time
+    let base: number;
+    if (ageHours < 1)  base = 100;
+    else if (ageHours < 3)  base = 85;
+    else if (ageHours < 6)  base = 70;
+    else if (ageHours < 12) base = 55;
+    else if (ageHours < 24) base = 40;
+    else if (ageHours < 48) base = 25;
+    else base = 10;
+
+    // Momentum rescue: if a token is older but has real price movement,
+    // don't let age drag it below 30. A 7-day-old token genuinely pumping
+    // shouldn't score 10 on age and lose 28% of its total score.
+    const c5m  = snapshot?.priceChange5m  ?? 0;
+    const c1h  = snapshot?.priceChange1h  ?? 0;
+    const isMoving = Math.abs(c5m) > 5 || Math.abs(c1h) > 10;
+    if (isMoving && base < 30) return 30;
+
+    return base;
   }
 
   /**
@@ -149,13 +161,15 @@ export class TokenScorer {
 
   /**
    * Score buy pressure (0-100)
-   * Combines buy/sell ratio + volume dominance
+   * Combines buy/sell ratio + volume dominance.
+   * Returns 50 (neutral) when no live data yet — tokens should not be
+   * permanently zeroed just because no trades happened since bot start.
    */
   private scoreBuyPressure(snapshot: MarketSnapshot | null): number {
-    if (!snapshot) return 0;
+    if (!snapshot) return 50; // no snapshot = neutral
 
     const totalTx = (snapshot.buyCount5m || 0) + (snapshot.sellCount5m || 0);
-    if (totalTx === 0) return 0;
+    if (totalTx === 0) return 50; // no live data yet = neutral, not zero
 
     // Buy count ratio (60%)
     const buyRatio = (snapshot.buyCount5m || 0) / totalTx;
@@ -166,7 +180,7 @@ export class TokenScorer {
     const volRatio = totalVol > 0 ? (snapshot.buyVolume5m || 0) / totalVol : 0.5;
     const volScore = volRatio * 100;
 
-    // Bonus: if many unique buyers (signals breadth, not wash)
+    // Bonus: breadth of unique buyers (signals organic activity, not wash)
     const uniqueBuyers = snapshot.uniqueBuyers5m || 0;
     const uniqueBonus = Math.min(20, uniqueBuyers * 2); // +2 pts per unique buyer, max +20
 

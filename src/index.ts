@@ -44,6 +44,9 @@ import { LiveValidator } from './execution/liveValidator';
 let isRunning = false;
 let scanInterval: NodeJS.Timeout | null = null;
 let healthCheckInterval: NodeJS.Timeout | null = null;
+
+// Per-token trade lock: prevents duplicate paper/live trades from parallel batch workers
+const tradeLocks = new Set<string>();
 let healthServer: http.Server | null = null;
 let xrplClientRef: XRPLClient | null = null; // module-level ref for hourly timer
 
@@ -545,18 +548,26 @@ function startPeriodicScan(
             ]);
             const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
 
+            // Minimum wallet breadth gate: require at least 2 unique buyers in the
+            // live window before alerting. Stops single-wallet manipulation from
+            // triggering strongSingle via a large wash trade.
+            const hasWalletBreadth = !pressure || pressure.buyCount === 0
+              ? true  // no live data yet — don't penalise, let score decide
+              : pressure.uniqueBuyers >= 2;
+
             // Alert conditions (any one sufficient):
             //  A) Score >= 75 with decent liquidity — high conviction, no extra signals needed
             //  B) Score >= threshold + at least 1 other signal firing
-            //  C) Momentum spike (20%+) with active buying
+            //  C) Momentum spike (20%+) with active buying from 2+ wallets
             //  D) 3+ any signals together
             const highConviction  = score.totalScore >= 75;
-            const strongSingle    = (snapshot.priceChange5m || 0) >= 20 && pressure.buyCount >= 3;
+            const strongSingle    = (snapshot.priceChange5m || 0) >= 20 && pressure.buyCount >= 3 && hasWalletBreadth;
             const highScorePlusOne = signals.highScore && signalCount >= 2;
             const shouldAlert = (
               highConviction || strongSingle || highScorePlusOne || signalCount >= 3
             ) && (snapshot.liquidityXRP || 0) >= config.minLiquidityXRP
-              && !isBlocklisted;
+              && !isBlocklisted
+              && hasWalletBreadth;
 
             // Cooldown: 30 min per token
             const lastAlertTime = db.getLastAlertTime(token.currency, token.issuer);
@@ -594,12 +605,16 @@ function startPeriodicScan(
             }
 
             // Paper trade entry - require higher consensus
+            // tradeLocks prevents parallel batch workers opening duplicate positions
+            const tradeKey = `${token.currency}:${token.issuer}`;
             if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
-                riskFilter.isSafe(risks) && !isBlocklisted) {
+                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey)) {
+              tradeLocks.add(tradeKey);
               const trade = paperTrader.tryOpenTrade(
                 token, snapshot, score.totalScore,
                 `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`
               );
+              tradeLocks.delete(tradeKey);
 
               if (trade) {
                 setTimeout(() => sendAlert(telegramAlerter, db, {
@@ -694,8 +709,15 @@ function startPeriodicScan(
     const ignored = rawStats.raw - rawStats.filtered;
     const total = rawStats.raw;
 
-    // Deduplicated top 5 — topTokens already has one entry per token
+    // Blocklist for hourly leaderboard — same as alert gate
+    const HOURLY_BLOCKLIST = new Set([
+      'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY',
+      'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+    ]);
+
+    // Deduplicated top 5 — exclude established/stable tokens, memes only
     const top5 = topTokens
+      .filter(t => !HOURLY_BLOCKLIST.has(t.currency))
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
     topTokens = [];
