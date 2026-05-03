@@ -294,9 +294,9 @@ export class BurstDetector {
         return;
       }
 
-      // Skip illiquid pools
+      // Skip illiquid pools (MIN_POOL_XRP is the XRP side only; TVL = poolXRP * 2)
       if (ammInfo.poolXRP < MIN_POOL_XRP) {
-        debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP < ${MIN_POOL_XRP})`);
+        debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP one-side < ${MIN_POOL_XRP})`);
         return;
       }
 
@@ -320,7 +320,8 @@ export class BurstDetector {
                       : '⚡ EARLY';
 
       const priceStr  = priceXRP ? `${priceXRP.toFixed(8)} XRP` : 'fetching…';
-      const poolStr   = poolXRP  ? `${poolXRP.toFixed(0)} XRP` : 'unknown';
+      const tvlXRP    = poolXRP ? poolXRP * 2 : null; // TVL = both sides of the pool
+      const poolStr   = tvlXRP  ? `${tvlXRP.toFixed(0)} XRP` : 'unknown';
       const feeStr    = tradingFee != null ? `${tradingFee.toFixed(2)}%` : '?';
 
       const message =
@@ -339,14 +340,15 @@ export class BurstDetector {
         type: 'buy_burst',
         tokenCurrency: state.displayName,
         tokenIssuer: state.issuer,
-        liquidity: poolXRP,
+        liquidity: tvlXRP,   // TVL (both sides)
         price: priceXRP,
         message,
       });
 
       // Fire callback so index.ts can open a burst paper trade
+      // Pass TVL so the paper trader's liquidity threshold check is correct
       if (this.onBurst && poolXRP && priceXRP) {
-        this.onBurst(state.displayName, state.issuer, state.rawCurrency, poolXRP, priceXRP);
+        this.onBurst(state.displayName, state.issuer, state.rawCurrency, poolXRP * 2, priceXRP);
       }
 
     } catch (err) {
