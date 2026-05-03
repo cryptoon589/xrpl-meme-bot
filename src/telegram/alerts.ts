@@ -69,6 +69,9 @@ export class TelegramAlerter {
       case 'high_score':
         return this.formatTokenAlert(payload);
 
+      case 'buy_burst':
+        return payload.message; // pre-formatted HTML from BurstDetector
+
       case 'amm_pool':
         return this.formatAMMPoolAlert(payload);
 
@@ -111,7 +114,8 @@ export class TelegramAlerter {
     const strength = score >= 85 ? '🚀 STRONG BUY SIGNAL'
       : score >= 75 ? '🔥 BUY SIGNAL'
       : score >= 65 ? '⚡ WATCH SIGNAL'
-      : '🆕 NEW TOKEN';
+      : score >= 50 ? '📊 SIGNAL'
+      : '⚡ EARLY SIGNAL';
 
     const lines: string[] = [
       `${strength}`,

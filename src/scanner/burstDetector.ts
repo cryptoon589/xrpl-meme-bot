@@ -265,7 +265,7 @@ export class BurstDetector {
       info(`🚨 Buy burst: ${state.displayName} | ${uniqueWallets} wallets | ${totalXRP.toFixed(1)} XRP | pool: ${poolStr}`);
 
       await this.alerter.sendAlert({
-        type: 'high_score',
+        type: 'buy_burst',
         tokenCurrency: state.displayName,
         tokenIssuer: state.issuer,
         liquidity: poolXRP,

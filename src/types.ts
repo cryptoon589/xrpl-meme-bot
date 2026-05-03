@@ -114,6 +114,7 @@ export interface AlertPayload {
   type:
     | 'new_token'
     | 'high_score'
+    | 'buy_burst'
     | 'amm_pool'
     | 'liquidity_added'
     | 'liquidity_removed'
