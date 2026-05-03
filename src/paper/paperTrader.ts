@@ -62,10 +62,10 @@ export class PaperTrader {
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
 
-    // Require minimum liquidity for burst trades — below 2000 XRP is too risky
+    // Require minimum liquidity for burst trades — below 800 XRP is too risky
     const liquidity = snapshot?.liquidityXRP ?? 0;
-    if (liquidity < 2000) {
-      debug(`Burst trade skipped: pool too shallow (${liquidity.toFixed(0)} XRP < 2000 XRP)`);
+    if (liquidity < 800) {
+      debug(`Burst trade skipped: pool too shallow (${liquidity.toFixed(0)} XRP < 800 XRP)`);
       return null;
     }
 
