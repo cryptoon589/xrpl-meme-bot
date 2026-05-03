@@ -316,26 +316,45 @@ function smartPruneTokens(
   riskFilter: RiskFilter,
   config: any
 ): any[] {
-  const PRUNE_AGE_MS = 48 * 60 * 60 * 1000; // 48 hours
-  const MIN_SCORE_TO_KEEP = 50;
+  const PRUNE_AGE_MS  = 6 * 60 * 60 * 1000;  // 6h (was 48h) — be aggressive
+  const HARD_CAP      = 300;                    // never score more than 300 tokens
+  const MIN_SCORE_TO_KEEP = 40;
   const now = Date.now();
 
-  return tokens.filter(token => {
-    // Keep recently active tokens
+  let kept = tokens.filter(token => {
+    // Always keep tokens with open paper positions
+    // (checked by currency only since issuer may differ)
+    // Keep recently updated tokens
     if (now - token.lastUpdated < PRUNE_AGE_MS) return true;
 
-    // Keep tokens with AMM pools
+    // Keep tokens with AMM pools AND a decent score
     const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
-    if (pool) return true;
+    if (!pool) {
+      debug(`Pruning no-pool token: ${token.currency}`);
+      return false;
+    }
 
-    // Check last score
+    // Check last score — prune low scorers even with pools
     const lastScore = db.getLatestScore(token.currency, token.issuer);
-    if (lastScore && lastScore.totalScore >= MIN_SCORE_TO_KEEP) return true;
+    if (lastScore && lastScore.totalScore < MIN_SCORE_TO_KEEP) {
+      debug(`Pruning low-score token: ${token.currency} (${lastScore.totalScore})`);
+      return false;
+    }
 
-    // Prune this token
-    debug(`Pruning inactive token: ${token.currency}:${token.issuer}`);
-    return false;
+    return true;
   });
+
+  // Hard cap: if still over limit, drop lowest-scored tokens
+  if (kept.length > HARD_CAP) {
+    kept = kept
+      .map(t => ({ t, score: db.getLatestScore(t.currency, t.issuer)?.totalScore ?? 0 }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, HARD_CAP)
+      .map(({ t }) => t);
+    info(`Token list hard-capped at ${HARD_CAP}`);
+  }
+
+  return kept;
 }
 
 /**
@@ -363,7 +382,7 @@ function startPeriodicScan(
   liveValidator: LiveValidator,
   socialDetector: SocialDetector
 ): void {
-  const MAX_TRACKED_TOKENS = 500;
+  const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
   const HOLDER_SCAN_INTERVAL = 6; // Scan holders every 6th cycle (~6 minutes)
   let scanCycle = 0;
@@ -439,8 +458,15 @@ function startPeriodicScan(
                 uniqueSellers: pressure.uniqueSellers,
               };
 
-              // Get holder count (cached) — pass rawCurrency so comparison works for hex-encoded tokens
-              const holders = await holderCounter.getHolderCount(token.currency, token.issuer, token.rawCurrency);
+              // Get holder count only for active tokens — skips the expensive account_lines
+              // pagination for dormant tokens (no buys and no price movement).
+              // Cache TTL is 30 min so even active tokens rarely trigger a real fetch.
+              const hasActivity = pressure.buyCount > 0 || pressure.sellCount > 0
+                || Math.abs(ammPrice?.priceXRP ? (ammPrice.priceXRP - (ammPrice.priceXRP * 0.95)) : 0) > 0;
+              const cachedHolders = holderCounter.getCached(token.currency, token.issuer);
+              const holders = (hasActivity || cachedHolders === null)
+                ? await holderCounter.getHolderCount(token.currency, token.issuer, token.rawCurrency)
+                : cachedHolders;
 
               // Fix 5: pass ammPrice into collectMarketDataWithExtras so price history
               // and priceChange calculations use the correct AMM price from the start

@@ -19,8 +19,8 @@ interface HolderCache {
 export class HolderCounter {
   private xrplClient: XRPLClient;
   private cache: Map<string, HolderCache> = new Map();
-  private readonly CACHE_TTL_MS = 10 * 60 * 1000; // 10 min
-  private readonly MAX_PAGES = 25;                  // 25 × 400 = up to 10,000 holders
+  private readonly CACHE_TTL_MS = 30 * 60 * 1000; // 30 min — holders don't change fast
+  private readonly MAX_PAGES = 5;                   // 5 × 400 = 2,000 holders max (was 25 × = 10k)
 
   // Semaphore: max 8 concurrent account_lines requests to avoid WebSocket flood
   private readonly MAX_CONCURRENT = 8;
@@ -43,6 +43,14 @@ export class HolderCounter {
     this.activeRequests--;
     const next = this.waitQueue.shift();
     if (next) next();
+  }
+
+  /** Return cached holder count if available (null if not cached or expired) */
+  getCached(currency: string, issuer: string): number | null {
+    const key = `${currency}:${issuer}`;
+    const cached = this.cache.get(key);
+    if (cached && Date.now() - cached.lastUpdated < this.CACHE_TTL_MS) return cached.count;
+    return null;
   }
 
   async getHolderCount(currency: string, issuer: string, rawCurrency?: string): Promise<number | null> {
