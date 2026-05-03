@@ -225,8 +225,14 @@ export class BurstDetector {
     try {
       const ammInfo = await this.fetchAMMInfo(state.rawCurrency, state.issuer);
 
+      // Skip if no AMM pool found at all — can't price the token
+      if (!ammInfo) {
+        debug(`Burst on ${state.displayName} suppressed — no AMM pool or price unavailable`);
+        return;
+      }
+
       // Skip illiquid pools
-      if (ammInfo && ammInfo.poolXRP < MIN_POOL_XRP) {
+      if (ammInfo.poolXRP < MIN_POOL_XRP) {
         debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP < ${MIN_POOL_XRP})`);
         return;
       }
@@ -292,32 +298,52 @@ export class BurstDetector {
     rawCurrency: string,
     issuer: string
   ): Promise<{ priceXRP: number; poolXRP: number; tradingFee: number } | null> {
-    try {
-      const client = this.xrplClient.getClient();
-      if (!client) return null;
+    // Try up to 3 times with 1s delay between attempts (WebSocket may be reconnecting)
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const client = this.xrplClient.getClient();
+        if (!client) {
+          if (attempt < 3) await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
 
-      const res: any = await client.request({
-        command: 'amm_info',
-        asset:  { currency: 'XRP' },
-        asset2: { currency: rawCurrency, issuer },
-      });
+        const res: any = await client.request({
+          command: 'amm_info',
+          asset:  { currency: 'XRP' },
+          asset2: { currency: rawCurrency, issuer },
+        });
 
-      const amm = res.result?.amm;
-      if (!amm) return null;
+        const amm = res.result?.amm;
+        if (!amm) return null; // token has no AMM pool — don't retry
 
-      const xrpDrops   = parseInt(amm.amount, 10);
-      const tokenValue = parseFloat(amm.amount2?.value || '0');
+        // XRP side: string in drops if XRP is amount, else amount2
+        let xrpDrops: number;
+        let tokenValue: number;
+        if (typeof amm.amount === 'string') {
+          xrpDrops   = parseInt(amm.amount, 10);
+          tokenValue = parseFloat(amm.amount2?.value || '0');
+        } else {
+          xrpDrops   = parseInt(amm.amount2, 10);
+          tokenValue = parseFloat(amm.amount?.value || '0');
+        }
 
-      if (!xrpDrops || !tokenValue) return null;
+        if (!xrpDrops || !tokenValue) return null;
 
-      const poolXRP  = xrpDrops / 1_000_000;
-      const priceXRP = poolXRP / tokenValue;
-      const tradingFee = (amm.trading_fee || 0) / 1000;
+        const poolXRP    = xrpDrops / 1_000_000;
+        const priceXRP   = poolXRP / tokenValue;
+        const tradingFee = (amm.trading_fee || 0) / 1000;
 
-      return { priceXRP, poolXRP, tradingFee };
-    } catch {
-      return null;
+        return { priceXRP, poolXRP, tradingFee };
+      } catch (err: any) {
+        if (attempt < 3) {
+          debug(`fetchAMMInfo attempt ${attempt} failed for ${rawCurrency}: ${err?.message} — retrying`);
+          await new Promise(r => setTimeout(r, 1000 * attempt));
+        } else {
+          debug(`fetchAMMInfo failed after 3 attempts for ${rawCurrency}: ${err?.message}`);
+        }
+      }
     }
+    return null;
   }
 
   // ─────────────────────────────────────────

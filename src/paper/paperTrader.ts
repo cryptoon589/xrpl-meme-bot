@@ -812,10 +812,25 @@ export class PaperTrader {
     getPrice: (currency: string, issuer: string) => Promise<number | null>
   ): Promise<PaperTrade[]> {
     const allClosed: PaperTrade[] = [];
+    const now = Date.now();
+    const UNPRICEABLE_TIMEOUT_MS = 30 * 60 * 1000; // force-close after 30 min with no price
+
     for (const [key, position] of this.openPositions.entries()) {
       const { trade } = position;
       const price = await getPrice(trade.tokenCurrency, trade.tokenIssuer);
-      if (!price || price <= 0) continue;
+
+      // No price — check if position has been open too long without pricing
+      if (!price || price <= 0) {
+        const ageMs = now - (position.openedAt || trade.entryTimestamp || 0);
+        if (ageMs > UNPRICEABLE_TIMEOUT_MS) {
+          warn(`Force-closing unpriceable position: ${trade.tokenCurrency} (no price for ${(ageMs/60000).toFixed(0)}m)`);
+          // Close at entry price (0% PnL) — best we can do with no price data
+          this.closePosition(key, trade.entryPriceXRP, 'force_close_no_price', null);
+          allClosed.push(trade);
+        }
+        continue;
+      }
+
       const fakeSnapshot = {
         tokenCurrency: trade.tokenCurrency,
         tokenIssuer: trade.tokenIssuer,
@@ -828,6 +843,21 @@ export class PaperTrader {
       allClosed.push(...closed);
     }
     return allClosed;
+  }
+
+  /**
+   * Force-close a position by currency name — used to clean up blocklisted tokens
+   * that were opened before the blocklist was added.
+   */
+  forceCloseByToken(currency: string, reason: string): PaperTrade | null {
+    for (const [key, position] of this.openPositions.entries()) {
+      if (position.trade.tokenCurrency === currency) {
+        this.closePosition(key, position.trade.entryPriceXRP, reason, null);
+        info(`Force-closed ${currency}: ${reason}`);
+        return position.trade;
+      }
+    }
+    return null;
   }
 
   getState(): {

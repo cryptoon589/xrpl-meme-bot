@@ -157,6 +157,27 @@ async function main() {
     };
   }
 
+  // On startup: force-close any positions in blocklisted tokens
+  // (opened before the blocklist was added, e.g. XAH, 666, LOX)
+  if (paperTrader) {
+    for (const token of BURST_TRADE_BLOCKLIST) {
+      const closed = paperTrader.forceCloseByToken(token, 'blocklisted_token_cleanup');
+      if (closed) {
+        warn(`Startup cleanup: force-closed blocklisted position ${token}`);
+      }
+    }
+    // Also force-close any position open for more than 2 hours with no recent
+    // scan activity (catches tokens pruned before orphan checker was added)
+    const openPositions = paperTrader.getOpenPositions();
+    for (const pos of openPositions) {
+      const ageMs = Date.now() - (pos.entryTimestamp || 0);
+      if (ageMs > 2 * 60 * 60 * 1000) {
+        warn(`Startup cleanup: force-closing stale position ${pos.tokenCurrency} (age: ${(ageMs/3600000).toFixed(1)}h)`);
+        paperTrader.forceCloseByToken(pos.tokenCurrency, 'stale_position_cleanup');
+      }
+    }
+  }
+
   // Trade executor — dry-run unless LIVE_TRADING=true in .env
   let tradeExecutor: TradeExecutor | null = null;
   if (process.env.TRADING_WALLET_SEED) {
