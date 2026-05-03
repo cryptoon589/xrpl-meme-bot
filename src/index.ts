@@ -538,6 +538,13 @@ function startPeriodicScan(
             };
             const signalCount = Object.values(signals).filter(Boolean).length;
 
+            // Established/stablecoin tokens — never alert regardless of score or momentum
+            const ALERT_BLOCKLIST = new Set([
+              'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY',
+              'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+            ]);
+            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
+
             // Alert conditions (any one sufficient):
             //  A) Score >= 75 with decent liquidity — high conviction, no extra signals needed
             //  B) Score >= threshold + at least 1 other signal firing
@@ -548,7 +555,8 @@ function startPeriodicScan(
             const highScorePlusOne = signals.highScore && signalCount >= 2;
             const shouldAlert = (
               highConviction || strongSingle || highScorePlusOne || signalCount >= 3
-            ) && (snapshot.liquidityXRP || 0) >= config.minLiquidityXRP;
+            ) && (snapshot.liquidityXRP || 0) >= config.minLiquidityXRP
+              && !isBlocklisted;
 
             // Cooldown: 30 min per token
             const lastAlertTime = db.getLastAlertTime(token.currency, token.issuer);
@@ -587,7 +595,7 @@ function startPeriodicScan(
 
             // Paper trade entry - require higher consensus
             if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
-                riskFilter.isSafe(risks)) {
+                riskFilter.isSafe(risks) && !isBlocklisted) {
               const trade = paperTrader.tryOpenTrade(
                 token, snapshot, score.totalScore,
                 `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`
