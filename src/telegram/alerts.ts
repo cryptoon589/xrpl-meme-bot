@@ -11,6 +11,7 @@ import { info, warn, debug } from '../utils/logger';
 export class TelegramAlerter {
   private bot: TelegramBot | null = null;
   private chatId: string = '';
+  private allowedChatIds: Set<string> = new Set();
   private enabled: boolean = false;
   private lastAlertTime: Map<string, number> = new Map();
   private alertCooldownMs: number = 5 * 60 * 1000; // 5 minutes cooldown per alert type+token
@@ -21,7 +22,17 @@ export class TelegramAlerter {
         this.bot = new TelegramBot(config.telegramBotToken, { polling: false });
         this.chatId = config.telegramChatId;
         this.enabled = true;
-        info('Telegram bot initialized');
+
+        // Build whitelist: always include the primary chat ID + any extras from env
+        this.allowedChatIds.add(String(config.telegramChatId).trim());
+        const extra = process.env.ALLOWED_CHAT_IDS || '';
+        for (const id of extra.split(',').map(s => s.trim()).filter(Boolean)) {
+          this.allowedChatIds.add(id);
+        }
+        // Default whitelist entry
+        this.allowedChatIds.add('5023314955');
+
+        info(`Telegram bot initialized | Allowed chat IDs: ${[...this.allowedChatIds].join(', ')}`);
       } catch (err) {
         warn(`Failed to initialize Telegram bot: ${err}`);
         this.enabled = false;
@@ -29,6 +40,11 @@ export class TelegramAlerter {
     } else {
       warn('Telegram not configured - alerts disabled');
     }
+  }
+
+  /** Returns true only if the given chat ID is whitelisted */
+  private isAllowed(chatId: string): boolean {
+    return this.allowedChatIds.has(String(chatId).trim());
   }
 
   /**
@@ -52,6 +68,10 @@ export class TelegramAlerter {
 
     try {
       const message = this.formatAlert(payload);
+      if (!this.isAllowed(this.chatId)) {
+        warn(`Alert blocked — chatId ${this.chatId} not in whitelist`);
+        return;
+      }
       await this.bot.sendMessage(this.chatId, message, { parse_mode: 'HTML' });
       this.lastAlertTime.set(cooldownKey, now);
       info(`Alert sent: ${payload.type}`);
@@ -327,6 +347,10 @@ export class TelegramAlerter {
    */
   async sendRaw(html: string): Promise<void> {
     if (!this.enabled || !this.bot) return;
+    if (!this.isAllowed(this.chatId)) {
+      warn(`sendRaw blocked — chatId ${this.chatId} not in whitelist`);
+      return;
+    }
     try {
       await this.bot.sendMessage(this.chatId, html, { parse_mode: 'HTML', disable_web_page_preview: true });
     } catch (err) {
@@ -341,6 +365,11 @@ export class TelegramAlerter {
   async sendTestMessage(): Promise<boolean> {
     if (!this.enabled || !this.bot) {
       warn('Cannot send test: Telegram not configured');
+      return false;
+    }
+
+    if (!this.isAllowed(this.chatId)) {
+      warn(`sendTestMessage blocked — chatId ${this.chatId} not in whitelist`);
       return false;
     }
 
