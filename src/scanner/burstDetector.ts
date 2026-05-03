@@ -84,6 +84,8 @@ const STABLECOINS = new Set([
 
 export class BurstDetector {
   private tokens: Map<string, TokenState> = new Map(); // key = "rawCurrency:issuer"
+  /** ammAccount → key (rawCurrency:issuer) — populated lazily */
+  private ammToToken: Map<string, string> = new Map();
   private xrplClient: XRPLClient;
   private alerter: TelegramAlerter;
   private db: Database;
@@ -104,67 +106,139 @@ export class BurstDetector {
     const meta = tx.meta;
     if (!t || !meta || meta.TransactionResult !== 'tesSUCCESS') return;
 
+    // PRIMARY: scan metadata for XRP flowing INTO any known AMM pool account.
+    // This catches OfferCreate, Payment, AMMDeposit, and any future tx types.
+    this.scanAmmFlows(t, meta);
+
+    // SECONDARY: detect tokens on first encounter via tx fields, then register
+    // their AMM account so future txs are caught by scanAmmFlows.
     const txType = t.TransactionType;
-    if (txType === 'OfferCreate') this.processOffer(t, meta);
-    else if (txType === 'Payment') this.processPayment(t, meta);
+    if (txType === 'OfferCreate') this.discoverTokenFromOffer(t, meta);
+    else if (txType === 'Payment')  this.discoverTokenFromPayment(t, meta);
   }
 
   // ─────────────────────────────────────────
-  // Parse OfferCreate for token buys
+  // Universal AMM pool watcher
+  // Scans AffectedNodes for any known AMM account gaining XRP.
+  // An AMM account gaining XRP == someone bought the token.
   // ─────────────────────────────────────────
-  private processOffer(t: any, meta: any): void {
-    // TakerPays XRP, TakerGets token = someone buying token with XRP
+  private scanAmmFlows(t: any, meta: any): void {
+    const nodes: any[] = meta?.AffectedNodes || [];
+    for (const node of nodes) {
+      const n = node.ModifiedNode;
+      if (!n || n.LedgerEntryType !== 'AccountRoot') continue;
+
+      const acct    = n.FinalFields?.Account || n.FinalFields?.AMMID ? n.FinalFields?.Account : null;
+      if (!acct) continue;
+
+      const key = this.ammToToken.get(acct);
+      if (!key) continue; // not a tracked AMM account
+
+      // XRP gained by AMM account = token sold into AMM = buyer paid XRP
+      const prevBal = parseInt(n.PreviousFields?.Balance ?? '0', 10);
+      const currBal = parseInt(n.FinalFields?.Balance  ?? '0', 10);
+      const xrpGained = (currBal - prevBal) / 1_000_000;
+      if (xrpGained < 0.001) continue; // ignore dust / sells
+
+      const state = this.tokens.get(key);
+      if (!state) continue;
+
+      // Attribute the buy to the tx initiator
+      const buyer = t.Account || 'unknown';
+      debug(`AMM flow: ${state.displayName} gained ${xrpGained.toFixed(4)} XRP from ${buyer}`);
+      this.recordBuy(state.rawCurrency, state.issuer, buyer, xrpGained);
+    }
+  }
+
+  // ─────────────────────────────────────────
+  // Token discovery from OfferCreate
+  // Extracts currency/issuer so we can look up the AMM account.
+  // ─────────────────────────────────────────
+  private discoverTokenFromOffer(t: any, meta: any): void {
     const pays = t.TakerPays;
     const gets = t.TakerGets;
     if (!pays || !gets) return;
 
+    // Determine which side is the token
     let rawCurrency: string | null = null;
     let issuer: string | null = null;
-    let xrpAmount = 0;
 
-    if (typeof pays === 'string' && typeof gets === 'object' && gets.currency) {
-      // Buyer pays XRP, gets token
-      rawCurrency = gets.currency;
-      issuer      = gets.issuer;
-      xrpAmount   = parseInt(pays, 10) / 1_000_000;
+    if (typeof pays === 'object' && pays.currency && pays.currency !== 'XRP') {
+      rawCurrency = pays.currency; issuer = pays.issuer;
+    } else if (typeof gets === 'object' && gets.currency && gets.currency !== 'XRP') {
+      rawCurrency = gets.currency; issuer = gets.issuer;
     } else {
-      // Check metadata for the actual fill amount (partial fills)
+      // Try metadata fallback
       const fill = this.extractFillFromMeta(meta);
-      if (!fill) return;
-      rawCurrency = fill.tokenCurrency;
-      issuer      = fill.issuer;
-      xrpAmount   = fill.xrpAmount;
+      if (fill) { rawCurrency = fill.tokenCurrency; issuer = fill.issuer; }
     }
 
-    if (!rawCurrency || !issuer || xrpAmount <= 0) return;
-    if (STABLECOINS.has(rawCurrency)) return;
-    if (rawCurrency === 'XRP') return;
-
-    this.recordBuy(rawCurrency, issuer, t.Account, xrpAmount);
+    if (!rawCurrency || !issuer) return;
+    if (STABLECOINS.has(rawCurrency) || rawCurrency === 'XRP') return;
+    this.ensureAmmRegistered(rawCurrency, issuer);
   }
 
   // ─────────────────────────────────────────
-  // Parse Payment for token buys
+  // Token discovery from Payment
   // ─────────────────────────────────────────
-  private processPayment(t: any, meta: any): void {
-    // A cross-currency payment where the destination receives a token
-    // indicates a buy (XRP→token path payment)
-    const deliveredAmount = meta?.DeliveredAmount || meta?.delivered_amount;
-    if (!deliveredAmount || typeof deliveredAmount === 'string') return; // XRP delivery
+  private discoverTokenFromPayment(t: any, meta: any): void {
+    // Token received by destination = XRP→token payment
+    const delivered = meta?.DeliveredAmount || meta?.delivered_amount;
+    if (delivered && typeof delivered === 'object' && delivered.currency !== 'XRP') {
+      const { currency, issuer } = delivered;
+      if (!STABLECOINS.has(currency)) this.ensureAmmRegistered(currency, issuer);
+      return;
+    }
+    // Token in SendMax = token→XRP payment (seller side)
+    const sendMax = t.SendMax;
+    if (sendMax && typeof sendMax === 'object' && sendMax.currency !== 'XRP') {
+      const { currency, issuer } = sendMax;
+      if (!STABLECOINS.has(currency)) this.ensureAmmRegistered(currency, issuer);
+    }
+  }
 
-    const rawCurrency = deliveredAmount.currency;
-    const issuer      = deliveredAmount.issuer;
-    if (!rawCurrency || !issuer) return;
-    if (STABLECOINS.has(rawCurrency)) return;
-    if (rawCurrency === 'XRP') return;
+  // ─────────────────────────────────────────
+  // Lazily fetch and cache AMM account for a token
+  // ─────────────────────────────────────────
+  private ensureAmmRegistered(rawCurrency: string, issuer: string): void {
+    const key = `${rawCurrency}:${issuer}`;
+    // Already tracking via AMM account
+    if (this.tokens.has(key)) return;
 
-    // Estimate XRP spent from SendMax or meta XRP node changes
-    const xrpAmount = this.estimateXRPFromMeta(meta);
-    if (xrpAmount <= 0) return;
+    // Init token state
+    if (this.tokens.size >= MAX_TRACKED_TOKENS) this.evictOldest();
+    const displayName = this.decodeCurrency(rawCurrency);
+    this.tokens.set(key, {
+      rawCurrency, issuer, displayName,
+      buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
+      lastTrade: Date.now(),
+    });
 
-    // The recipient is the buyer
-    const buyer = t.Destination || t.Account;
-    this.recordBuy(rawCurrency, issuer, buyer, xrpAmount);
+    // Async: fetch AMM pool account and register it
+    this.fetchAMMAccount(rawCurrency, issuer).then(ammAccount => {
+      if (ammAccount) {
+        this.ammToToken.set(ammAccount, key);
+        debug(`Registered AMM account ${ammAccount} for ${displayName}`);
+      }
+    }).catch(() => {});
+  }
+
+  // ─────────────────────────────────────────
+  // Fetch the AMM pool account address for a token
+  // ─────────────────────────────────────────
+  private async fetchAMMAccount(rawCurrency: string, issuer: string): Promise<string | null> {
+    try {
+      const client = this.xrplClient.getClient();
+      if (!client) return null;
+      const res: any = await client.request({
+        command: 'amm_info',
+        asset:  { currency: 'XRP' },
+        asset2: { currency: rawCurrency, issuer },
+      });
+      return res?.result?.amm?.account ?? null;
+    } catch {
+      return null;
+    }
   }
 
   // ─────────────────────────────────────────
@@ -174,20 +248,9 @@ export class BurstDetector {
     const key = `${rawCurrency}:${issuer}`;
     const now = Date.now();
 
-    // Lazy init
-    if (!this.tokens.has(key)) {
-      if (this.tokens.size >= MAX_TRACKED_TOKENS) this.evictOldest();
-      this.tokens.set(key, {
-        rawCurrency,
-        issuer,
-        displayName: this.decodeCurrency(rawCurrency),
-        buys: [],
-        lastAlertTs: 0,
-        poolXRP: null,
-        baselinePrice: null,
-        lastTrade: now,
-      });
-    }
+    // Token state is always pre-initialised by ensureAmmRegistered or scanAmmFlows
+    // but guard anyway
+    if (!this.tokens.has(key)) return;
 
     const state = this.tokens.get(key)!;
     state.lastTrade = now;
@@ -379,21 +442,6 @@ export class BurstDetector {
       }
     }
     return null;
-  }
-
-  private estimateXRPFromMeta(meta: any): number {
-    const nodes: any[] = meta?.AffectedNodes || [];
-    for (const node of nodes) {
-      const ar = node.ModifiedNode;
-      if (!ar || ar.LedgerEntryType !== 'AccountRoot') continue;
-      const prev = ar.PreviousFields?.Balance;
-      const curr = ar.FinalFields?.Balance;
-      if (prev && curr) {
-        const delta = parseInt(prev, 10) - parseInt(curr, 10);
-        if (delta > 1000) return delta / 1_000_000;
-      }
-    }
-    return 0;
   }
 
   private decodeCurrency(currency: string): string {
