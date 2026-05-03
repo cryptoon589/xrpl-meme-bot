@@ -6,35 +6,53 @@
  * produces a JSON recommendation file that the bot can apply
  * (with human approval, or autonomously once win rate is trusted).
  *
- * Runs as a cron inside the bot (weekly, or on-demand).
+ * Runs as a cron inside the bot (every 6h).
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { Database } from '../db/database';
-import { info, warn, debug } from '../utils/logger';
+import { info, warn } from '../utils/logger';
 
 const MIN_TRADES_FOR_ANALYSIS = 20;
 const RECOMMENDATIONS_PATH = path.join(process.cwd(), 'state', 'recommendations.json');
 const REPORT_PATH          = path.join(process.cwd(), 'state', 'trade_analysis.md');
+
+export interface ScoreWeights {
+  liquidityScore: number;
+  holderGrowthScore: number;
+  buyPressureScore: number;
+  volumeAccelScore: number;
+  devSafetyScore: number;
+  spreadScore: number;
+}
 
 export interface TradeRecommendations {
   generatedAt: number;
   tradesAnalyzed: number;
   overallWinRate: number;
 
-  // Tunable parameters with recommended values
-  minLiquidityXRP: number;         // current default: 2000
-  burstStopLossPercent: number;    // current default: -8
-  burstTp1Percent: number;         // current default: +15
-  burstTp2Percent: number;         // current default: +30
-  burstTrailingActivation: number; // current default: +10
-  burstTrailingDistance: number;   // current default: 5%
-  minScorePaperTrade: number;      // current default: from config
+  // Burst trade params
+  minLiquidityXRP: number;
+  burstStopLossPercent: number;
+  burstTp1Percent: number;
+  burstTp2Percent: number;
+  burstTrailingActivation: number;
+  burstTrailingDistance: number;
 
-  // Insights (human-readable, not applied automatically)
+  // Scored trade params
+  minScorePaperTrade: number;
+  scoredTp1Percent: number;
+  scoredTp2Percent: number;
+
+  // Score component weights (relative importance 0-100)
+  // Used to reweight the scorer so winning predictors matter more
+  scoreWeights: ScoreWeights;
+  // Which component threshold guarantees best win rate
+  bestScoredSignalCombo: string;
+
   insights: string[];
-  autoApplyReady: boolean; // true only if winRate >= 50% with 30+ trades
+  autoApplyReady: boolean;
 }
 
 interface ClosedTrade {
@@ -56,6 +74,15 @@ interface ClosedTrade {
   trailing_stop_active: number;
 }
 
+interface TradeWithScore extends ClosedTrade {
+  liquidity_score: number | null;
+  holder_growth_score: number | null;
+  buy_pressure_score: number | null;
+  volume_accel_score: number | null;
+  dev_safety_score: number | null;
+  spread_score: number | null;
+}
+
 export class TradeAnalyzer {
   private db: Database;
 
@@ -67,184 +94,281 @@ export class TradeAnalyzer {
    * Run full analysis. Returns null if not enough trades yet.
    */
   analyze(): TradeRecommendations | null {
-    const trades = this.getClosedTrades();
+    const trades     = this.getClosedTradesWithScores();
+    const rawTrades  = trades as ClosedTrade[];
 
-    if (trades.length < MIN_TRADES_FOR_ANALYSIS) {
-      info(`TradeAnalyzer: only ${trades.length} closed trades (need ${MIN_TRADES_FOR_ANALYSIS}), skipping`);
+    if (rawTrades.length < MIN_TRADES_FOR_ANALYSIS) {
+      info(`TradeAnalyzer: only ${rawTrades.length} closed trades (need ${MIN_TRADES_FOR_ANALYSIS}), skipping`);
       return null;
     }
 
-    const burst  = trades.filter(t => t.entry_reason?.startsWith('[BURST]'));
+    const burst  = rawTrades.filter(t => t.entry_reason?.startsWith('[BURST]'));
     const scored = trades.filter(t => !t.entry_reason?.startsWith('[BURST]'));
 
-    info(`TradeAnalyzer: analyzing ${trades.length} trades (${burst.length} burst, ${scored.length} scored)`);
+    info(`TradeAnalyzer: analyzing ${rawTrades.length} trades (${burst.length} burst, ${scored.length} scored)`);
 
     const insights: string[] = [];
 
     // ── Overall stats ──────────────────────────────────────────────
-    const wins      = trades.filter(t => t.pnl_xrp > 0);
-    const losses    = trades.filter(t => t.pnl_xrp <= 0);
-    const winRate   = wins.length / trades.length;
-    const avgWin    = wins.length    > 0 ? wins.reduce((s, t) => s + t.pnl_percent, 0)   / wins.length    : 0;
-    const avgLoss   = losses.length  > 0 ? losses.reduce((s, t) => s + t.pnl_percent, 0) / losses.length  : 0;
-    const totalPnL  = trades.reduce((s, t) => s + t.pnl_xrp, 0);
+    const wins     = rawTrades.filter(t => t.pnl_xrp > 0);
+    const losses   = rawTrades.filter(t => t.pnl_xrp <= 0);
+    const winRate  = wins.length / rawTrades.length;
+    const avgWin   = wins.length   > 0 ? wins.reduce((s, t) => s + t.pnl_percent, 0)   / wins.length   : 0;
+    const avgLoss  = losses.length > 0 ? losses.reduce((s, t) => s + t.pnl_percent, 0) / losses.length : 0;
+    const totalPnL = rawTrades.reduce((s, t) => s + t.pnl_xrp, 0);
 
-    insights.push(`Overall: ${trades.length} trades | Win rate: ${(winRate*100).toFixed(1)}% | Avg win: +${avgWin.toFixed(1)}% | Avg loss: ${avgLoss.toFixed(1)}% | Total PnL: ${totalPnL.toFixed(2)} XRP`);
+    insights.push(`Overall: ${rawTrades.length} trades | Win rate: ${(winRate*100).toFixed(1)}% | Avg win: +${avgWin.toFixed(1)}% | Avg loss: ${avgLoss.toFixed(1)}% | Total PnL: ${totalPnL.toFixed(2)} XRP`);
 
     // ── Burst trade analysis ───────────────────────────────────────
-    let recMinLiquidity   = 2000;
-    let recStopLoss       = -8;
-    let recTp1            = 15;
-    let recTp2            = 30;
-    let recTrailActivate  = 10;
-    let recTrailDistance  = 5;
+    let recMinLiquidity  = 2000;
+    let recStopLoss      = -8;
+    let recTp1Burst      = 15;
+    let recTp2Burst      = 30;
+    let recTrailActivate = 10;
+    let recTrailDistance = 5;
 
     if (burst.length >= 5) {
-      // Bucket by liquidity range and find win rates
+      // Liquidity bucket win rates
       const liqBuckets: Record<string, { wins: number; total: number; pnl: number }> = {
-        '<2k':   { wins: 0, total: 0, pnl: 0 },
-        '2k-5k': { wins: 0, total: 0, pnl: 0 },
-        '5k-20k':{ wins: 0, total: 0, pnl: 0 },
-        '>20k':  { wins: 0, total: 0, pnl: 0 },
+        '<2k':    { wins: 0, total: 0, pnl: 0 },
+        '2k-5k':  { wins: 0, total: 0, pnl: 0 },
+        '5k-20k': { wins: 0, total: 0, pnl: 0 },
+        '>20k':   { wins: 0, total: 0, pnl: 0 },
       };
-
       for (const t of burst) {
-        // Liquidity not stored on trade — approximate from entry amount * 10
-        // TODO: join with market_snapshots for real liquidity data
         const bucket = this.getLiquidityBucket(t);
-        if (liqBuckets[bucket]) {
-          liqBuckets[bucket].total++;
-          liqBuckets[bucket].pnl += t.pnl_xrp;
-          if (t.pnl_xrp > 0) liqBuckets[bucket].wins++;
-        }
+        liqBuckets[bucket].total++;
+        liqBuckets[bucket].pnl += t.pnl_xrp;
+        if (t.pnl_xrp > 0) liqBuckets[bucket].wins++;
       }
-
+      let bestLiqBucket = '2k-5k';
+      let bestLiqWR = 0;
       for (const [range, data] of Object.entries(liqBuckets)) {
-        if (data.total > 0) {
-          const wr = (data.wins / data.total * 100).toFixed(0);
-          insights.push(`Burst liquidity ${range}: ${wr}% win rate (${data.total} trades, ${data.pnl.toFixed(2)} XRP PnL)`);
-        }
+        if (data.total === 0) continue;
+        const wr = data.wins / data.total;
+        insights.push(`Burst liquidity ${range}: ${(wr*100).toFixed(0)}% win rate (${data.total} trades, ${data.pnl.toFixed(2)} XRP)`);
+        if (wr > bestLiqWR) { bestLiqWR = wr; bestLiqBucket = range; }
+      }
+      // Recommend min liquidity at start of best bucket
+      const bucketFloors: Record<string, number> = { '<2k': 0, '2k-5k': 2000, '5k-20k': 5000, '>20k': 20000 };
+      recMinLiquidity = bucketFloors[bestLiqBucket] || 2000;
+      if (recMinLiquidity > 2000) {
+        insights.push(`📈 Best win rate in ${bestLiqBucket} bucket → raising min liquidity to ${recMinLiquidity} XRP`);
       }
 
-      // Exit reason analysis
-      const exitReasons: Record<string, { count: number; avgPnl: number; pnlSum: number }> = {};
+      // Exit reason breakdown
+      const exitMap: Record<string, { count: number; pnlSum: number }> = {};
       for (const t of burst) {
-        const reason = t.exit_reason || 'unknown';
-        if (!exitReasons[reason]) exitReasons[reason] = { count: 0, avgPnl: 0, pnlSum: 0 };
-        exitReasons[reason].count++;
-        exitReasons[reason].pnlSum += t.pnl_percent;
+        const r = t.exit_reason || 'unknown';
+        if (!exitMap[r]) exitMap[r] = { count: 0, pnlSum: 0 };
+        exitMap[r].count++;
+        exitMap[r].pnlSum += t.pnl_percent;
       }
-      for (const [reason, data] of Object.entries(exitReasons)) {
-        data.avgPnl = data.pnlSum / data.count;
-        insights.push(`Burst exit [${reason}]: ${data.count}× avg PnL ${data.avgPnl.toFixed(1)}%`);
-      }
-
-      // Stop loss frequency — if >40% of trades hit stop loss → pump is dumping before our exit
-      const stopLossHits = burst.filter(t => t.exit_reason?.includes('stop_loss') || t.pnl_percent <= -7).length;
-      const stopLossRate = stopLossHits / burst.length;
-      if (stopLossRate > 0.4) {
-        // Too many stop losses — we're entering too late or pool too shallow
-        recMinLiquidity = 5000;
-        insights.push(`⚠️ ${(stopLossRate*100).toFixed(0)}% of burst trades hit stop loss → recommend raising min liquidity to ${recMinLiquidity} XRP`);
-      } else if (stopLossRate < 0.2) {
-        insights.push(`✅ Stop loss rate healthy at ${(stopLossRate*100).toFixed(0)}% — current -8% stop seems right`);
+      for (const [reason, data] of Object.entries(exitMap)) {
+        insights.push(`Burst exit [${reason}]: ${data.count}× avg ${(data.pnlSum/data.count).toFixed(1)}%`);
       }
 
-      // TP1 analysis — if TP1 rarely hits, pumps aren't reaching +15%
+      // Stop loss rate
+      const stopHits = burst.filter(t => t.exit_reason?.includes('stop_loss') || t.pnl_percent <= -7).length;
+      const stopRate = stopHits / burst.length;
+      if (stopRate > 0.4) {
+        recMinLiquidity = Math.max(recMinLiquidity, 5000);
+        insights.push(`⚠️ ${(stopRate*100).toFixed(0)}% stop loss rate — entering too early/shallow → min liquidity → ${recMinLiquidity} XRP`);
+      } else {
+        insights.push(`✅ Stop loss rate ${(stopRate*100).toFixed(0)}% — acceptable`);
+      }
+
+      // TP1 hit rate
       const tp1Rate = burst.filter(t => t.tp1_hit).length / burst.length;
       if (tp1Rate < 0.25 && burst.length >= 10) {
-        recTp1 = 10; // Lower TP1 to capture more partial closes
-        insights.push(`⚠️ TP1 only hit ${(tp1Rate*100).toFixed(0)}% of the time → lowering TP1 to ${recTp1}% to capture more gains`);
+        recTp1Burst = 10;
+        insights.push(`⚠️ TP1 hit only ${(tp1Rate*100).toFixed(0)}% of the time → lowering TP1 to ${recTp1Burst}%`);
       } else if (tp1Rate > 0.6) {
-        insights.push(`✅ TP1 hit rate ${(tp1Rate*100).toFixed(0)}% — pumps regularly reaching +15%, consider raising TP1 to 20%`);
-        recTp1 = 20;
+        recTp1Burst = 20;
+        insights.push(`✅ TP1 hit ${(tp1Rate*100).toFixed(0)}% → raising TP1 to ${recTp1Burst}% (pumps going further)`);
       }
 
-      // Hold duration analysis
-      const holdDurations = burst
-        .filter(t => t.exit_timestamp && t.entry_timestamp)
-        .map(t => (t.exit_timestamp - t.entry_timestamp) / 60000); // minutes
-      if (holdDurations.length > 0) {
-        const avgHold = holdDurations.reduce((s, d) => s + d, 0) / holdDurations.length;
+      // Hold duration
+      const holds = burst.filter(t => t.exit_timestamp).map(t => (t.exit_timestamp - t.entry_timestamp) / 60000);
+      if (holds.length > 0) {
+        const avgHold = holds.reduce((s, d) => s + d, 0) / holds.length;
         const winHolds = burst.filter(t => t.pnl_xrp > 0 && t.exit_timestamp)
           .map(t => (t.exit_timestamp - t.entry_timestamp) / 60000);
         const avgWinHold = winHolds.length > 0 ? winHolds.reduce((s, d) => s + d, 0) / winHolds.length : 0;
-        insights.push(`Burst avg hold: ${avgHold.toFixed(1)}m | Winning trades avg hold: ${avgWinHold.toFixed(1)}m`);
-
+        insights.push(`Burst hold: avg ${avgHold.toFixed(1)}m | winning trades avg ${avgWinHold.toFixed(1)}m`);
         if (avgHold > 20) {
-          insights.push(`⚠️ Avg hold ${avgHold.toFixed(1)}m is long — trailing stop may need tightening`);
-          recTrailDistance = 4; // Tighter trail
+          recTrailDistance = 4;
+          insights.push(`⚠️ Long avg hold (${avgHold.toFixed(1)}m) → tightening trail to ${recTrailDistance}%`);
         }
       }
 
-      // Trailing stop analysis
-      const trailingWins = burst.filter(t => t.trailing_stop_active && t.pnl_xrp > 0).length;
-      const trailingTotal = burst.filter(t => t.trailing_stop_active).length;
-      if (trailingTotal > 0) {
-        const trailWinRate = trailingWins / trailingTotal;
-        insights.push(`Trailing stop activated: ${trailingTotal} trades, ${(trailWinRate*100).toFixed(0)}% won`);
-        if (trailWinRate < 0.4) {
-          recTrailActivate = 8; // Activate earlier
-          insights.push(`⚠️ Trailing stop win rate low → activating earlier at +${recTrailActivate}%`);
+      // Trailing stop performance
+      const trailTotal = burst.filter(t => t.trailing_stop_active).length;
+      const trailWins  = burst.filter(t => t.trailing_stop_active && t.pnl_xrp > 0).length;
+      if (trailTotal > 0) {
+        const trailWR = trailWins / trailTotal;
+        insights.push(`Trailing stop activated ${trailTotal}×, ${(trailWR*100).toFixed(0)}% won`);
+        if (trailWR < 0.4) {
+          recTrailActivate = 8;
+          insights.push(`⚠️ Trailing stop underperforming → activating earlier at +${recTrailActivate}%`);
         }
       }
     } else {
-      insights.push(`Not enough burst trades for burst-specific analysis (have ${burst.length}, need 5)`);
+      insights.push(`Not enough burst trades for analysis (${burst.length}/5 needed)`);
     }
 
     // ── Scored trade analysis ─────────────────────────────────────
-    let recMinScore = 65;
-    if (scored.length >= 5) {
-      // Find optimal score threshold
-      const scoreThresholds = [50, 55, 60, 65, 70, 75, 80];
-      let bestThreshold = 65;
-      let bestThresholdWinRate = 0;
+    let recMinScore   = 65;
+    let recTp1Scored  = 35;
+    let recTp2Scored  = 75;
+    let recWeights: ScoreWeights = {
+      liquidityScore:    17,
+      holderGrowthScore: 17,
+      buyPressureScore:  17,
+      volumeAccelScore:  17,
+      devSafetyScore:    17,
+      spreadScore:       15,
+    };
+    let bestSignalCombo = 'default';
 
-      for (const threshold of scoreThresholds) {
-        const above = scored.filter(t => t.entry_score >= threshold);
+    if (scored.length >= 5) {
+      // ── Score threshold optimisation ─────────────────────────────
+      const thresholds = [50, 55, 60, 65, 70, 75, 80];
+      let bestThrWR = 0;
+      for (const thr of thresholds) {
+        const above = scored.filter(t => t.entry_score >= thr);
         if (above.length < 3) continue;
         const wr = above.filter(t => t.pnl_xrp > 0).length / above.length;
-        insights.push(`Score ≥${threshold}: ${above.length} trades, ${(wr*100).toFixed(0)}% win rate`);
-        if (wr > bestThresholdWinRate) {
-          bestThresholdWinRate = wr;
-          bestThreshold = threshold;
+        insights.push(`Scored ≥${thr}: ${above.length} trades | ${(wr*100).toFixed(0)}% win rate`);
+        if (wr > bestThrWR) { bestThrWR = wr; recMinScore = thr; }
+      }
+      if (recMinScore !== 65) {
+        insights.push(`📊 Optimal score threshold: ${recMinScore} (${(bestThrWR*100).toFixed(0)}% win rate)`);
+      }
+
+      // ── TP optimisation for scored trades ─────────────────────────
+      // Check: did trades that hit TP1 (35%) continue to TP2 (75%)?
+      const tp1Hits  = scored.filter(t => t.tp1_hit).length;
+      const tp2Hits  = scored.filter(t => t.tp2_hit).length;
+      const tp1Rate  = scored.length > 0 ? tp1Hits / scored.length : 0;
+      const tp2Rate  = scored.length > 0 ? tp2Hits / scored.length : 0;
+      insights.push(`Scored TP1 hit rate: ${(tp1Rate*100).toFixed(0)}% | TP2 hit rate: ${(tp2Rate*100).toFixed(0)}%`);
+
+      if (tp1Rate < 0.2) {
+        recTp1Scored = 20; // Pumps not reaching 35% — lower the target
+        insights.push(`⚠️ Scored TP1 rarely hit → lowering scored TP1 to ${recTp1Scored}%`);
+      }
+      if (tp2Rate < 0.1 && tp1Rate > 0.3) {
+        recTp2Scored = 50; // TP1 hits fine but TP2 never — lower TP2
+        insights.push(`⚠️ Scored TP2 rarely hit → lowering scored TP2 to ${recTp2Scored}%`);
+      }
+
+      // ── Score component analysis ──────────────────────────────────
+      if (scored.length >= 10) {
+        const components: (keyof TradeWithScore)[] = [
+          'liquidity_score', 'holder_growth_score', 'buy_pressure_score',
+          'volume_accel_score', 'dev_safety_score', 'spread_score',
+        ];
+
+        // For each component: split trades into "high" (>=10) vs "low" (<10)
+        // and compare win rates. Higher delta = component is more predictive.
+        const componentDeltas: Record<string, number> = {};
+        for (const comp of components) {
+          const high = scored.filter(t => (t[comp] as number || 0) >= 10);
+          const low  = scored.filter(t => (t[comp] as number || 0) < 10);
+          if (high.length < 2 || low.length < 2) continue;
+          const highWR = high.filter(t => t.pnl_xrp > 0).length / high.length;
+          const lowWR  = low.filter(t  => t.pnl_xrp > 0).length / low.length;
+          const delta  = highWR - lowWR;
+          componentDeltas[comp] = delta;
+          insights.push(`Score component [${comp}]: high→${(highWR*100).toFixed(0)}% win, low→${(lowWR*100).toFixed(0)}% win (delta: ${(delta*100).toFixed(0)}pp)`);
         }
+
+        // Reweight: components with highest positive delta get more weight
+        const totalDelta = Object.values(componentDeltas).reduce((s, d) => s + Math.max(d, 0), 0);
+        if (totalDelta > 0) {
+          const baseWeight = 10; // minimum weight per component
+          const poolToDistribute = 100 - baseWeight * 6;
+
+          recWeights = {
+            liquidityScore:    baseWeight + Math.round(((componentDeltas['liquidity_score']    || 0) / totalDelta) * poolToDistribute),
+            holderGrowthScore: baseWeight + Math.round(((componentDeltas['holder_growth_score']|| 0) / totalDelta) * poolToDistribute),
+            buyPressureScore:  baseWeight + Math.round(((componentDeltas['buy_pressure_score'] || 0) / totalDelta) * poolToDistribute),
+            volumeAccelScore:  baseWeight + Math.round(((componentDeltas['volume_accel_score'] || 0) / totalDelta) * poolToDistribute),
+            devSafetyScore:    baseWeight + Math.round(((componentDeltas['dev_safety_score']   || 0) / totalDelta) * poolToDistribute),
+            spreadScore:       baseWeight + Math.round(((componentDeltas['spread_score']       || 0) / totalDelta) * poolToDistribute),
+          };
+
+          // Find the strongest single predictor
+          const best = Object.entries(componentDeltas).sort((a, b) => b[1] - a[1])[0];
+          insights.push(`🏆 Strongest win predictor: ${best[0]} (${(best[1]*100).toFixed(0)}pp delta)`);
+        }
+
+        // ── Combo analysis: find best 2-component combination ─────
+        // Only check if high on BOTH components → win rate
+        const comboResults: { combo: string; wr: number; count: number }[] = [];
+        for (let i = 0; i < components.length; i++) {
+          for (let j = i + 1; j < components.length; j++) {
+            const c1 = components[i];
+            const c2 = components[j];
+            const both = scored.filter(
+              t => (t[c1] as number || 0) >= 10 && (t[c2] as number || 0) >= 10
+            );
+            if (both.length < 3) continue;
+            const wr = both.filter(t => t.pnl_xrp > 0).length / both.length;
+            comboResults.push({ combo: `${c1} + ${c2}`, wr, count: both.length });
+          }
+        }
+        if (comboResults.length > 0) {
+          comboResults.sort((a, b) => b.wr - a.wr);
+          const top = comboResults[0];
+          bestSignalCombo = top.combo;
+          insights.push(`🔬 Best signal combo: ${top.combo} → ${(top.wr*100).toFixed(0)}% win rate (${top.count} trades)`);
+          if (comboResults.length > 1) {
+            const second = comboResults[1];
+            insights.push(`   2nd: ${second.combo} → ${(second.wr*100).toFixed(0)}% (${second.count} trades)`);
+          }
+        }
+      } else {
+        insights.push(`Need ${10 - scored.length} more scored trades for component analysis`);
       }
-      recMinScore = bestThreshold;
-      if (bestThreshold !== 65) {
-        insights.push(`📊 Optimal score threshold: ${bestThreshold} (${(bestThresholdWinRate*100).toFixed(0)}% win rate)`);
-      }
+    } else {
+      insights.push(`Not enough scored trades for analysis (${scored.length}/5 needed)`);
     }
 
-    // ── Build recommendation object ────────────────────────────────
-    const autoApplyReady = winRate >= 0.5 && trades.length >= 30;
+    // ── Auto-apply readiness ──────────────────────────────────────
+    const autoApplyReady = winRate >= 0.5 && rawTrades.length >= 30;
     if (autoApplyReady) {
-      insights.push(`✅ Win rate ${(winRate*100).toFixed(0)}% with ${trades.length} trades — recommendations ready for auto-apply`);
+      insights.push(`✅ ${(winRate*100).toFixed(0)}% win rate with ${rawTrades.length} trades — auto-apply active`);
     } else {
-      insights.push(`⏳ Need 30+ trades and 50%+ win rate for auto-apply (currently ${trades.length} trades, ${(winRate*100).toFixed(0)}% win rate)`);
+      const need = Math.max(0, 30 - rawTrades.length);
+      insights.push(`⏳ Need ${need} more trades + 50%+ win rate for auto-apply`);
     }
 
     const recs: TradeRecommendations = {
       generatedAt: Date.now(),
-      tradesAnalyzed: trades.length,
+      tradesAnalyzed: rawTrades.length,
       overallWinRate: parseFloat((winRate * 100).toFixed(1)),
       minLiquidityXRP: recMinLiquidity,
       burstStopLossPercent: recStopLoss,
-      burstTp1Percent: recTp1,
-      burstTp2Percent: recTp2,
+      burstTp1Percent: recTp1Burst,
+      burstTp2Percent: recTp2Burst,
       burstTrailingActivation: recTrailActivate,
       burstTrailingDistance: recTrailDistance,
       minScorePaperTrade: recMinScore,
+      scoredTp1Percent: recTp1Scored,
+      scoredTp2Percent: recTp2Scored,
+      scoreWeights: recWeights,
+      bestScoredSignalCombo: bestSignalCombo,
       insights,
       autoApplyReady,
     };
 
-    // Write files
     try {
       fs.mkdirSync(path.dirname(RECOMMENDATIONS_PATH), { recursive: true });
       fs.writeFileSync(RECOMMENDATIONS_PATH, JSON.stringify(recs, null, 2));
       this.writeMarkdownReport(recs);
-      info(`TradeAnalyzer: report written to ${REPORT_PATH}`);
+      info(`TradeAnalyzer: report written → ${REPORT_PATH}`);
     } catch (err) {
       warn(`TradeAnalyzer: failed to write report: ${err}`);
     }
@@ -253,39 +377,56 @@ export class TradeAnalyzer {
   }
 
   /**
-   * Apply recommendations to the live config file.
-   * Only called when autoApplyReady = true OR operator explicitly approves.
+   * Apply recommendations to live config.
+   * Called automatically when autoApplyReady, or on operator command.
    */
   applyRecommendations(recs: TradeRecommendations, configPath: string): boolean {
     try {
       const raw = fs.readFileSync(configPath, 'utf8');
-      let config = JSON.parse(raw);
+      const config = JSON.parse(raw);
 
       config.minLiquidityXRP    = recs.minLiquidityXRP;
       config.minScorePaperTrade = recs.minScorePaperTrade;
-      // Burst params are in paperTrader hardcoded for now — log for manual apply
-      info(`TradeAnalyzer: applying recommendations to ${configPath}`);
-      info(`  minLiquidityXRP: ${recs.minLiquidityXRP}`);
-      info(`  minScorePaperTrade: ${recs.minScorePaperTrade}`);
-      info(`  Burst params (manual): stopLoss=${recs.burstStopLossPercent}%, TP1=${recs.burstTp1Percent}%, TP2=${recs.burstTp2Percent}%, trailActivate=${recs.burstTrailingActivation}%, trailDist=${recs.burstTrailingDistance}%`);
 
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+      info(`TradeAnalyzer: applied → minLiquidity=${recs.minLiquidityXRP}, minScore=${recs.minScorePaperTrade}`);
+      info(`  Burst: stopLoss=${recs.burstStopLossPercent}%, TP1=${recs.burstTp1Percent}%, TP2=${recs.burstTp2Percent}%, trail=${recs.burstTrailingActivation}%@${recs.burstTrailingDistance}%`);
+      info(`  Scored: TP1=${recs.scoredTp1Percent}%, TP2=${recs.scoredTp2Percent}%`);
+      info(`  Score weights: ${JSON.stringify(recs.scoreWeights)}`);
+      info(`  Best signal combo: ${recs.bestScoredSignalCombo}`);
       return true;
     } catch (err) {
-      warn(`TradeAnalyzer: failed to apply recommendations: ${err}`);
+      warn(`TradeAnalyzer: apply failed: ${err}`);
       return false;
     }
   }
 
-  private getClosedTrades(): ClosedTrade[] {
+  // ── Private helpers ────────────────────────────────────────────
+
+  private getClosedTradesWithScores(): TradeWithScore[] {
     try {
       const db = (this.db as any).db;
+      // Join closed trades with their score at entry time (closest score within 5 min of entry)
       return db.prepare(`
-        SELECT * FROM paper_trades
-        WHERE status = 'closed'
-          AND pnl_xrp IS NOT NULL
-        ORDER BY exit_timestamp DESC
-      `).all() as ClosedTrade[];
+        SELECT
+          pt.*,
+          s.liquidity_score,
+          s.holder_growth_score,
+          s.buy_pressure_score,
+          s.volume_accel_score,
+          s.dev_safety_score,
+          s.spread_score
+        FROM paper_trades pt
+        LEFT JOIN scores s ON
+          s.token_currency = pt.token_currency
+          AND s.token_issuer = pt.token_issuer
+          AND s.timestamp BETWEEN pt.entry_timestamp - 300000 AND pt.entry_timestamp + 300000
+        WHERE pt.status = 'closed'
+          AND pt.pnl_xrp IS NOT NULL
+        GROUP BY pt.id
+        ORDER BY pt.exit_timestamp DESC
+      `).all() as TradeWithScore[];
     } catch (err) {
       warn(`TradeAnalyzer: DB query failed: ${err}`);
       return [];
@@ -293,8 +434,6 @@ export class TradeAnalyzer {
   }
 
   private getLiquidityBucket(trade: ClosedTrade): string {
-    // We don't have liquidity stored on the trade itself yet
-    // Use entry_reason which may contain pool XRP info e.g. "Buy burst — pool: 3500 XRP"
     const match = trade.entry_reason?.match(/pool:\s*([\d.]+)\s*XRP/i);
     if (match) {
       const liq = parseFloat(match[1]);
@@ -303,35 +442,50 @@ export class TradeAnalyzer {
       if (liq < 20000) return '5k-20k';
       return '>20k';
     }
-    return '2k-5k'; // default bucket
+    return '2k-5k';
   }
 
   private writeMarkdownReport(recs: TradeRecommendations): void {
     const date = new Date(recs.generatedAt).toISOString().slice(0, 10);
+    const w = recs.scoreWeights;
     const lines = [
       `# Trade Analysis Report — ${date}`,
       ``,
-      `**Trades analyzed:** ${recs.tradesAnalyzed}  `,
-      `**Overall win rate:** ${recs.overallWinRate}%  `,
-      `**Auto-apply ready:** ${recs.autoApplyReady ? '✅ Yes' : '⏳ No'}`,
+      `**Trades analyzed:** ${recs.tradesAnalyzed} | **Win rate:** ${recs.overallWinRate}% | **Auto-apply:** ${recs.autoApplyReady ? '✅ Active' : '⏳ Pending'}`,
       ``,
       `## Insights`,
       ...recs.insights.map(i => `- ${i}`),
       ``,
-      `## Recommended Parameters`,
+      `## Recommended Burst Parameters`,
       `| Parameter | Value |`,
       `|---|---|`,
       `| Min pool liquidity | ${recs.minLiquidityXRP} XRP |`,
-      `| Burst stop loss | ${recs.burstStopLossPercent}% |`,
-      `| Burst TP1 | +${recs.burstTp1Percent}% |`,
-      `| Burst TP2 | +${recs.burstTp2Percent}% |`,
-      `| Trailing stop activation | +${recs.burstTrailingActivation}% |`,
-      `| Trailing stop distance | ${recs.burstTrailingDistance}% |`,
-      `| Min score for scored trades | ${recs.minScorePaperTrade} |`,
+      `| Stop loss | ${recs.burstStopLossPercent}% |`,
+      `| TP1 | +${recs.burstTp1Percent}% |`,
+      `| TP2 | +${recs.burstTp2Percent}% |`,
+      `| Trail activation | +${recs.burstTrailingActivation}% |`,
+      `| Trail distance | ${recs.burstTrailingDistance}% |`,
       ``,
-      `## How to apply`,
-      `Tell the bot: \`apply trade recommendations\``,
-      `It will patch the config and restart. No code change needed.`,
+      `## Recommended Scored Trade Parameters`,
+      `| Parameter | Value |`,
+      `|---|---|`,
+      `| Min score | ${recs.minScorePaperTrade} |`,
+      `| TP1 | +${recs.scoredTp1Percent}% |`,
+      `| TP2 | +${recs.scoredTp2Percent}% |`,
+      `| Best signal combo | ${recs.bestScoredSignalCombo} |`,
+      ``,
+      `## Score Component Weights (learned)`,
+      `| Component | Weight |`,
+      `|---|---|`,
+      `| Liquidity | ${w.liquidityScore} |`,
+      `| Holder growth | ${w.holderGrowthScore} |`,
+      `| Buy pressure | ${w.buyPressureScore} |`,
+      `| Volume accel | ${w.volumeAccelScore} |`,
+      `| Dev safety | ${w.devSafetyScore} |`,
+      `| Spread | ${w.spreadScore} |`,
+      ``,
+      `## Apply`,
+      `Tell the bot: \`apply trade recommendations\` to activate these params.`,
     ];
     fs.writeFileSync(REPORT_PATH, lines.join('\n'));
   }

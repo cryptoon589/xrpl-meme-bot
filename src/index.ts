@@ -866,24 +866,30 @@ function startPeriodicScan(
     if (!recs) return; // Not enough trades yet
 
     // Format Telegram message
+    const w = recs.scoreWeights;
     const lines: string[] = [
       `🧠 <b>TRADE ANALYSIS REPORT</b>`,
       ``,
       `📊 <b>${recs.tradesAnalyzed} trades</b> | Win rate: <b>${recs.overallWinRate}%</b>`,
       ``,
       `<b>Key insights:</b>`,
-      ...recs.insights.slice(0, 8).map(i => `• ${i}`),
+      ...recs.insights.slice(0, 10).map(i => `• ${i}`),
       ``,
-      `<b>Recommended params:</b>`,
-      `• Min liquidity: ${recs.minLiquidityXRP} XRP`,
-      `• Burst stop loss: ${recs.burstStopLossPercent}%`,
-      `• Burst TP1: +${recs.burstTp1Percent}%`,
-      `• Trailing activation: +${recs.burstTrailingActivation}%`,
+      `<b>Burst params:</b>`,
+      `• Min liquidity: ${recs.minLiquidityXRP} XRP | Stop: ${recs.burstStopLossPercent}% | TP1: +${recs.burstTp1Percent}% | Trail: +${recs.burstTrailingActivation}%`,
+      ``,
+      `<b>Scored params:</b>`,
+      `• Min score: ${recs.minScorePaperTrade} | TP1: +${recs.scoredTp1Percent}% | TP2: +${recs.scoredTp2Percent}%`,
+      recs.bestScoredSignalCombo !== 'default' ? `• Best signal combo: ${recs.bestScoredSignalCombo}` : '',
+      ``,
+      `<b>Learned score weights:</b>`,
+      `• Liquidity: ${w.liquidityScore} | BuyPressure: ${w.buyPressureScore} | VolAccel: ${w.volumeAccelScore}`,
+      `• HolderGrowth: ${w.holderGrowthScore} | DevSafety: ${w.devSafetyScore} | Spread: ${w.spreadScore}`,
       ``,
       recs.autoApplyReady
-        ? `✅ Ready to auto-apply. Reply <b>apply trade recommendations</b> to activate.`
+        ? `✅ Auto-applying now. Full report: <code>state/trade_analysis.md</code>`
         : `⏳ Need ${Math.max(0, 30 - recs.tradesAnalyzed)} more trades + 50% win rate for auto-apply.`,
-    ];
+    ].filter(l => l !== '');
 
     await telegramAlerter.sendAlert({
       type: 'hourly_summary', // reuse summary type for plain HTML send
