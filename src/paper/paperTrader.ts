@@ -490,13 +490,16 @@ export class PaperTrader {
     const trade = position.trade;
     const tokensToSell = position.tokensHeld * (trade.remainingPosition / 100);
 
+    // force_close_no_price: no real trade occurred — return entry cost, zero fees/slippage
+    const isGhostClose = reason === 'force_close_no_price';
+
     // FIX #25: Estimate slippage based on trade value relative to liquidity
     const tradeValueXRP = tokensToSell * exitPrice;
-    const slippage = this.estimateSlippage(tradeValueXRP, snapshot);
+    const slippage = isGhostClose ? 0 : this.estimateSlippage(tradeValueXRP, snapshot);
 
     const effectiveExitPrice = exitPrice * (1 - slippage);
     const proceeds = tokensToSell * effectiveExitPrice;
-    const fees = proceeds * 0.003;
+    const fees = isGhostClose ? 0 : proceeds * 0.003;
     const netProceeds = proceeds - fees;
 
     // PnL is net proceeds minus the portion of entry cost for this position
@@ -814,6 +817,7 @@ export class PaperTrader {
     const allClosed: PaperTrade[] = [];
     const now = Date.now();
     const UNPRICEABLE_TIMEOUT_MS = 30 * 60 * 1000; // force-close after 30 min with no price
+    const WARMUP_GRACE_MS = 5 * 60 * 1000; // never force-close within 5 min of opening
 
     for (const [key, position] of this.openPositions.entries()) {
       const { trade } = position;
@@ -822,6 +826,7 @@ export class PaperTrader {
       // No price — check if position has been open too long without pricing
       if (!price || price <= 0) {
         const ageMs = now - (position.openedAt || trade.entryTimestamp || 0);
+        if (ageMs < WARMUP_GRACE_MS) continue; // give AMM cache time to warm
         if (ageMs > UNPRICEABLE_TIMEOUT_MS) {
           warn(`Force-closing unpriceable position: ${trade.tokenCurrency} (no price for ${(ageMs/60000).toFixed(0)}m)`);
           // Close at entry price (0% PnL) — best we can do with no price data

@@ -259,7 +259,7 @@ export class TelegramAlerter {
       `<b>Token:</b> ${trade.tokenCurrency}`,
       `<b>Entry:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
       `<b>Size:</b> ${trade.entryAmountXRP.toFixed(2)} XRP`,
-      `<b>Score:</b> ${trade.entryScore}`,
+      `<b>Score:</b> ${trade.entryReason?.startsWith('[BURST]') ? '🚀 Burst' : (trade.entryScore ?? '—')}`,
       `<b>Reason:</b> ${trade.entryReason}`,
       `<b>Slippage:</b> ${(trade.slippageEstimate * 100).toFixed(2)}%`,
     ].join('\n');

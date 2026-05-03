@@ -63,7 +63,7 @@ let txIgnoredCount = 0;        // transactions filtered at intake (XRPLClient)
 let newTokenDetections = 0;   // new trustline tokens discovered
 let hourlySummaryTimer: NodeJS.Timeout | null = null;
 let tokensScored = 0;          // number of score calculations this hour
-let topTokens: { currency: string; issuer: string; score: number; liquidity: number; change1h: number }[] = [];
+let topTokens: { currency: string; issuer: string; score: number; liquidity: number; change1h: number | null }[] = [];
 
 
 async function main() {
@@ -789,6 +789,11 @@ function startPeriodicScan(
         });
         for (const ct of orphanClosed) {
           totalTrades++;
+          // Suppress ghost-close alerts (no-price / force-close at entry) — just log them
+          if (ct.exitReason === 'force_close_no_price') {
+            info(`Ghost close (no price): ${ct.tokenCurrency} — position voided, bankroll returned`);
+            continue;
+          }
           setTimeout(() => sendAlert(telegramAlerter, db, {
             type: 'paper_trade_closed',
             tokenCurrency: ct.tokenCurrency,
@@ -849,8 +854,10 @@ function startPeriodicScan(
     } else {
       top5.forEach((t, i) => {
         const emoji = t.score >= 80 ? '🔥' : t.score >= 60 ? '⚡' : '📈';
-        const sign = t.change1h >= 0 ? '+' : '';
-        lines.push('  ' + emoji + ' #' + (i+1) + ' ' + t.currency + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + sign + t.change1h.toFixed(1) + '%');
+        const change1hStr = (t.change1h != null && t.change1h !== 0)
+          ? (t.change1h >= 0 ? '+' : '') + t.change1h.toFixed(1) + '%'
+          : 'N/A';
+        lines.push('  ' + emoji + ' #' + (i+1) + ' ' + t.currency + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + change1hStr);
       });
     }
 
