@@ -349,9 +349,10 @@ export class PaperTrader {
 
       // ── BURST EXIT PROFILE ───────────────────────────────────────────────────
       if (isBurst) {
-        // Hard time stop: exit after 5 min regardless of PnL
-        if (ageMs >= 5 * 60 * 1000) {
-          info(`⏱️ Burst time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
+        // Safety time stop: exit after 30 min (trailing stop should catch the peak
+        // long before this — this is just a dead-man's switch for stalled trades)
+        if (ageMs >= 30 * 60 * 1000) {
+          info(`⏱️ Burst safety time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push(key);
           closedTrades.push(trade);
           continue;
