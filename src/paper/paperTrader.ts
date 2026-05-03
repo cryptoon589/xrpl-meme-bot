@@ -19,6 +19,7 @@ interface OpenPosition {
   lastRiskCheck: number;
   priceHistory: number[]; // Last 10 prices for volatility calculation
   openedAt: number;       // Timestamp of entry — used to enforce minimum hold time
+  tradeProfile: 'scored' | 'burst'; // exit rules differ
 }
 
 export class PaperTrader {
@@ -47,6 +48,114 @@ export class PaperTrader {
 
     // Load existing state from DB
     this.loadState();
+  }
+
+  /**
+   * Open a burst/pump trade — no score required, uses aggressive pump exit profile.
+   * Entry: immediately on buy_burst signal
+   * Exit: TP1 at +15%, 5-min hard stop, trailing stop activates at +10%
+   */
+  tryOpenBurstTrade(
+    token: TrackedToken,
+    snapshot: MarketSnapshot | null,
+    entryReason: string
+  ): PaperTrade | null {
+    if (this.config.mode !== 'PAPER') return null;
+
+    // Require minimum liquidity for burst trades — below 2000 XRP is too risky
+    const liquidity = snapshot?.liquidityXRP ?? 0;
+    if (liquidity < 2000) {
+      debug(`Burst trade skipped: pool too shallow (${liquidity.toFixed(0)} XRP < 2000 XRP)`);
+      return null;
+    }
+
+    if (this.openPositions.size >= this.config.maxOpenTrades) {
+      warn(`Max open trades reached, skipping burst entry`);
+      return null;
+    }
+
+    this.checkDailyReset();
+    if (this.dailyPnL <= -this.config.maxDailyLossXRP) {
+      warn(`Daily loss limit reached, skipping burst entry`);
+      return null;
+    }
+
+    if (!snapshot || !snapshot.priceXRP || snapshot.priceXRP <= 0) {
+      warn('No valid price for burst entry');
+      return null;
+    }
+
+    const key = `${token.currency}:${token.issuer}`;
+    if (this.openPositions.has(key)) {
+      debug(`Already have open position for ${key}`);
+      return null;
+    }
+    if (this.db.hasOpenTradeForToken(token.currency, token.issuer)) {
+      warn(`Blocked duplicate burst trade for ${key}`);
+      return null;
+    }
+
+    // Cooldown: don't re-enter same token within 10 min of last burst close
+    const lastClose = this.lastCloseTime?.get(key) || 0;
+    if (Date.now() - lastClose < 10 * 60 * 1000) {
+      debug(`Burst cooldown active for ${key}`);
+      return null;
+    }
+
+    // Fixed small size for burst trades — don't risk much on unscored tokens
+    const tradeSizeXRP = Math.min(this.config.minTradeXRP * 2, 20);
+    if (this.bankrollXRP < tradeSizeXRP) {
+      warn(`Insufficient bankroll for burst trade`);
+      return null;
+    }
+
+    const entryPrice = snapshot.priceXRP;
+    const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
+    const effectivePrice = entryPrice * (1 + slippage);
+    const tokensBought = tradeSizeXRP / effectivePrice;
+    const fees = tradeSizeXRP * 0.003;
+
+    const trade: PaperTrade = {
+      tokenCurrency: token.currency,
+      tokenIssuer: token.issuer,
+      entryPriceXRP: entryPrice,
+      entryAmountXRP: tradeSizeXRP,
+      entryTimestamp: Date.now(),
+      entryScore: 0,
+      entryReason: `[BURST] ${entryReason}`,
+      exitPriceXRP: null,
+      exitTimestamp: null,
+      exitScore: null,
+      exitReason: null,
+      status: 'open',
+      pnlXRP: null,
+      pnlPercent: null,
+      slippageEstimate: slippage,
+      feesPaid: fees,
+      tp1Hit: false,
+      tp2Hit: false,
+      trailingStopActive: false,
+      remainingPosition: 100,
+    };
+
+    this.bankrollXRP -= tradeSizeXRP + fees;
+
+    this.openPositions.set(key, {
+      trade,
+      entryPriceXRP: entryPrice,
+      tokensHeld: tokensBought,
+      remainingPercent: 100,
+      highestPriceSinceEntry: entryPrice,
+      entryRiskFlags: [],
+      lastRiskCheck: Date.now(),
+      priceHistory: [entryPrice],
+      openedAt: Date.now(),
+      tradeProfile: 'burst',
+    });
+
+    this.db.savePaperTrade(trade);
+    info(`🚀 BURST paper trade OPENED: ${token.currency} @ ${entryPrice.toFixed(8)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, liq: ${liquidity.toFixed(0)} XRP`);
+    return trade;
   }
 
   /**
@@ -186,6 +295,7 @@ export class PaperTrader {
       priceHistory: [entryPrice],
       // Timestamp used to enforce minimum hold time before exits are checked
       openedAt: Date.now(),
+      tradeProfile: 'scored',
     });
 
     // Save to DB
@@ -224,24 +334,83 @@ export class PaperTrader {
       // Skip already-closing positions
       if (keysToClose.includes(key)) continue;
 
-      // Minimum hold time: don't exit within 3 minutes of opening
-      // Prevents instant close on the same scan cycle that opened the trade
-      const MIN_HOLD_MS = 3 * 60 * 1000;
-      if (Date.now() - (position.openedAt || 0) < MIN_HOLD_MS) {
-        debug(`Hold time not met for ${key}, skipping exit check`);
-        continue;
-      }
-
       // Update highest price and price history
       if (currentPrice > position.highestPriceSinceEntry) {
         position.highestPriceSinceEntry = currentPrice;
       }
       position.priceHistory.push(currentPrice);
       if (position.priceHistory.length > 10) {
-        position.priceHistory.shift(); // Keep last 10 prices
+        position.priceHistory.shift();
       }
 
       const pnlPercent = ((currentPrice - trade.entryPriceXRP) / trade.entryPriceXRP) * 100;
+      const ageMs = Date.now() - (position.openedAt || 0);
+      const isBurst = position.tradeProfile === 'burst';
+
+      // ── BURST EXIT PROFILE ───────────────────────────────────────────────────
+      if (isBurst) {
+        // Hard time stop: exit after 5 min regardless of PnL
+        if (ageMs >= 5 * 60 * 1000) {
+          info(`⏱️ Burst time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
+          keysToClose.push(key);
+          closedTrades.push(trade);
+          continue;
+        }
+
+        // Stop loss: -8% (tight — pump dumps fast)
+        if (pnlPercent <= -8 && trade.remainingPosition > 0) {
+          keysToClose.push(key);
+          closedTrades.push(trade);
+          continue;
+        }
+
+        // Sell pressure exit: if sells spike (3+ sells) while we're up, get out
+        const sellCount = (snapshot as any)?.sellCount5m ?? 0;
+        const buyCount  = (snapshot as any)?.buyCount5m  ?? 1;
+        if (pnlPercent > 5 && sellCount > 3 && sellCount > buyCount * 1.5) {
+          info(`🚨 Burst sell-pressure exit for ${key}: ${sellCount} sells vs ${buyCount} buys`);
+          keysToClose.push(key);
+          closedTrades.push(trade);
+          continue;
+        }
+
+        // TP1: +15% — sell 60% of position (bank the pump gains)
+        if (!trade.tp1Hit && pnlPercent >= 15 && trade.remainingPosition > 0) {
+          this.partialClose(key, currentPrice, 60, 'burst_tp1_+15pct', snapshot);
+          trade.tp1Hit = true;
+          this.db.updatePaperTrade(trade);
+        }
+
+        // TP2: +30% — sell remaining
+        if (!trade.tp2Hit && pnlPercent >= 30 && trade.remainingPosition > 0) {
+          keysToClose.push(key);
+          closedTrades.push(trade);
+          continue;
+        }
+
+        // Trailing stop activates at +10%, distance 5%
+        if (!trade.trailingStopActive && pnlPercent >= 10) {
+          trade.trailingStopActive = true;
+          this.db.updatePaperTrade(trade);
+        }
+        if (trade.trailingStopActive && trade.remainingPosition > 0) {
+          const trailThreshold = position.highestPriceSinceEntry * 0.95;
+          if (currentPrice <= trailThreshold) {
+            info(`🚨 Burst trailing stop hit for ${key}`);
+            keysToClose.push(key);
+            closedTrades.push(trade);
+          }
+        }
+        continue; // skip scored exit logic below
+      }
+
+      // ── SCORED EXIT PROFILE ──────────────────────────────────────────────────
+      // Minimum hold time: don't exit within 3 minutes of opening
+      const MIN_HOLD_MS = 3 * 60 * 1000;
+      if (ageMs < MIN_HOLD_MS) {
+        debug(`Hold time not met for ${key}, skipping exit check`);
+        continue;
+      }
 
       // Calculate dynamic stop loss based on volatility
       const volatility = this.calculateVolatility(position.priceHistory);
@@ -591,6 +760,7 @@ export class PaperTrader {
       lastRiskCheck: Date.now(),
       priceHistory: [trade.entryPriceXRP],
       openedAt: trade.entryTimestamp || 0,
+      tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
     });
   }
 
@@ -623,6 +793,7 @@ export class PaperTrader {
         priceHistory: [trade.entryPriceXRP],
         // Loaded from DB = already past hold time; set openedAt far in the past
         openedAt: trade.entryTimestamp || 0,
+        tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
       });
     }
 

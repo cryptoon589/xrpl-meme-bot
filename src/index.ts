@@ -116,6 +116,36 @@ async function main() {
   const telegramAlerter = new TelegramAlerter(config);
   const burstDetector = new BurstDetector(xrplClient, telegramAlerter, db);
 
+  // Hook burst detector into paper trader — opens a burst trade on every confirmed burst
+  if (paperTrader) {
+    burstDetector.onBurst = (currency, issuer, rawCurrency, poolXRP, priceXRP) => {
+      const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
+      const snapshot = {
+        tokenCurrency: currency,
+        tokenIssuer: issuer,
+        priceXRP,
+        liquidityXRP: poolXRP,
+        buyCount5m: 0,
+        sellCount5m: 0,
+      } as any;
+      const trade = paperTrader.tryOpenBurstTrade(
+        token,
+        snapshot,
+        `Buy burst — pool: ${poolXRP.toFixed(0)} XRP`
+      );
+      if (trade) {
+        // Notify Telegram about the burst paper entry
+        setTimeout(() => sendAlert(telegramAlerter, db, {
+          type: 'paper_trade_opened',
+          tokenCurrency: currency,
+          tokenIssuer: issuer,
+          paperTrade: trade,
+          message: `🚀 Burst entry: ${currency} @ ${priceXRP.toFixed(8)} XRP`,
+        }, config), 0);
+      }
+    };
+  }
+
   // Trade executor — dry-run unless LIVE_TRADING=true in .env
   let tradeExecutor: TradeExecutor | null = null;
   if (process.env.TRADING_WALLET_SEED) {

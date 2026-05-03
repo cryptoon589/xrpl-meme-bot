@@ -87,6 +87,8 @@ export class BurstDetector {
   private xrplClient: XRPLClient;
   private alerter: TelegramAlerter;
   private db: Database;
+  /** Optional callback fired after a confirmed burst — used to open burst paper trades */
+  public onBurst?: (currency: string, issuer: string, rawCurrency: string, poolXRP: number, priceXRP: number) => void;
 
   constructor(xrplClient: XRPLClient, alerter: TelegramAlerter, db: Database) {
     this.xrplClient = xrplClient;
@@ -272,6 +274,11 @@ export class BurstDetector {
         price: priceXRP,
         message,
       });
+
+      // Fire callback so index.ts can open a burst paper trade
+      if (this.onBurst && poolXRP && priceXRP) {
+        this.onBurst(state.displayName, state.issuer, state.rawCurrency, poolXRP, priceXRP);
+      }
 
     } catch (err) {
       warn(`BurstDetector alert error for ${state.displayName}: ${err}`);
