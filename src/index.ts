@@ -282,16 +282,10 @@ async function processSingleTransaction(
     // Track issuer reputation
     issuerReputation.registerTokenLaunch(newToken.issuer, newToken.currency);
 
-    await sendAlert(telegramAlerter, db, {
-      type: 'new_token',
-      tokenCurrency: newToken.currency,
-      tokenIssuer: newToken.issuer,
-      message: `New token detected: ${newToken.currency} issued by ${newToken.issuer}`,
-      explorerLinks: {
-        token: `https://livenet.xrpl.org/accounts/${newToken.issuer}`,
-        issuer: `https://livenet.xrpl.org/accounts/${newToken.issuer}`,
-      },
-    }, {} as any);
+    // NOTE: new_token alert suppressed — score is always 0/100 at discovery time
+    // (token hasn't been through a scan cycle yet). Discovery stats appear in the
+    // hourly report instead. High-scoring tokens alert via the main signal gate.
+    debug(`New token discovered: ${newToken.currency} | issuer: ${newToken.issuer}`);
   }
 
   const ammEvent = await ammScanner.processTransaction(tx);
@@ -303,12 +297,8 @@ async function processSingleTransaction(
       0 // Will be calculated from pool data
     );
 
-    await sendAlert(telegramAlerter, db, {
-      type: 'amm_pool',
-      tokenCurrency: ammEvent.pool.asset1.currency,
-      tokenIssuer: ammEvent.pool.asset1.issuer,
-      message: `New AMM pool: ${ammEvent.pool.poolId}`,
-    }, {} as any);
+    // AMM pool creation logged only — no Telegram alert (score is 0 at this point)
+    debug(`New AMM pool: ${ammEvent.pool.poolId}`);
   }
 }
 
