@@ -62,7 +62,8 @@ let txProcessedCount = 0;      // transactions actually queued (passed filter)
 let txIgnoredCount = 0;        // transactions filtered at intake (XRPLClient)
 let newTokenDetections = 0;   // new trustline tokens discovered
 let hourlySummaryTimer: NodeJS.Timeout | null = null;
-let tokensScored = 0;          // number of score calculations this hour
+let tokensScored = 0;          // number of unique tokens scored this hour
+let tokensScoredSet = new Set<string>(); // deduplicate across scan cycles
 let topTokens: { currency: string; issuer: string; score: number; liquidity: number; change1h: number | null }[] = [];
 
 
@@ -597,7 +598,12 @@ function startPeriodicScan(
             db.saveRiskFlags(token.currency, token.issuer, risks);
             db.saveScore(score);
             totalProcessed++;
+            // Count unique tokens scored this hour (deduplicated across scan cycles)
+            const scoreKey = `${token.currency}:${token.issuer}`;
+            if (!tokensScoredSet.has(scoreKey)) {
+              tokensScoredSet.add(scoreKey);
               tokensScored++;
+            }
 
               // Track top tokens for leaderboard — keep only the best score per token
               if (snapshot && score) {
@@ -839,9 +845,21 @@ function startPeriodicScan(
     };
 
     // Deduplicated top 5 — exclude established/stable tokens, memes only, min 1000 XRP liquidity
+    // Also skip non-decodable hex currencies (starts with non-printable byte = likely garbage/test token)
     const top5 = topTokens
       .filter(t => !HOURLY_BLOCKLIST.has(t.currency))
       .filter(t => t.liquidity >= 1000)  // skip micro-pools in leaderboard
+      .filter(t => {
+        // Skip hex tokens that don't decode to readable ASCII
+        if (t.currency.length === 40) {
+          try {
+            const stripped = t.currency.replace(/00+$/, '');
+            const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
+            return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0;
+          } catch { return false; }
+        }
+        return true;
+      })
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
     topTokens = [];
@@ -891,6 +909,7 @@ function startPeriodicScan(
 
     newTokenDetections = 0;
     tokensScored = 0;
+    tokensScoredSet.clear();
 
     await telegramAlerter.sendAlert({
       type: 'hourly_summary',

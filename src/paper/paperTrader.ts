@@ -800,7 +800,16 @@ export class PaperTrader {
     if (summaries.length > 0) {
       // Bankroll = starting + all historical PnL up to yesterday
       const latestSummary = summaries[0];
-      this.bankrollXRP = this.config.startingBankrollXRP + latestSummary.totalPnLXRP;
+      const computedBankroll = this.config.startingBankrollXRP + latestSummary.totalPnLXRP;
+      // Sanity clamp: if DB has corrupted PnL (e.g. drops stored as XRP),
+      // cap bankroll at 100× starting to prevent absurd values
+      const MAX_SANE_BANKROLL = this.config.startingBankrollXRP * 100;
+      if (computedBankroll > MAX_SANE_BANKROLL || computedBankroll < 0) {
+        warn(`Bankroll from DB (${computedBankroll.toFixed(2)} XRP) looks corrupted — resetting to starting bankroll`);
+        this.bankrollXRP = this.config.startingBankrollXRP;
+      } else {
+        this.bankrollXRP = computedBankroll;
+      }
     }
 
     // Load open positions

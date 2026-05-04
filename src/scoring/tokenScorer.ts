@@ -146,15 +146,15 @@ export class TokenScorer {
     if (!snapshot || snapshot.liquidityXRP === null) return 0;
 
     const liquidity = snapshot.liquidityXRP;
-
-    // Scale: 0 at min threshold, 100 at 50000 XRP
     const minLiq = this.config.minLiquidityXRP;
-    const maxLiq = 50000;
-
     if (liquidity <= minLiq) return 0;
-    if (liquidity >= maxLiq) return 100;
 
-    return ((liquidity - minLiq) / (maxLiq - minLiq)) * 100;
+    // Tiered log scale: differentiates across the full 2k–10M+ XRP range
+    // log(2k)=7.6  log(10k)=9.2  log(100k)=11.5  log(1M)=13.8  log(10M)=16.1
+    const logMin = Math.log(minLiq);
+    const logMax = Math.log(10_000_000); // 10M XRP = score 100
+    const score  = (Math.log(liquidity) - logMin) / (logMax - logMin) * 100;
+    return Math.max(0, Math.min(100, score));
   }
 
   // (merged into scoreNewWallets)
