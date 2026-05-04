@@ -300,12 +300,19 @@ export class TelegramAlerter {
 
     // Human-readable exit reason
     const reasonMap: Record<string, string> = {
-      take_profit_1:           'Take Profit 1 hit (+35%)',
-      take_profit_2:           'Take Profit 2 hit (+75%)',
-      stop_loss_or_trailing:   'Stop loss / trailing stop',
-      stop_loss:               'Stop loss',
-      trailing_stop:           'Trailing stop',
-      duplicate_removed:       'Duplicate position cleaned up',
+      take_profit_1:           '🎯 Take Profit 1 (+35%)',
+      take_profit_2:           '🎯 Take Profit 2 (+75%)',
+      stop_loss_or_trailing:   'Stop loss / trailing stop',  // legacy
+      stop_loss:               '🛑 Stop loss',
+      trailing_stop:           '🔒 Trailing stop (locked in gains)',
+      trailing_stop_profit:    '🔒 Trailing stop (locked in gains)',
+      trailing_stop_loss:      '🛑 Trailing stop (cut loss)',
+      sell_pressure_exit:      '📉 Sell pressure exit',
+      time_stop_profit:        '⏱️ Time stop (profit)',
+      time_stop_loss:          '⏱️ Time stop (loss)',
+      burst_tp2:               '🎯 Burst TP2 (+30%)',
+      duplicate_removed:       'Duplicate cleaned up',
+      force_close_no_price:    '☸️ Voided (no price data)',
     };
     const exitReason = trade.exitReason
       ? (reasonMap[trade.exitReason] || trade.exitReason)

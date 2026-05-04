@@ -313,7 +313,7 @@ export class PaperTrader {
    */
   checkExits(snapshot: MarketSnapshot | null): PaperTrade[] {
     const closedTrades: PaperTrade[] = [];
-    const keysToClose: string[] = [];
+    const keysToClose: { key: string; reason: string }[] = [];
 
     if (!snapshot || !snapshot.priceXRP || snapshot.priceXRP <= 0) {
       return closedTrades;
@@ -332,7 +332,7 @@ export class PaperTrader {
       if (key !== snapshotKey) continue;
 
       // Skip already-closing positions
-      if (keysToClose.includes(key)) continue;
+      if (keysToClose.some(k => k.key === key)) continue;
 
       // Update highest price and price history
       if (currentPrice > position.highestPriceSinceEntry) {
@@ -353,14 +353,14 @@ export class PaperTrader {
         // long before this — this is just a dead-man's switch for stalled trades)
         if (ageMs >= 30 * 60 * 1000) {
           info(`⏱️ Burst safety time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
-          keysToClose.push(key);
+          keysToClose.push({ key, reason: pnlPercent >= 0 ? 'time_stop_profit' : 'time_stop_loss' });
           closedTrades.push(trade);
           continue;
         }
 
         // Stop loss: -8% (tight — pump dumps fast)
         if (pnlPercent <= -8 && trade.remainingPosition > 0) {
-          keysToClose.push(key);
+          keysToClose.push({ key, reason: 'stop_loss' });
           closedTrades.push(trade);
           continue;
         }
@@ -370,7 +370,7 @@ export class PaperTrader {
         const buyCount  = (snapshot as any)?.buyCount5m  ?? 1;
         if (pnlPercent > 5 && sellCount > 3 && sellCount > buyCount * 1.5) {
           info(`🚨 Burst sell-pressure exit for ${key}: ${sellCount} sells vs ${buyCount} buys`);
-          keysToClose.push(key);
+          keysToClose.push({ key, reason: 'sell_pressure_exit' });
           closedTrades.push(trade);
           continue;
         }
@@ -384,7 +384,7 @@ export class PaperTrader {
 
         // TP2: +30% — sell remaining
         if (!trade.tp2Hit && pnlPercent >= 30 && trade.remainingPosition > 0) {
-          keysToClose.push(key);
+          keysToClose.push({ key, reason: 'take_profit_2' });
           closedTrades.push(trade);
           continue;
         }
@@ -398,7 +398,7 @@ export class PaperTrader {
           const trailThreshold = position.highestPriceSinceEntry * 0.95;
           if (currentPrice <= trailThreshold) {
             info(`🚨 Burst trailing stop hit for ${key}`);
-            keysToClose.push(key);
+            keysToClose.push({ key, reason: pnlPercent >= 0 ? 'trailing_stop_profit' : 'trailing_stop_loss' });
             closedTrades.push(trade);
           }
         }
@@ -419,7 +419,7 @@ export class PaperTrader {
 
       // Check stop loss (dynamic based on volatility)
       if (pnlPercent <= dynamicStopLoss && trade.remainingPosition > 0) {
-        keysToClose.push(key);
+        keysToClose.push({ key, reason: 'stop_loss' });
         closedTrades.push(trade);
         continue;
       }
@@ -454,7 +454,7 @@ export class PaperTrader {
         const trailingDistance = this.getTrailingDistance(trailVolatility);
         const trailThreshold = position.highestPriceSinceEntry * (1 - trailingDistance);
         if (currentPrice <= trailThreshold) {
-          keysToClose.push(key);
+          keysToClose.push({ key, reason: pnlPercent >= 0 ? 'trailing_stop_profit' : 'trailing_stop_loss' });
           closedTrades.push(trade);
         }
       }
@@ -463,8 +463,8 @@ export class PaperTrader {
     // Second pass: properly close positions (sets exit price, PnL, fees) then remove
     // Must happen after the iteration loop to avoid mutating the Map mid-loop
     const finalClosed: PaperTrade[] = [];
-    for (const key of keysToClose) {
-      this.closePosition(key, currentPrice, 'stop_loss_or_trailing', snapshot);
+    for (const { key, reason } of keysToClose) {
+      this.closePosition(key, currentPrice, reason, snapshot);
       // closePosition already deleted from openPositions and updated the trade object
       // retrieve the updated trade from the original closedTrades reference
       const ref = closedTrades.find(t => `${t.tokenCurrency}:${t.tokenIssuer}` === key);
