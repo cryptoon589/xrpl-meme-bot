@@ -93,6 +93,17 @@ export class MarketDataCollector {
       if (priceXRP !== null && priceXRP > 10_000) {
         priceXRP = priceXRP / 1_000_000;
       }
+      // Hard reject: if price or liquidity are still clearly wrong after correction,
+      // return null so the token is skipped rather than alerting garbage values.
+      // Thresholds: price > 500 XRP or liquidity > 10M XRP = bad data.
+      if (priceXRP !== null && priceXRP > 500) {
+        warn(`Sanity reject: ${token.currency} price=${priceXRP.toFixed(2)} XRP — too high, discarding`);
+        priceXRP = null;
+      }
+      if (liquidityXRP !== null && liquidityXRP > 10_000_000) {
+        warn(`Sanity reject: ${token.currency} liquidity=${liquidityXRP.toFixed(0)} XRP — too high, discarding`);
+        liquidityXRP = null;
+      }
 
       // Fall back to AMM pool object, then order book (with raw currency)
       if (priceXRP === null) {
@@ -462,7 +473,10 @@ export class MarketDataCollector {
 
     const calcChange = (oldPrice: number | null): number | null => {
       if (!oldPrice || oldPrice <= 0) return null;
-      return ((currentPrice - oldPrice) / oldPrice) * 100;
+      const change = ((currentPrice - oldPrice) / oldPrice) * 100;
+      // Cap at ±9999% — anything beyond is bad data (e.g. first tick after price was 0)
+      if (Math.abs(change) > 9999) return null;
+      return change;
     };
 
     return {
