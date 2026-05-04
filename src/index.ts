@@ -644,7 +644,21 @@ function startPeriodicScan(
               // Confirmed established XRPL projects (operator-verified)
               'OCT', 'SHX', 'MXI', 'CORE',
             ]);
-            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
+            // Also filter brand-impersonation hex tokens (e.g. "ARK Invest XRP ETF", "Deutsche Bank")
+            const BRAND_KEYWORDS = [
+              'invest', 'etf', 'bank', 'financial', 'finance', 'capital', 'fund', 'asset',
+              'deutsche', 'blackrock', 'vanguard', 'fidelity', 'grayscale', 'nasdaq', 'nyse',
+              'federal', 'reserve', 'treasury', 'sec ', 'cftc', 'imf', 'swift',
+              'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
+            ];
+            const isBrandImpersonation = token.currency.length === 40 && (() => {
+              try {
+                const stripped = token.currency.replace(/00+$/, '');
+                const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').toLowerCase();
+                return BRAND_KEYWORDS.some(kw => decoded.includes(kw));
+              } catch { return false; }
+            })();
+            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency) || isBrandImpersonation;
 
             // Minimum wallet breadth gate: require at least 2 unique buyers in the
             // live window before alerting. Stops single-wallet manipulation from
@@ -842,6 +856,15 @@ function startPeriodicScan(
       'OCT', 'SHX', 'MXI', 'CORE',
     ]);
 
+    // Brand-impersonation keyword filter — hex tokens that decode to real-world brand names
+    // These are scam/joke tokens, not memes (e.g. "ARK Invest XRP ETF", "Deutsche Bank")
+    const BRAND_IMPERSONATION_KEYWORDS = [
+      'invest', 'etf', 'bank', 'financial', 'finance', 'capital', 'fund', 'asset',
+      'deutsche', 'blackrock', 'vanguard', 'fidelity', 'grayscale', 'nasdaq', 'nyse',
+      'federal', 'reserve', 'treasury', 'sec ', 'cftc', 'imf', 'swift',
+      'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
+    ];
+
     // Helper: decode hex currency codes to human-readable names
     const decodeCurrencyName = (raw: string): string => {
       if (raw.length !== 40) return raw;
@@ -864,7 +887,11 @@ function startPeriodicScan(
           try {
             const stripped = t.currency.replace(/00+$/, '');
             const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-            return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0;
+            if (!/^[\x20-\x7E]+$/.test(decoded) || decoded.length === 0) return false;
+            // Filter brand-impersonation tokens
+            const lower = decoded.toLowerCase();
+            if (BRAND_IMPERSONATION_KEYWORDS.some(kw => lower.includes(kw))) return false;
+            return true;
           } catch { return false; }
         }
         return true;
