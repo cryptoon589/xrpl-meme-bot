@@ -388,13 +388,26 @@ export class MarketDataCollector {
       let liquidity = 0;
 
       for (const offer of bookResult.offers.slice(0, 5)) {
-        const takerPays = this.parseAmount(offer.TakerPays);
-        const takerGets = this.parseAmount(offer.TakerGets);
+        // taker_gets=token, taker_pays=XRP
+        // TakerPays is XRP in drops (string) — must divide by 1e6
+        // TakerGets is token amount (object with .value)
+        const takerPaysRaw = offer.TakerPays;
+        const takerGetsRaw = offer.TakerGets;
 
-        if (takerGets > 0) {
-          totalXRP += takerPays;
-          totalTokens += takerGets;
-          liquidity += takerPays;
+        // Parse XRP drops correctly
+        const xrpAmount = typeof takerPaysRaw === 'string'
+          ? parseInt(takerPaysRaw) / 1_000_000
+          : this.parseAmount(takerPaysRaw);
+
+        // Parse token amount
+        const tokenAmount = typeof takerGetsRaw === 'object' && takerGetsRaw?.value
+          ? parseFloat(takerGetsRaw.value)
+          : this.parseAmount(takerGetsRaw);
+
+        if (tokenAmount > 0 && xrpAmount > 0) {
+          totalXRP += xrpAmount;
+          totalTokens += tokenAmount;
+          liquidity += xrpAmount;
         }
       }
 
