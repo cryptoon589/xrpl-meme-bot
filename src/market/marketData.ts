@@ -84,6 +84,16 @@ export class MarketDataCollector {
       let priceXRP: number | null = ammPrice?.priceXRP ?? null;
       let liquidityXRP: number | null = ammPrice?.liquidityXRP ?? null;
 
+      // Sanity guard: if liquidity looks like raw drops (>100M XRP is impossible for meme pools)
+      // this means someone passed drops instead of XRP — correct it
+      if (liquidityXRP !== null && liquidityXRP > 100_000_000) {
+        liquidityXRP = liquidityXRP / 1_000_000;
+      }
+      // Same for price: >10,000 XRP per token is not realistic for any meme token
+      if (priceXRP !== null && priceXRP > 10_000) {
+        priceXRP = priceXRP / 1_000_000;
+      }
+
       // Fall back to AMM pool object, then order book (with raw currency)
       if (priceXRP === null) {
         if (ammPool) {
