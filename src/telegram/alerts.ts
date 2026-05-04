@@ -8,6 +8,18 @@ import { AlertPayload } from '../types';
 import { BotConfig } from '../config';
 import { info, warn, debug } from '../utils/logger';
 
+/** Decode a 40-char hex currency code to its ASCII ticker (e.g. 46555A5A59... → FUZZY).
+ *  Returns the input unchanged if it's already a short ticker or can't be decoded. */
+function decodeCurrency(raw: string): string {
+  if (!raw || raw.length !== 40) return raw;
+  try {
+    const stripped = raw.replace(/00+$/, '');
+    const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
+    if (/^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0) return decoded;
+  } catch {}
+  return raw;
+}
+
 export class TelegramAlerter {
   private bot: TelegramBot | null = null;
   private chatId: string = '';
@@ -140,7 +152,7 @@ export class TelegramAlerter {
     const lines: string[] = [
       `${strength}`,
       '',
-      `<b>Token:</b> <code>${payload.tokenCurrency || 'N/A'}</code>`,
+      `<b>Token:</b> <code>${decodeCurrency(payload.tokenCurrency || '') || 'N/A'}</code>`,
       `<b>Signal Score:</b> ${score}/100`,
     ];
 
@@ -199,7 +211,8 @@ export class TelegramAlerter {
     if (payload.explorerLinks) {
       lines.push('');
       const issuer = payload.tokenIssuer || '';
-      lines.push(`<a href="https://firstledger.net/token/${issuer}/${payload.tokenCurrency}">FirstLedger</a> | <a href="https://xmagnetic.org/tokens/${payload.tokenCurrency}+${issuer}">xMagnetic</a> | <a href="https://livenet.xrpl.org/accounts/${issuer}">Explorer</a>`);
+      const rawCur = payload.tokenCurrency || '';
+      lines.push(`<a href="https://firstledger.net/token/${issuer}/${rawCur}">FirstLedger</a> | <a href="https://xmagnetic.org/tokens/${rawCur}+${issuer}">xMagnetic</a> | <a href="https://livenet.xrpl.org/accounts/${issuer}">Explorer</a>`);
     }
 
     return lines.join('\n');
@@ -226,7 +239,7 @@ export class TelegramAlerter {
     return [
       `${emoji} <b>LIQUIDITY ${action}</b>`,
       '',
-      `<b>Token:</b> ${payload.tokenCurrency || 'N/A'}`,
+      `<b>Token:</b> ${decodeCurrency(payload.tokenCurrency || '') || 'N/A'}`,
       payload.message,
     ].join('\n');
   }
@@ -241,7 +254,7 @@ export class TelegramAlerter {
     return [
       `${emoji} <b>${action}</b>`,
       '',
-      `<b>Token:</b> ${payload.tokenCurrency || 'N/A'}`,
+      `<b>Token:</b> ${decodeCurrency(payload.tokenCurrency || '') || 'N/A'}`,
       payload.message,
     ].join('\n');
   }
@@ -256,7 +269,7 @@ export class TelegramAlerter {
     return [
       '📈 <b>PAPER TRADE OPENED</b>',
       '',
-      `<b>Token:</b> ${trade.tokenCurrency}`,
+      `<b>Token:</b> ${decodeCurrency(trade.tokenCurrency)}`,
       `<b>Entry:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
       `<b>Size:</b> ${trade.entryAmountXRP.toFixed(2)} XRP`,
       `<b>Score:</b> ${trade.entryReason?.startsWith('[BURST]') ? '🚀 Burst' : (trade.entryScore ?? '—')}`,
@@ -279,7 +292,7 @@ export class TelegramAlerter {
     return [
       '📊 <b>PAPER TRADE PARTIAL CLOSE</b>',
       '',
-      `<b>Token:</b> ${trade.tokenCurrency}`,
+      `<b>Token:</b> ${decodeCurrency(trade.tokenCurrency)}`,
       `<b>Sold:</b> ${soldPct.toFixed(0)}% of position (~${xrpSold.toFixed(2)} XRP)`,
       `<b>Remaining:</b> ${trade.remainingPosition.toFixed(0)}%`,
       `<b>Exit price:</b> ${trade.exitPriceXRP?.toFixed(8) ?? 'N/A'} XRP`,
@@ -335,7 +348,7 @@ export class TelegramAlerter {
     return [
       `${pnlEmoji} <b>PAPER TRADE CLOSED</b>`,
       '',
-      `<b>Token:</b> ${trade.tokenCurrency}`,
+      `<b>Token:</b> ${decodeCurrency(trade.tokenCurrency)}`,
       `<b>Entry price:</b> ${trade.entryPriceXRP.toFixed(8)} XRP`,
       `<b>Exit price:</b>  ${trade.exitPriceXRP?.toFixed(8) ?? 'N/A'} XRP`,
       `<b>XRP in:</b>  ${valueIn} XRP`,
