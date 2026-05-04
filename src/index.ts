@@ -665,6 +665,18 @@ function startPeriodicScan(
             };
             const signalCount = Object.values(signals).filter(Boolean).length;
 
+            // Decode hex currency to its ASCII name for blocklist checks.
+            // token.currency may be raw hex (e.g. 524C5553440000...) or decoded name (e.g. RLUSD).
+            // Normalising here means one blocklist entry covers both forms.
+            const decodedAlertCurrency = (() => {
+              if (token.currency.length !== 40) return token.currency;
+              try {
+                const stripped = token.currency.replace(/00+$/, '');
+                const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
+                return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : token.currency;
+              } catch { return token.currency; }
+            })();
+
             // Established/stablecoin tokens — never alert regardless of score or momentum
             const ALERT_BLOCKLIST = new Set([
               // Fiat / stablecoins
@@ -681,14 +693,11 @@ function startPeriodicScan(
               'federal', 'reserve', 'treasury', 'sec ', 'cftc', 'imf', 'swift',
               'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
             ];
-            const isBrandImpersonation = token.currency.length === 40 && (() => {
-              try {
-                const stripped = token.currency.replace(/00+$/, '');
-                const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').toLowerCase();
-                return BRAND_KEYWORDS.some(kw => decoded.includes(kw));
-              } catch { return false; }
+            const isBrandImpersonation = (() => {
+              const lower = decodedAlertCurrency.toLowerCase();
+              return BRAND_KEYWORDS.some(kw => lower.includes(kw));
             })();
-            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency) || isBrandImpersonation;
+            const isBlocklisted = ALERT_BLOCKLIST.has(decodedAlertCurrency) || isBrandImpersonation;
 
             // Minimum wallet breadth gate: require at least 2 unique buyers in the
             // live window before alerting. Stops single-wallet manipulation from
@@ -909,21 +918,21 @@ function startPeriodicScan(
     // Deduplicated top 5 — exclude established/stable tokens, memes only, min 1000 XRP liquidity
     // Also skip non-decodable hex currencies (starts with non-printable byte = likely garbage/test token)
     const top5 = topTokens
-      .filter(t => !HOURLY_BLOCKLIST.has(t.currency))
       .filter(t => t.liquidity >= 1000)  // skip micro-pools in leaderboard
       .filter(t => {
-        // Skip hex tokens that don't decode to readable ASCII
+        // Decode hex currency first so blocklist + brand checks work on the readable name
+        let name = t.currency;
         if (t.currency.length === 40) {
           try {
             const stripped = t.currency.replace(/00+$/, '');
             const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-            if (!/^[\x20-\x7E]+$/.test(decoded) || decoded.length === 0) return false;
-            // Filter brand-impersonation tokens
-            const lower = decoded.toLowerCase();
-            if (BRAND_IMPERSONATION_KEYWORDS.some(kw => lower.includes(kw))) return false;
-            return true;
+            if (!/^[\x20-\x7E]+$/.test(decoded) || decoded.length === 0) return false; // non-printable hex
+            name = decoded;
           } catch { return false; }
         }
+        if (HOURLY_BLOCKLIST.has(name)) return false;
+        const lower = name.toLowerCase();
+        if (BRAND_IMPERSONATION_KEYWORDS.some(kw => lower.includes(kw))) return false;
         return true;
       })
       .sort((a, b) => b.score - a.score)
