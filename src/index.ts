@@ -647,9 +647,7 @@ function startPeriodicScan(
               'EQUILIBRIUM', 'GATE', 'XRPTURBO', 'XPUNK', 'XRPAPE',
               'BITT', 'XBTC', 'WXRP', 'WXBT', 'CARBON', 'NOVA',
             ]);
-            // Also skip tokens with very high liquidity (established projects, not new meme pumps)
-            const isTooEstablished = (snapshot?.liquidityXRP || 0) > 200_000;
-            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency) || isTooEstablished;
+            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
 
             // Minimum wallet breadth gate: require at least 2 unique buyers in the
             // live window before alerting. Stops single-wallet manipulation from
@@ -850,11 +848,6 @@ function startPeriodicScan(
       'BITT', 'XBTC', 'WXRP', 'WXBT', 'CARBON', 'NOVA',
     ]);
 
-    // Meme liquidity ceiling: tokens with > 200K XRP liquidity are almost certainly
-    // established projects, not new meme pumps. Real meme tokens are speculative and
-    // newly launched — they rarely exceed this threshold.
-    const MEME_MAX_LIQUIDITY_XRP = 200_000;
-
     // Helper: decode hex currency codes to human-readable names
     const decodeCurrencyName = (raw: string): string => {
       if (raw.length !== 40) return raw;
@@ -870,8 +863,7 @@ function startPeriodicScan(
     // Also skip non-decodable hex currencies (starts with non-printable byte = likely garbage/test token)
     const top5 = topTokens
       .filter(t => !HOURLY_BLOCKLIST.has(t.currency))
-      .filter(t => t.liquidity >= 1000)                      // skip micro-pools in leaderboard
-      .filter(t => t.liquidity <= MEME_MAX_LIQUIDITY_XRP)    // skip established projects (too much liquidity)
+      .filter(t => t.liquidity >= 1000)  // skip micro-pools in leaderboard
       .filter(t => {
         // Skip hex tokens that don't decode to readable ASCII
         if (t.currency.length === 40) {
