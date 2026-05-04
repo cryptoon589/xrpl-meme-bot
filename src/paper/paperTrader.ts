@@ -102,8 +102,23 @@ export class PaperTrader {
       return null;
     }
 
-    // Fixed small size for burst trades — don't risk much on unscored tokens
-    const tradeSizeXRP = Math.min(this.config.minTradeXRP * 2, 20);
+    // Dynamic burst sizing: scale by buy velocity (unique wallets) and pool depth
+    // Base = minTradeXRP. Multiplier: more wallets + deeper pool = bigger position.
+    // Cap at 25 XRP — bursts are unscored, keep risk bounded.
+    const uniqueWallets = (snapshot as any).uniqueBuyers5m ?? 0;
+    const tvl = snapshot.liquidityXRP ?? 0;
+    const velocityMultiplier = uniqueWallets >= 8 ? 3.0
+      : uniqueWallets >= 5 ? 2.0
+      : uniqueWallets >= 3 ? 1.5
+      : 1.0;
+    const liquidityMultiplier = tvl >= 100_000 ? 1.5
+      : tvl >= 50_000 ? 1.25
+      : tvl >= 10_000 ? 1.0
+      : 0.75; // shallow pool = smaller size
+    const tradeSizeXRP = Math.min(
+      this.config.minTradeXRP * velocityMultiplier * liquidityMultiplier,
+      25 // hard cap
+    );
     if (this.bankrollXRP < tradeSizeXRP) {
       warn(`Insufficient bankroll for burst trade`);
       return null;
@@ -515,10 +530,12 @@ export class PaperTrader {
     trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
     trade.exitReason = reason;
     trade.status = 'closed';
-    trade.pnlXRP = parseFloat(pnlXRP.toFixed(6));
-    trade.pnlPercent = parseFloat(pnlPercent.toFixed(2));
-    trade.feesPaid += fees;
+    // xrpReturned accumulates ALL proceeds (partial + final)
     trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
+    // pnlXRP = total returned - total invested (accurate across all legs)
+    trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
+    trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
+    trade.feesPaid += fees;
     trade.remainingPosition = 0;
 
     // Return proceeds to bankroll
@@ -583,6 +600,9 @@ export class PaperTrader {
     // Update trade
     trade.feesPaid += fees;
     trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
+    // pnlXRP = cumulative total across all legs (stays accurate through partial closes)
+    trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
+    trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
     trade.remainingPosition -= percentToClose;
 
     // If fully closed, mark as closed
@@ -592,8 +612,6 @@ export class PaperTrader {
       trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
       trade.exitReason = reason;
       trade.status = 'closed';
-      trade.pnlXRP = parseFloat(pnlXRP.toFixed(6));
-      trade.pnlPercent = parseFloat(pnlPercent.toFixed(2));
       this.openPositions.delete(key);
     } else {
       trade.status = 'partial';

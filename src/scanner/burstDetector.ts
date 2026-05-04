@@ -270,6 +270,19 @@ export class BurstDetector {
     const totalXRP      = state.buys.reduce((s, e) => s + e.xrpAmount, 0);
 
     if (uniqueWallets.size >= MIN_UNIQUE_WALLETS && totalXRP >= MIN_BUY_VOLUME_XRP) {
+      // Wash trade guard: if top wallet accounts for >60% of volume, skip
+      // Real organic bursts have distributed buying — wash trades concentrate in 1-2 wallets
+      const walletVolumes = new Map<string, number>();
+      for (const e of state.buys) {
+        walletVolumes.set(e.wallet, (walletVolumes.get(e.wallet) || 0) + e.xrpAmount);
+      }
+      const maxWalletVol = Math.max(...walletVolumes.values());
+      const topWalletPct = totalXRP > 0 ? maxWalletVol / totalXRP : 0;
+      if (topWalletPct > 0.60) {
+        debug(`Burst on ${state.displayName} suppressed — wash trade suspected (top wallet = ${(topWalletPct*100).toFixed(0)}% of volume)`);
+        return;
+      }
+
       // Burst detected — fetch AMM price and fire alert asynchronously
       state.lastAlertTs = now; // Set cooldown immediately to prevent duplicate fires
       setTimeout(() => this.onBurstDetected(key, state, uniqueWallets.size, totalXRP), PRICE_FETCH_DELAY_MS);
@@ -324,10 +337,14 @@ export class BurstDetector {
       const poolStr   = tvlXRP  ? `${tvlXRP.toFixed(0)} XRP` : 'unknown';
       const feeStr    = tradingFee != null ? `${tradingFee.toFixed(2)}%` : '?';
 
+      // Buy concentration metric: avg XRP per unique wallet (lower = more organic)
+      const avgXRPPerWallet = uniqueWallets > 0 ? (totalXRP / uniqueWallets).toFixed(1) : '?';
+      const concentrationNote = uniqueWallets >= 5 ? '✅ distributed' : '⚠️ few wallets';
+
       const message =
         `${intensity} BUY BURST — <b>${state.displayName}</b>\n\n` +
-        `👥 Unique buyers (90s): <b>${uniqueWallets}</b>\n` +
-        `💰 Volume in window: <b>${totalXRP.toFixed(1)} XRP</b>\n` +
+        `👥 Unique buyers (90s): <b>${uniqueWallets}</b> (${concentrationNote})\n` +
+        `💰 Volume in window: <b>${totalXRP.toFixed(1)} XRP</b> (~${avgXRPPerWallet} XRP/wallet)\n` +
         `💧 Pool liquidity: <b>${poolStr}</b>\n` +
         `📈 Price: <b>${priceStr}</b>\n` +
         `🔧 AMM fee: ${feeStr}\n\n` +

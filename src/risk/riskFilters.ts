@@ -36,8 +36,8 @@ export class RiskFilter {
     const noBuyActivity = this.checkNoBuyActivity(snapshot);
     if (noBuyActivity) flags.push('no_buy_activity');
 
-    // Check concentrated supply (mock - needs issuer analysis)
-    const concentratedSupply = this.checkConcentratedSupply(token, pool);
+    // Check concentrated supply using holder estimate
+    const concentratedSupply = this.checkConcentratedSupply(token, pool, snapshot);
     if (concentratedSupply) flags.push('concentrated_supply');
 
     // Check for dev dumping (mock - needs transaction history analysis)
@@ -107,12 +107,22 @@ export class RiskFilter {
   }
 
   /**
-   * Check if supply is concentrated in few wallets
-   * TODO: Implement by analyzing trustline distribution
+   * Check if supply is concentrated in few wallets.
+   * Uses holder estimate from snapshot as a proxy:
+   * very few holders = likely whale / dev concentration.
    */
-  private checkConcentratedSupply(token: TrackedToken, pool: AMMPool | null): boolean {
-    // Mock implementation - would need to scan all trustlines for the issuer
-    // For MVP, assume not concentrated unless we have data
+  private checkConcentratedSupply(token: TrackedToken, pool: AMMPool | null, snapshot?: MarketSnapshot | null): boolean {
+    if (!snapshot) return false;
+    const holders = snapshot.holderEstimate;
+    if (holders === null) return false; // no data → don’t flag
+
+    // < 5 holders AND price moved > 20% is a strong rug signal
+    const priceMove = Math.abs(snapshot.priceChange5m ?? 0);
+    if (holders < 5 && priceMove > 20) return true;
+
+    // < 3 holders is always suspicious regardless of price
+    if (holders < 3) return true;
+
     return false;
   }
 
@@ -135,11 +145,23 @@ export class RiskFilter {
   }
 
   /**
-   * Check if price movement appears caused by single wallet
-   * TODO: Implement by analyzing transaction sources
+   * Check if price movement appears caused by a single wallet (wash trading)
+   * Flags when: price moved meaningfully but <2 unique buyers drove it.
+   * Real organic pumps have distributed buying.
    */
   private checkSingleWalletPrice(snapshot: MarketSnapshot | null): boolean {
-    // Mock implementation
+    if (!snapshot) return false;
+    const uniqueBuyers = snapshot.uniqueBuyers5m ?? 0;
+    const buyCount     = snapshot.buyCount5m     ?? 0;
+    const priceMove    = Math.abs(snapshot.priceChange5m ?? 0);
+
+    // Flag: price moved >10% but only 1 unique buyer drove it
+    if (priceMove > 10 && uniqueBuyers <= 1 && buyCount >= 2) return true;
+
+    // Flag: >5 buys but all from the same 1-2 wallets (ratio check)
+    // uniqueBuyers / buyCount < 0.3 means very few distinct wallets
+    if (buyCount >= 5 && uniqueBuyers > 0 && (uniqueBuyers / buyCount) < 0.3) return true;
+
     return false;
   }
 
