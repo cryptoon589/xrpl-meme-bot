@@ -32,6 +32,7 @@ import { AlertPayload } from './types';
 import { PositionSizer } from './paper/positionSizer';
 import { CorrelationDetector } from './scoring/correlationDetector';
 import { ActiveDiscovery } from './scanner/activeDiscovery';
+import { TrendingSeeder } from './scanner/trendingSeeder';
 import { BurstDetector } from './scanner/burstDetector';
 import { AMMPriceFetcher } from './market/ammPriceFetcher';
 import { BuyPressureTracker } from './market/buyPressureTracker';
@@ -245,6 +246,26 @@ async function main() {
     results.forEach(dt => tokenDiscovery.addTrackedToken(activeDiscovery.toTrackedToken(dt)));
     if (results.length > 0) info(`AMM sweep: ${results.length} new tokens added`);
   }, 5 * 60 * 1000);
+
+  // Trending seeder — polls xrplmeta.org every 15 min for tokens with high recent
+  // trading activity (exchanges_24h, takers_24h, volume_24h). Seeds them into tracking
+  // so the scoring engine has time to accumulate live buy-pressure data.
+  const trendingSeeder = new TrendingSeeder((trending) => {
+    let added = 0;
+    for (const t of trending) {
+      const tracked = {
+        currency: t.currency,
+        rawCurrency: t.currency,
+        issuer: t.issuer,
+        firstSeen: Date.now(),
+        lastUpdated: Date.now(),
+      };
+      const isNew = tokenDiscovery.addTrackedToken(tracked);
+      if (isNew) added++;
+    }
+    if (added > 0) info(`[TrendingSeeder] Seeded ${added} new tokens into tracking`);
+  });
+  trendingSeeder.start();
 
   // Start periodic scanning with parallel batches
   isRunning = true;
