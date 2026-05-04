@@ -169,15 +169,14 @@ export class RiskFilter {
    * Check if token passes all critical risk filters
    */
   isSafe(riskFlags: RiskFlags): boolean {
-    // Hard blocks: confirmed rug signals only
-    // devDumping, liquidityRemoved, concentratedSupply = immediate danger
+    // Hard blocks: only unrecoverable rug signals
     if (riskFlags.devDumping) return false;
     if (riskFlags.liquidityRemoved) return false;
-    if (riskFlags.concentratedSupply) return false;
 
-    // Low liquidity alone is NOT a hard block — DEX tokens and new tokens
-    // legitimately start with low liquidity and can still be great entries.
-    // Wide spread (>8%) IS a block since it means terrible execution cost.
+    // concentrated_supply is NOT a hard block — we can still profit on pumps
+    // if we manage risk tightly. The scorer already penalises -30 pts for it,
+    // so only high-conviction signals will clear the entry threshold.
+    // Wide spread (>8%) IS a block — execution cost kills the trade before it starts.
     if (riskFlags.wideSpread) return false;
 
     return true;

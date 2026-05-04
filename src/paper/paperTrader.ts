@@ -20,6 +20,7 @@ interface OpenPosition {
   priceHistory: number[]; // Last 10 prices for volatility calculation
   openedAt: number;       // Timestamp of entry — used to enforce minimum hold time
   tradeProfile: 'scored' | 'burst'; // exit rules differ
+  stopLossPercent?: number; // override for dynamic stop (e.g. tightened on concentrated supply)
 }
 
 export class PaperTrader {
@@ -433,9 +434,13 @@ export class PaperTrader {
       // Calculate dynamic stop loss based on volatility
       const volatility = this.calculateVolatility(position.priceHistory);
       const dynamicStopLoss = this.getDynamicStopLoss(volatility, pnlPercent);
+      // Use tightened stop if set (e.g. concentrated supply detected mid-trade)
+      const effectiveStopLoss = position.stopLossPercent !== undefined
+        ? -Math.abs(position.stopLossPercent)
+        : dynamicStopLoss;
 
       // Check stop loss (dynamic based on volatility)
-      if (pnlPercent <= dynamicStopLoss && trade.remainingPosition > 0) {
+      if (pnlPercent <= effectiveStopLoss && trade.remainingPosition > 0) {
         keysToClose.push({ key, reason: 'stop_loss' });
         closedTrades.push(trade);
         continue;
@@ -653,17 +658,26 @@ export class PaperTrader {
     position.lastRiskCheck = Date.now();
 
     // Check for critical new risk flags that warrant emergency exit
-    const criticalFlags = ['liquidity_removed', 'dev_dumping', 'concentrated_supply'];
+    // concentrated_supply is intentionally excluded — we manage it with a
+    // tighter stop instead of exiting. Whales can pump before they dump.
+    const criticalFlags = ['liquidity_removed', 'dev_dumping'];
     const newCriticalFlags = currentRiskFlags.filter(f =>
       criticalFlags.includes(f) && !trade.entryReason.includes(f)
     );
 
     if (newCriticalFlags.length > 0) {
       warn(`🚨 Emergency exit triggered for ${key}: ${newCriticalFlags.join(', ')}`);
-
       const exitPrice = snapshot?.priceXRP || trade.entryPriceXRP * 0.9;
       this.closePosition(key, exitPrice, `emergency_${newCriticalFlags.join(',')}`, snapshot);
       return trade;
+    }
+
+    // Concentrated supply detected mid-trade: tighten stop to -8% instead of exiting.
+    // This lets us ride the pump while cutting losses fast if the whale dumps.
+    const hasConcentrated = currentRiskFlags.includes('concentrated_supply');
+    if (hasConcentrated && (position.stopLossPercent === undefined || position.stopLossPercent > 8)) {
+      warn(`⚠️ Concentrated supply detected for ${key} — tightening stop to -8%`);
+      position.stopLossPercent = 8;
     }
 
     return null;
