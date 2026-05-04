@@ -641,11 +641,8 @@ function startPeriodicScan(
               'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
               // L1 / ecosystem tokens
               'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-              // Known established XRPL projects (not meme targets)
-              'OCT', 'SHX', 'MXI', 'SOX', 'CORE', 'XSPECTAR', 'XRDOGE', 'XOGE',
-              'XMG', 'XRPAYNET', 'HOUND', 'BEAR', 'BULL', 'FURY', 'APEX',
-              'EQUILIBRIUM', 'GATE', 'XRPTURBO', 'XPUNK', 'XRPAPE',
-              'BITT', 'XBTC', 'WXRP', 'WXBT', 'CARBON', 'NOVA',
+              // Confirmed established XRPL projects (operator-verified)
+              'OCT', 'SHX', 'MXI', 'CORE', 'XSPECTAR',
             ]);
             const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
 
@@ -835,17 +832,14 @@ function startPeriodicScan(
     const total = rawStats.raw;
 
     // Blocklist for hourly leaderboard — known stablecoins, established XRPL ecosystem tokens
-    // These are real projects with deep liquidity, not meme tokens
+    // These are real projects, not meme tokens. Expand as we encounter confirmed non-memes.
     const HOURLY_BLOCKLIST = new Set([
       // Fiat / stablecoins
       'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
       // L1 / ecosystem tokens
       'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-      // Known established XRPL projects (high liquidity, not memes)
-      'OCT', 'SHX', 'MXI', 'SOX', 'CORE', 'XSPECTAR', 'XRDOGE', 'XOGE',
-      'XMG', 'XRPAYNET', 'HOUND', 'BEAR', 'BULL', 'FURY', 'APEX',
-      'EQUILIBRIUM', 'GATE', 'XRPTURBO', 'XPUNK', 'XRPAPE',
-      'BITT', 'XBTC', 'WXRP', 'WXBT', 'CARBON', 'NOVA',
+      // Confirmed established XRPL projects (operator-verified)
+      'OCT', 'SHX', 'MXI', 'CORE', 'XSPECTAR',
     ]);
 
     // Helper: decode hex currency codes to human-readable names
