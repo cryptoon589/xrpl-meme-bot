@@ -267,6 +267,17 @@ async function main() {
   });
   trendingSeeder.start();
 
+  // Background holder refresh — rate-limited to 1 token per 5s.
+  // Avoids WS flooding. Prioritises tokens with no cached value.
+  setInterval(async () => {
+    const tokens = tokenDiscovery.getTrackedTokens();
+    const uncached = tokens.filter(t => holderCounter.getCached(t.currency, t.issuer) === null);
+    const target = uncached.length > 0 ? uncached[0] : tokens[Math.floor(Math.random() * tokens.length)];
+    if (target) {
+      holderCounter.getHolderCount(target.currency, target.issuer, target.rawCurrency).catch(() => {});
+    }
+  }, 5000); // 1 holder fetch per 5s = 12/min, won't flood WS
+
   // Start periodic scanning with parallel batches
   isRunning = true;
   startPeriodicScan(
@@ -530,7 +541,10 @@ function startPeriodicScan(
               const ammPrice = await ammPriceFetcher.getPrice(token.currency, token.issuer, token.rawCurrency);
 
               // Fix 2: Get real-time buy pressure
-              const pressure = buyPressureTracker.getSnapshot(token.currency, token.issuer);
+              // Use rawCurrency for pressure lookup — tracker records events using the raw hex
+              // from RippleState nodes, not the decoded display name.
+              const pressureKey = token.rawCurrency || token.currency;
+              const pressure = buyPressureTracker.getSnapshot(pressureKey, token.issuer);
 
               // Merge buy pressure into volume data
               const vol = {
@@ -542,15 +556,10 @@ function startPeriodicScan(
                 uniqueSellers: pressure.uniqueSellers,
               };
 
-              // Get holder count only for active tokens — skips the expensive account_lines
-              // pagination for dormant tokens (no buys and no price movement).
-              // Cache TTL is 30 min so even active tokens rarely trigger a real fetch.
-              const hasActivity = pressure.buyCount > 0 || pressure.sellCount > 0
-                || Math.abs(ammPrice?.priceXRP ? (ammPrice.priceXRP - (ammPrice.priceXRP * 0.95)) : 0) > 0;
-              const cachedHolders = holderCounter.getCached(token.currency, token.issuer);
-              const holders = (hasActivity || cachedHolders === null)
-                ? await holderCounter.getHolderCount(token.currency, token.issuer, token.rawCurrency)
-                : cachedHolders;
+              // Holder count: NEVER block the scan on account_lines — use cached value only.
+              // Background refresh happens via a separate low-rate queue (see below).
+              // This prevents WS flooding when 100+ tokens all need a holder fetch.
+              const holders = holderCounter.getCached(token.currency, token.issuer) ?? 0;
 
               // Fix 5: pass ammPrice into collectMarketDataWithExtras so price history
               // and priceChange calculations use the correct AMM price from the start
@@ -642,7 +651,7 @@ function startPeriodicScan(
               }
 
             // Fix 4: Multi-signal gate — require 3+ signals firing together
-            const pressure = buyPressureTracker.getSnapshot(token.currency, token.issuer);
+            const pressure = buyPressureTracker.getSnapshot(token.rawCurrency || token.currency, token.issuer);
             // Has the tracker accumulated data yet? (at least 1 event observed)
             const hasLiveData = pressure.buyCount + pressure.sellCount > 0;
 

@@ -1,43 +1,18 @@
 #!/bin/bash
-# XRPL Meme Bot - Quick Start Script
+# Supervisor script for xrpl-meme-bot
+# Runs the bot, restarts on crash, logs to logs/bot.log
 
-set -e
+BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LOG="$BOT_DIR/logs/bot.log"
+mkdir -p "$BOT_DIR/logs"
 
-echo "=== XRPL Meme Bot Setup ==="
+echo "[supervisor] Starting xrpl-meme-bot from $BOT_DIR" | tee -a "$LOG"
 
-# Check Node.js
-if ! command -v node &> /dev/null; then
-    echo "ERROR: Node.js is not installed"
-    exit 1
-fi
-
-echo "Node.js version: $(node -v)"
-
-# Install dependencies if needed
-if [ ! -d "node_modules" ]; then
-    echo "Installing dependencies..."
-    npm install
-fi
-
-# Build if dist doesn't exist
-if [ ! -d "dist" ]; then
-    echo "Building TypeScript..."
-    ./node_modules/.bin/tsc
-fi
-
-# Create directories
-mkdir -p logs data
-
-# Check .env exists
-if [ ! -f ".env" ]; then
-    echo "Creating .env from example..."
-    cp .env.example .env
-    echo "WARNING: Please edit .env with your Telegram credentials before running!"
-fi
-
-# Run the bot
-echo ""
-echo "Starting XRPL Meme Bot..."
-echo "Press Ctrl+C to stop"
-echo ""
-node dist/index.js
+while true; do
+  cd "$BOT_DIR"
+  echo "[supervisor] $(date -u +%Y-%m-%dT%H:%M:%SZ) Launching bot..." | tee -a "$LOG"
+  node dist/index.js >> "$LOG" 2>&1
+  EXIT_CODE=$?
+  echo "[supervisor] $(date -u +%Y-%m-%dT%H:%M:%SZ) Bot exited with code $EXIT_CODE. Restarting in 10s..." | tee -a "$LOG"
+  sleep 10
+done
