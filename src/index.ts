@@ -827,9 +827,21 @@ function startPeriodicScan(
       'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
     ]);
 
-    // Deduplicated top 5 — exclude established/stable tokens, memes only
+    // Helper: decode hex currency codes to human-readable names
+    const decodeCurrencyName = (raw: string): string => {
+      if (raw.length !== 40) return raw;
+      try {
+        const stripped = raw.replace(/00+$/, '');
+        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
+        if (/^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0) return decoded;
+      } catch {}
+      return raw.slice(0, 8) + '…';
+    };
+
+    // Deduplicated top 5 — exclude established/stable tokens, memes only, min 1000 XRP liquidity
     const top5 = topTokens
       .filter(t => !HOURLY_BLOCKLIST.has(t.currency))
+      .filter(t => t.liquidity >= 1000)  // skip micro-pools in leaderboard
       .sort((a, b) => b.score - a.score)
       .slice(0, 5);
     topTokens = [];
@@ -857,7 +869,8 @@ function startPeriodicScan(
         const change1hStr = (t.change1h != null && t.change1h !== 0)
           ? (t.change1h >= 0 ? '+' : '') + t.change1h.toFixed(1) + '%'
           : 'N/A';
-        lines.push('  ' + emoji + ' #' + (i+1) + ' ' + t.currency + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + change1hStr);
+        const displayName = decodeCurrencyName(t.currency);
+        lines.push('  ' + emoji + ' #' + (i+1) + ' ' + displayName + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + change1hStr);
       });
     }
 

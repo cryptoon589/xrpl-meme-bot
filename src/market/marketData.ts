@@ -19,7 +19,7 @@ export class MarketDataCollector {
   private db: Database;
   private priceHistory: Map<string, PricePoint[]> = new Map();
   private snapshots: Map<string, MarketSnapshot> = new Map();
-  private maxHistoryPoints = 100; // Keep last 100 price points per token
+  private maxHistoryPoints = 150; // Keep last 150 price points per token (~2.5h at 60s scan interval)
   private lastPruneTime = 0;
   private readonly PRUNE_INTERVAL_MS = 3600000; // Prune every hour
 
@@ -437,9 +437,10 @@ export class MarketDataCollector {
         }
       }
 
-      // Accept price points within half the target window
-      // e.g. for 5m target: accept within 2.5m; for 1h target: accept within 30m
-      if (closest && minDiff < Math.abs(now - targetTime) * 0.5) {
+      // Accept price points within 80% of the target window
+      // e.g. for 5m target: accept within 4m; for 1h target: accept within 48m
+      // Relaxed from 50% to avoid N/A when token scan cadence is uneven
+      if (closest && minDiff < Math.abs(now - targetTime) * 0.8) {
         return closest.price;
       }
       return null;
