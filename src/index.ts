@@ -239,12 +239,12 @@ async function main() {
 
   startTransactionProcessor(tokenDiscovery, ammScanner, volumeTracker, issuerReputation, correlationDetector, telegramAlerter, db);
 
-  // Periodic AMM sweep every 10 minutes to catch newly created pools
+  // Periodic AMM sweep every 5 minutes to catch newly created pools
   setInterval(async () => {
     const results = await activeDiscovery.sweepAMMPools();
     results.forEach(dt => tokenDiscovery.addTrackedToken(activeDiscovery.toTrackedToken(dt)));
     if (results.length > 0) info(`AMM sweep: ${results.length} new tokens added`);
-  }, 10 * 60 * 1000);
+  }, 5 * 60 * 1000);
 
   // Start periodic scanning with parallel batches
   isRunning = true;

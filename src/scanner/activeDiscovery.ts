@@ -300,7 +300,7 @@ export class ActiveDiscovery {
       // Use ledger_data to fetch AMM objects
       let marker: any = undefined;
       let page = 0;
-      const MAX_PAGES = 3; // Limit to avoid overloading
+      const MAX_PAGES = 10; // Cover enough of the ledger to catch recently launched pools
 
       do {
         const req: any = {
