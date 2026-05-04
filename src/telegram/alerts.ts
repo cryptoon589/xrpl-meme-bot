@@ -294,8 +294,16 @@ export class TelegramAlerter {
     const trade = payload.paperTrade;
     if (!trade) return 'Paper trade closed (no details)';
 
-    const pnlXRP = trade.pnlXRP ?? null;
-    const pnlPct = trade.pnlPercent ?? null;
+    // Total PnL = all proceeds (partial + final) minus original entry cost
+    const totalReturned = (trade.xrpReturned != null && trade.xrpReturned > 0)
+      ? trade.xrpReturned
+      : null;
+    const pnlXRP  = totalReturned != null
+      ? parseFloat((totalReturned - trade.entryAmountXRP).toFixed(6))
+      : (trade.pnlXRP ?? null);
+    const pnlPct  = (pnlXRP != null && trade.entryAmountXRP > 0)
+      ? parseFloat(((pnlXRP / trade.entryAmountXRP) * 100).toFixed(2))
+      : (trade.pnlPercent ?? null);
     const pnlEmoji = (pnlXRP ?? 0) >= 0 ? '✅' : '❌';
 
     // Human-readable exit reason
@@ -318,11 +326,11 @@ export class TelegramAlerter {
       ? (reasonMap[trade.exitReason] || trade.exitReason)
       : 'Unknown';
 
-    // XRP value in / out
-    const valueIn = trade.entryAmountXRP.toFixed(2);
-    const valueOut = trade.exitPriceXRP != null
-      ? ((trade.exitPriceXRP / trade.entryPriceXRP) * trade.entryAmountXRP * (1 - trade.slippageEstimate) - trade.feesPaid).toFixed(2)
-      : null;
+    // XRP value in / out — use cumulative xrpReturned which tracks all partial + final proceeds
+    const valueIn  = trade.entryAmountXRP.toFixed(2);
+    const valueOut = (trade.xrpReturned != null && trade.xrpReturned > 0)
+      ? trade.xrpReturned.toFixed(2)
+      : (trade.pnlXRP != null ? (trade.entryAmountXRP + trade.pnlXRP).toFixed(2) : null);
 
     return [
       `${pnlEmoji} <b>PAPER TRADE CLOSED</b>`,

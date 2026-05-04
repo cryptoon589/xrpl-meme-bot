@@ -132,6 +132,7 @@ export class PaperTrader {
       pnlPercent: null,
       slippageEstimate: slippage,
       feesPaid: fees,
+      xrpReturned: 0,
       tp1Hit: false,
       tp2Hit: false,
       trailingStopActive: false,
@@ -268,6 +269,7 @@ export class PaperTrader {
       pnlPercent: null,
       slippageEstimate: slippage,
       feesPaid: fees,
+      xrpReturned: 0,
       tp1Hit: false,
       tp2Hit: false,
       trailingStopActive: false,
@@ -516,6 +518,7 @@ export class PaperTrader {
     trade.pnlXRP = parseFloat(pnlXRP.toFixed(6));
     trade.pnlPercent = parseFloat(pnlPercent.toFixed(2));
     trade.feesPaid += fees;
+    trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
     trade.remainingPosition = 0;
 
     // Return proceeds to bankroll
@@ -579,6 +582,7 @@ export class PaperTrader {
 
     // Update trade
     trade.feesPaid += fees;
+    trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
     trade.remainingPosition -= percentToClose;
 
     // If fully closed, mark as closed

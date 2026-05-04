@@ -91,6 +91,7 @@ export interface PaperTrade {
   pnlPercent: number | null;
   slippageEstimate: number;
   feesPaid: number;
+  xrpReturned: number;  // cumulative XRP returned (partial + final closes)
   tp1Hit: boolean;
   tp2Hit: boolean;
   trailingStopActive: boolean;

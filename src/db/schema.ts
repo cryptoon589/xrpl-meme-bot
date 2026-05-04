@@ -110,7 +110,8 @@ export const SCHEMA = {
       tp1_hit INTEGER DEFAULT 0,
       tp2_hit INTEGER DEFAULT 0,
       trailing_stop_active INTEGER DEFAULT 0,
-      remaining_position REAL DEFAULT 100
+      remaining_position REAL DEFAULT 100,
+      xrp_returned REAL DEFAULT 0
     )
   `,
 
