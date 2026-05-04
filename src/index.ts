@@ -637,10 +637,19 @@ function startPeriodicScan(
 
             // Established/stablecoin tokens — never alert regardless of score or momentum
             const ALERT_BLOCKLIST = new Set([
-              'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY',
+              // Fiat / stablecoins
+              'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
+              // L1 / ecosystem tokens
               'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+              // Known established XRPL projects (not meme targets)
+              'OCT', 'SHX', 'MXI', 'SOX', 'CORE', 'XSPECTAR', 'XRDOGE', 'XOGE',
+              'XMG', 'XRPAYNET', 'HOUND', 'BEAR', 'BULL', 'FURY', 'APEX',
+              'EQUILIBRIUM', 'GATE', 'XRPTURBO', 'XPUNK', 'XRPAPE',
+              'BITT', 'XBTC', 'WXRP', 'WXBT', 'CARBON', 'NOVA',
             ]);
-            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
+            // Also skip tokens with very high liquidity (established projects, not new meme pumps)
+            const isTooEstablished = (snapshot?.liquidityXRP || 0) > 200_000;
+            const isBlocklisted = ALERT_BLOCKLIST.has(token.currency) || isTooEstablished;
 
             // Minimum wallet breadth gate: require at least 2 unique buyers in the
             // live window before alerting. Stops single-wallet manipulation from
@@ -827,11 +836,24 @@ function startPeriodicScan(
     const ignored = rawStats.raw - rawStats.filtered;
     const total = rawStats.raw;
 
-    // Blocklist for hourly leaderboard — same as alert gate
+    // Blocklist for hourly leaderboard — known stablecoins, established XRPL ecosystem tokens
+    // These are real projects with deep liquidity, not meme tokens
     const HOURLY_BLOCKLIST = new Set([
-      'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY',
+      // Fiat / stablecoins
+      'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
+      // L1 / ecosystem tokens
       'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+      // Known established XRPL projects (high liquidity, not memes)
+      'OCT', 'SHX', 'MXI', 'SOX', 'CORE', 'XSPECTAR', 'XRDOGE', 'XOGE',
+      'XMG', 'XRPAYNET', 'HOUND', 'BEAR', 'BULL', 'FURY', 'APEX',
+      'EQUILIBRIUM', 'GATE', 'XRPTURBO', 'XPUNK', 'XRPAPE',
+      'BITT', 'XBTC', 'WXRP', 'WXBT', 'CARBON', 'NOVA',
     ]);
+
+    // Meme liquidity ceiling: tokens with > 200K XRP liquidity are almost certainly
+    // established projects, not new meme pumps. Real meme tokens are speculative and
+    // newly launched — they rarely exceed this threshold.
+    const MEME_MAX_LIQUIDITY_XRP = 200_000;
 
     // Helper: decode hex currency codes to human-readable names
     const decodeCurrencyName = (raw: string): string => {
@@ -848,7 +870,8 @@ function startPeriodicScan(
     // Also skip non-decodable hex currencies (starts with non-printable byte = likely garbage/test token)
     const top5 = topTokens
       .filter(t => !HOURLY_BLOCKLIST.has(t.currency))
-      .filter(t => t.liquidity >= 1000)  // skip micro-pools in leaderboard
+      .filter(t => t.liquidity >= 1000)                      // skip micro-pools in leaderboard
+      .filter(t => t.liquidity <= MEME_MAX_LIQUIDITY_XRP)    // skip established projects (too much liquidity)
       .filter(t => {
         // Skip hex tokens that don't decode to readable ASCII
         if (t.currency.length === 40) {
