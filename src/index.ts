@@ -642,7 +642,7 @@ function startPeriodicScan(
               // L1 / ecosystem tokens
               'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
               // Confirmed established XRPL projects (operator-verified)
-              'OCT', 'SHX', 'MXI', 'CORE', 'XSPECTAR',
+              'OCT', 'SHX', 'MXI', 'CORE',
             ]);
             const isBlocklisted = ALERT_BLOCKLIST.has(token.currency);
 
@@ -839,7 +839,7 @@ function startPeriodicScan(
       // L1 / ecosystem tokens
       'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
       // Confirmed established XRPL projects (operator-verified)
-      'OCT', 'SHX', 'MXI', 'CORE', 'XSPECTAR',
+      'OCT', 'SHX', 'MXI', 'CORE',
     ]);
 
     // Helper: decode hex currency codes to human-readable names
