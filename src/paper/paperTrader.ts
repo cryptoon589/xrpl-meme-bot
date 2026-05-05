@@ -21,6 +21,8 @@ interface OpenPosition {
   openedAt: number;       // Timestamp of entry — used to enforce minimum hold time
   tradeProfile: 'scored' | 'burst'; // exit rules differ
   stopLossPercent?: number; // override for dynamic stop (e.g. tightened on concentrated supply)
+  tp1Pct?: number;          // learned TP1 target (overrides hardcoded default)
+  tp2Pct?: number;          // learned TP2 target
 }
 
 export class PaperTrader {
@@ -59,7 +61,8 @@ export class PaperTrader {
   tryOpenBurstTrade(
     token: TrackedToken,
     snapshot: MarketSnapshot | null,
-    entryReason: string
+    entryReason: string,
+    tpTargets?: { tp1: number; tp2: number }
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
 
@@ -168,6 +171,8 @@ export class PaperTrader {
       priceHistory: [entryPrice],
       openedAt: Date.now(),
       tradeProfile: 'burst',
+      tp1Pct: tpTargets?.tp1,
+      tp2Pct: tpTargets?.tp2,
     });
 
     this.db.savePaperTrade(trade);
@@ -182,7 +187,8 @@ export class PaperTrader {
     token: TrackedToken,
     snapshot: MarketSnapshot | null,
     score: number,
-    entryReason: string
+    entryReason: string,
+    tpTargets?: { tp1: number; tp2: number }
   ): PaperTrade | null {
     // Check mode
     if (this.config.mode !== 'PAPER') {
@@ -314,6 +320,8 @@ export class PaperTrader {
       // Timestamp used to enforce minimum hold time before exits are checked
       openedAt: Date.now(),
       tradeProfile: 'scored',
+      tp1Pct: tpTargets?.tp1,
+      tp2Pct: tpTargets?.tp2,
     });
 
     // Save to DB
@@ -393,22 +401,27 @@ export class PaperTrader {
           continue;
         }
 
-        // TP1: +15% — sell 60% of position (bank the pump gains)
-        if (!trade.tp1Hit && pnlPercent >= 15 && trade.remainingPosition > 0) {
-          this.partialClose(key, currentPrice, 60, 'burst_tp1_+15pct', snapshot);
+        // TP1/TP2: use learned targets if available, else hardcoded defaults
+        const burstTp1 = position.tp1Pct ?? 15;
+        const burstTp2 = position.tp2Pct ?? 30;
+        const trailActivation = Math.round(burstTp1 * 0.67); // trail at ~2/3 of TP1
+
+        // TP1 — sell 60% of position (bank the pump gains)
+        if (!trade.tp1Hit && pnlPercent >= burstTp1 && trade.remainingPosition > 0) {
+          this.partialClose(key, currentPrice, 60, `burst_tp1_+${burstTp1}pct`, snapshot);
           trade.tp1Hit = true;
           this.db.updatePaperTrade(trade);
         }
 
-        // TP2: +30% — sell remaining
-        if (!trade.tp2Hit && pnlPercent >= 30 && trade.remainingPosition > 0) {
+        // TP2 — sell remaining
+        if (!trade.tp2Hit && pnlPercent >= burstTp2 && trade.remainingPosition > 0) {
           keysToClose.push({ key, reason: 'take_profit_2' });
           closedTrades.push(trade);
           continue;
         }
 
-        // Trailing stop activates at +10%, distance 5%
-        if (!trade.trailingStopActive && pnlPercent >= 10) {
+        // Trailing stop activates at ~2/3 of TP1, distance 5%
+        if (!trade.trailingStopActive && pnlPercent >= trailActivation) {
           trade.trailingStopActive = true;
           this.db.updatePaperTrade(trade);
         }
@@ -446,16 +459,19 @@ export class PaperTrader {
         continue;
       }
 
-      // Check Take Profit 1 (+35%, sell 40% of original position)
-      if (!trade.tp1Hit && pnlPercent >= 35 && trade.remainingPosition > 0) {
+      // Check Take Profit 1 — use learned target if available, else +35%
+      const scoredTp1 = position.tp1Pct ?? 35;
+      const scoredTp2 = position.tp2Pct ?? 75;
+
+      if (!trade.tp1Hit && pnlPercent >= scoredTp1 && trade.remainingPosition > 0) {
         this.partialClose(key, currentPrice, 40, 'take_profit_1', snapshot);
         trade.tp1Hit = true;
         this.db.updatePaperTrade(trade);
       }
 
-      // Check Take Profit 2 (+75%, sell 30% of original position)
+      // Check Take Profit 2 — use learned target
       // After TP1 (40% sold), remaining is 60%. Sell 30/60 = 50% of remaining.
-      if (!trade.tp2Hit && pnlPercent >= 75 && trade.remainingPosition > 0) {
+      if (!trade.tp2Hit && pnlPercent >= scoredTp2 && trade.remainingPosition > 0) {
         const percentOfRemaining = (30 / trade.remainingPosition) * 100;
         this.partialClose(key, currentPrice, Math.min(percentOfRemaining, 100), 'take_profit_2', snapshot);
         trade.tp2Hit = true;

@@ -41,6 +41,7 @@ import { WhaleTracker } from './scoring/whaleTracker';
 import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
+import { RuntimeLearning } from './analysis/runtimeLearning';
 
 // Global state
 let isRunning = false;
@@ -111,6 +112,11 @@ async function main() {
   tokenScorer.setWhaleTracker(whaleTracker);
   tokenScorer.setSocialDetector(socialDetector);
 
+  // Runtime learning: time-of-day gate, entry pullback, learned TP targets
+  const runtimeLearning = new RuntimeLearning();
+
+
+
   const issuerReputation = new IssuerReputation();
   const multiTimeframeScorer = new MultiTimeframeScorer(config);
   const positionSizer = new PositionSizer();
@@ -132,6 +138,11 @@ async function main() {
         debug(`Burst trade skipped — blocklisted token: ${currency}`);
         return;
       }
+      // #3 Time-of-day gate applies to burst entries too
+      if (!runtimeLearning.isGoodTradingHour()) {
+        debug(`Burst trade skipped — bad trading hour (UTC ${new Date().getUTCHours()}:00)`);
+        return;
+      }
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
       const snapshot = {
         tokenCurrency: currency,
@@ -141,10 +152,12 @@ async function main() {
         buyCount5m: 0,
         sellCount5m: 0,
       } as any;
+      const burstTp = runtimeLearning.getTpTargets('burst');
       const trade = paperTrader.tryOpenBurstTrade(
         token,
         snapshot,
-        `Buy burst — pool: ${poolXRP.toFixed(0)} XRP`
+        `Buy burst — pool: ${poolXRP.toFixed(0)} XRP`,
+        burstTp
       );
       if (trade) {
         // Notify Telegram about the burst paper entry
@@ -285,7 +298,7 @@ async function main() {
     issuerReputation, multiTimeframeScorer, correlationDetector,
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
-    whaleTracker, liveValidator, socialDetector
+    whaleTracker, liveValidator, socialDetector, runtimeLearning
   );
 
   startHealthCheck(xrplClient);
@@ -475,7 +488,8 @@ function startPeriodicScan(
   tradeExecutor: TradeExecutor | null,
   whaleTracker: WhaleTracker,
   liveValidator: LiveValidator,
-  socialDetector: SocialDetector
+  socialDetector: SocialDetector,
+  runtimeLearning: RuntimeLearning
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
@@ -758,12 +772,16 @@ function startPeriodicScan(
             // Paper trade entry - require higher consensus
             // tradeLocks prevents parallel batch workers opening duplicate positions
             const tradeKey = `${token.currency}:${token.issuer}`;
+            // #3 Time-of-day gate: skip entries during learned losing hours
+            const goodHour = runtimeLearning.isGoodTradingHour();
             if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
-                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey)) {
+                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && goodHour) {
               tradeLocks.add(tradeKey);
+              const scoredTp = runtimeLearning.getTpTargets('scored');
               const trade = paperTrader.tryOpenTrade(
                 token, snapshot, score.totalScore,
-                `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`
+                `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`,
+                scoredTp
               );
               tradeLocks.delete(tradeKey);
 
@@ -1037,6 +1055,11 @@ function startPeriodicScan(
       const configPath = process.env.CONFIG_PATH || './bot-config.json';
       tradeAnalyzer.applyRecommendations(recs, configPath);
     }
+
+    // Hot-reload learned weights + runtime params immediately after analysis
+    tokenScorer.loadLearnedWeights();
+    runtimeLearning.reload();
+    info('TradeAnalyzer: scorer weights and runtime learning reloaded');
   };
 
   setInterval(runAnalysis, 6 * 60 * 60 * 1000); // every 6 hours

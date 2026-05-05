@@ -3,19 +3,61 @@
  * Scores tokens from 0-100 based on multiple factors
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { TrackedToken, AMMPool, MarketSnapshot, RiskFlags, TokenScore } from '../types';
 import { BotConfig } from '../config';
-import { debug } from '../utils/logger';
+import { debug, info } from '../utils/logger';
 import { WhaleTracker } from './whaleTracker';
 import { SocialDetector } from './socialDetector';
+import { ScoreWeights } from '../analysis/tradeAnalyzer';
+
+const RECOMMENDATIONS_PATH = path.join(process.cwd(), 'state', 'recommendations.json');
+
+// Default hardcoded weights — overridden by learned weights once enough trades exist
+const DEFAULT_WEIGHTS: ScoreWeights = {
+  buyPressureScore:  28,
+  holderGrowthScore: 19,
+  volumeAccelScore:  19,
+  liquidityScore:    11,
+  devSafetyScore:    10,
+  spreadScore:        5,  // maps to tokenAge in scorer
+};
 
 export class TokenScorer {
   private config: BotConfig;
   private whaleTracker: WhaleTracker | null = null;
   private socialDetector: SocialDetector | null = null;
+  private learnedWeights: ScoreWeights = { ...DEFAULT_WEIGHTS };
+  private weightsLoadedAt = 0;
+  private readonly WEIGHTS_RELOAD_MS = 15 * 60 * 1000; // re-check file every 15 min
 
   constructor(config: BotConfig) {
     this.config = config;
+    this.loadLearnedWeights();
+  }
+
+  /**
+   * Load learned score weights from the TradeAnalyzer recommendations file.
+   * Falls back to hardcoded defaults if file doesn’t exist or isn’t ready.
+   */
+  loadLearnedWeights(): void {
+    try {
+      if (!fs.existsSync(RECOMMENDATIONS_PATH)) return;
+      const raw = fs.readFileSync(RECOMMENDATIONS_PATH, 'utf8');
+      const recs = JSON.parse(raw);
+      if (!recs?.scoreWeights) return;
+      const w: ScoreWeights = recs.scoreWeights;
+      // Only apply if all fields are present and plausible
+      const vals = Object.values(w) as number[];
+      if (vals.length < 5 || vals.some(v => typeof v !== 'number' || v < 0 || v > 100)) return;
+      this.learnedWeights = w;
+      this.weightsLoadedAt = Date.now();
+      info(`[TokenScorer] Loaded learned weights from ${recs.tradesAnalyzed} trades (win rate: ${recs.overallWinRate}%)`);
+      info(`[TokenScorer] Weights: buyPressure=${w.buyPressureScore} holderGrowth=${w.holderGrowthScore} momentum=${w.volumeAccelScore} liquidity=${w.liquidityScore} devSafety=${w.devSafetyScore}`);
+    } catch (err) {
+      debug(`[TokenScorer] Could not load learned weights: ${err}`);
+    }
   }
 
   /**
@@ -63,6 +105,27 @@ export class TokenScorer {
     const clampedWhale  = Math.max(0, Math.min(100, whaleScore));
     const clampedSocial = Math.max(0, Math.min(100, socialScore));
 
+    // Hot-reload learned weights every 15 min so the scorer picks up
+    // new TradeAnalyzer recommendations without a restart.
+    if (Date.now() - this.weightsLoadedAt > this.WEIGHTS_RELOAD_MS) {
+      this.loadLearnedWeights();
+    }
+
+    // Normalise learned weights to fractions that sum to ~1.0
+    // The analyzer outputs raw importance values (e.g. 28, 19, 11...).
+    // We reserve 0.10 for whale + social, leaving 0.90 for the core 6 components.
+    const w = this.learnedWeights;
+    const wTotal = w.buyPressureScore + w.holderGrowthScore + w.volumeAccelScore +
+                   w.liquidityScore + w.devSafetyScore + w.spreadScore;
+    const norm = (v: number) => wTotal > 0 ? (v / wTotal) * 0.90 : 0.15;
+
+    const wBuy  = norm(w.buyPressureScore);
+    const wNew  = norm(w.holderGrowthScore);
+    const wMom  = norm(w.volumeAccelScore);
+    const wLiq  = norm(w.liquidityScore);
+    const wDev  = norm(w.devSafetyScore);
+    const wAge  = norm(w.spreadScore); // spreadScore slot reused for tokenAge
+
     // Adaptive weighting: if buy pressure has live data, weight it heavily.
     // If no live data yet (window empty), shift weight to momentum + liquidity
     // so tokens aren't permanently zeroed waiting for tracker data.
@@ -71,24 +134,23 @@ export class TokenScorer {
 
     let totalScore: number;
     if (hasBuyData || hasNewWalletData) {
-      // Full live-data mode — weights reduced slightly to accommodate whale + social
+      // Full live-data mode — use learned weights
       totalScore =
-        buyPressureScore  * 0.28 +
-        newWalletScore    * 0.19 +
-        momentumScore     * 0.19 +
-        liquidityScore    * 0.11 +
-        devSafetyScore    * 0.10 +
-        tokenAgeScore     * 0.05 +
+        buyPressureScore  * wBuy +
+        newWalletScore    * wNew +
+        momentumScore     * wMom +
+        liquidityScore    * wLiq +
+        devSafetyScore    * wDev +
+        tokenAgeScore     * wAge +
         clampedWhale      * 0.05 +
-        clampedSocial     * 0.08 * (clampedSocial / 100); // social weighted by own confidence
+        clampedSocial     * 0.05 * (clampedSocial / 100);
     } else {
-      // No live pressure data yet — weight on momentum + liquidity + age
+      // No live pressure data yet — shift weight to momentum + liquidity + age
       totalScore =
-        momentumScore     * 0.33 +
-        liquidityScore    * 0.28 +
-        devSafetyScore    * 0.14 +
-        tokenAgeScore     * 0.10 +
-        newWalletScore    * 0.10 +
+        momentumScore     * (wMom  + wBuy * 0.5) +
+        liquidityScore    * (wLiq  + wNew * 0.5) +
+        devSafetyScore    * wDev +
+        tokenAgeScore     * (wAge  + 0.05) +
         clampedSocial     * 0.05;
     }
 

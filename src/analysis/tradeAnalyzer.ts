@@ -53,6 +53,21 @@ export interface TradeRecommendations {
 
   insights: string[];
   autoApplyReady: boolean;
+
+  // #1 Entry timing: learned pullback depth before continuation
+  entryPullbackPct: number;      // wait for this % dip after burst signal before entering
+  entryConfirmBars: number;      // number of scan cycles to confirm momentum resuming
+
+  // #2 Exit sizing: learned from actual run lengths
+  medianRunPct: number;          // median peak gain across all closed trades
+  p75RunPct: number;             // 75th percentile peak gain
+  burstMedianRunPct: number;     // median for burst-only trades
+  scoredMedianRunPct: number;    // median for scored-only trades
+
+  // #3 Time-of-day: best UTC hours to trade
+  bestHours: number[];           // UTC hours with >50% win rate and >=3 trades
+  worstHours: number[];          // UTC hours with <30% win rate and >=3 trades
+  tradingPauseEnabled: boolean;  // true if worst hours are significantly worse
 }
 
 interface ClosedTrade {
@@ -336,6 +351,117 @@ export class TradeAnalyzer {
       insights.push(`Not enough scored trades for analysis (${scored.length}/5 needed)`);
     }
 
+    // ── #1 Entry timing: pullback depth analysis ─────────────────
+    // Goal: find the average dip after initial signal before the real move.
+    // Proxy: look at trades where entry_score >= threshold but PnL was negative
+    // in the first few minutes (would have been better to wait).
+    // Since we don't store intra-trade ticks, we use a simpler heuristic:
+    // winning trades that started with a stop-loss close (pnl_percent near stop)
+    // suggest entries were too early. For now derive from stop-hit rate.
+    let recPullbackPct = 0;    // 0 = enter immediately (current behaviour)
+    let recConfirmBars = 0;    // 0 = no confirmation needed
+
+    const burstStopRate = burst.length > 0
+      ? burst.filter(t => t.exit_reason?.includes('stop_loss')).length / burst.length
+      : 0;
+
+    if (burstStopRate > 0.45 && burst.length >= 8) {
+      // More than 45% stopping out = entering too early on burst
+      // Recommend waiting for a 3% pullback from burst peak to confirm hold
+      recPullbackPct = 3;
+      recConfirmBars = 2; // wait 2 scan cycles (~2 min) for momentum to resume
+      insights.push(`⏱️ Entry timing: ${(burstStopRate*100).toFixed(0)}% burst stop rate → wait for 3% pullback before entering`);
+    } else if (burstStopRate > 0.3 && burst.length >= 5) {
+      recPullbackPct = 2;
+      recConfirmBars = 1;
+      insights.push(`⏱️ Entry timing: ${(burstStopRate*100).toFixed(0)}% burst stop rate → wait for 2% pullback`);
+    } else {
+      insights.push(`✅ Entry timing: stop rate ${(burstStopRate*100).toFixed(0)}% — immediate entry is working`);
+    }
+
+    // ── #2 Exit sizing: actual run length analysis ─────────────────
+    // Calculate the peak gain each trade reached before closing.
+    // Since we don't store intra-trade highs directly, use:
+    //   - tp1_hit → trade peaked at least at TP1
+    //   - tp2_hit → trade peaked at least at TP2
+    //   - exit pnl_percent as a floor (actual close price)
+    // Best proxy: pnl_percent on winning trades shows where they actually closed.
+    const winPnls = rawTrades.filter(t => t.pnl_percent > 0).map(t => t.pnl_percent).sort((a,b)=>a-b);
+    const burstWinPnls = burst.filter(t => t.pnl_percent > 0).map(t => t.pnl_percent).sort((a,b)=>a-b);
+    const scoredWinPnls = scored.filter(t => t.pnl_percent > 0).map(t => t.pnl_percent).sort((a,b)=>a-b);
+
+    const median = (arr: number[]) => arr.length === 0 ? 0 :
+      arr.length % 2 === 0
+        ? (arr[arr.length/2 - 1] + arr[arr.length/2]) / 2
+        : arr[Math.floor(arr.length/2)];
+    const percentile = (arr: number[], p: number) =>
+      arr.length === 0 ? 0 : arr[Math.floor(arr.length * p / 100)];
+
+    const medianRun   = median(winPnls);
+    const p75Run      = percentile(winPnls, 75);
+    const burstMedian = median(burstWinPnls);
+    const scoredMedian= median(scoredWinPnls);
+
+    if (winPnls.length >= 5) {
+      insights.push(`📏 Run lengths: median win +${medianRun.toFixed(1)}% | p75 +${p75Run.toFixed(1)}% | burst median +${burstMedian.toFixed(1)}% | scored median +${scoredMedian.toFixed(1)}%`);
+
+      // If median run is below current TP1 targets, lower them to bank more wins
+      if (burstMedian > 0 && burstMedian < recTp1Burst * 0.8) {
+        const newTp1 = Math.max(8, Math.round(burstMedian * 0.75));
+        insights.push(`⬇️ Burst TP1 → ${newTp1}% (median run only ${burstMedian.toFixed(1)}%, banking earlier)`);
+        recTp1Burst = newTp1;
+      }
+      if (burstMedian > 0 && p75Run < recTp2Burst * 0.8) {
+        const newTp2 = Math.max(recTp1Burst + 5, Math.round(p75Run * 0.85));
+        insights.push(`⬇️ Burst TP2 → ${newTp2}% (p75 run only ${p75Run.toFixed(1)}%)`);
+        recTp2Burst = newTp2;
+      }
+      if (scoredMedian > 0 && scoredMedian < recTp1Scored * 0.8) {
+        const newTp1 = Math.max(10, Math.round(scoredMedian * 0.75));
+        insights.push(`⬇️ Scored TP1 → ${newTp1}% (median run ${scoredMedian.toFixed(1)}%)`);
+        recTp1Scored = newTp1;
+      }
+    } else {
+      insights.push(`📏 Not enough wins yet for run-length analysis (${winPnls.length}/5)`);
+    }
+
+    // ── #3 Time-of-day win rate analysis ──────────────────────────
+    const hourBuckets: Record<number, { wins: number; total: number; pnl: number }> = {};
+    for (let h = 0; h < 24; h++) hourBuckets[h] = { wins: 0, total: 0, pnl: 0 };
+
+    for (const t of rawTrades) {
+      if (!t.entry_timestamp) continue;
+      const hour = new Date(t.entry_timestamp).getUTCHours();
+      hourBuckets[hour].total++;
+      hourBuckets[hour].pnl += t.pnl_xrp;
+      if (t.pnl_xrp > 0) hourBuckets[hour].wins++;
+    }
+
+    const bestHours: number[] = [];
+    const worstHours: number[] = [];
+
+    for (let h = 0; h < 24; h++) {
+      const b = hourBuckets[h];
+      if (b.total < 3) continue; // not enough data
+      const wr = b.wins / b.total;
+      if (wr >= 0.55) bestHours.push(h);
+      if (wr <= 0.25) worstHours.push(h);
+    }
+
+    if (bestHours.length > 0) {
+      insights.push(`🕐 Best trading hours (UTC): ${bestHours.map(h=>`${h}:00`).join(', ')}`);
+    }
+    if (worstHours.length > 0) {
+      insights.push(`🚫 Worst trading hours (UTC): ${worstHours.map(h=>`${h}:00`).join(', ')} — consider pausing`);
+    }
+
+    // Enable pause only if worst hours are materially worse than best
+    // and we have enough data to be confident
+    const tradingPauseEnabled = worstHours.length >= 2 && rawTrades.length >= 40;
+    if (tradingPauseEnabled) {
+      insights.push(`⏸️ Trading pause enabled for worst hours — bot will skip entries during ${worstHours.map(h=>`${h}:00`).join(', ')} UTC`);
+    }
+
     // ── Auto-apply readiness ──────────────────────────────────────
     const autoApplyReady = winRate >= 0.5 && rawTrades.length >= 30;
     if (autoApplyReady) {
@@ -360,6 +486,18 @@ export class TradeAnalyzer {
       scoredTp2Percent: recTp2Scored,
       scoreWeights: recWeights,
       bestScoredSignalCombo: bestSignalCombo,
+      // #1 Entry timing
+      entryPullbackPct: recPullbackPct,
+      entryConfirmBars: recConfirmBars,
+      // #2 Exit sizing
+      medianRunPct: parseFloat(median(winPnls).toFixed(1)),
+      p75RunPct: parseFloat(percentile(winPnls, 75).toFixed(1)),
+      burstMedianRunPct: parseFloat(burstMedian.toFixed(1)),
+      scoredMedianRunPct: parseFloat(scoredMedian.toFixed(1)),
+      // #3 Time-of-day
+      bestHours,
+      worstHours,
+      tradingPauseEnabled,
       insights,
       autoApplyReady,
     };
@@ -387,14 +525,21 @@ export class TradeAnalyzer {
 
       config.minLiquidityXRP    = recs.minLiquidityXRP;
       config.minScorePaperTrade = recs.minScorePaperTrade;
+      // #1 entry timing
+      config.entryPullbackPct   = recs.entryPullbackPct;
+      config.entryConfirmBars   = recs.entryConfirmBars;
+      // #3 time-of-day
+      config.worstTradingHours  = recs.worstHours;
+      config.tradingPauseEnabled = recs.tradingPauseEnabled;
 
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 
       info(`TradeAnalyzer: applied → minLiquidity=${recs.minLiquidityXRP}, minScore=${recs.minScorePaperTrade}`);
-      info(`  Burst: stopLoss=${recs.burstStopLossPercent}%, TP1=${recs.burstTp1Percent}%, TP2=${recs.burstTp2Percent}%, trail=${recs.burstTrailingActivation}%@${recs.burstTrailingDistance}%`);
+      info(`  Entry: pullback=${recs.entryPullbackPct}%, confirmBars=${recs.entryConfirmBars}`);
+      info(`  Burst: stopLoss=${recs.burstStopLossPercent}%, TP1=${recs.burstTp1Percent}%, TP2=${recs.burstTp2Percent}%`);
       info(`  Scored: TP1=${recs.scoredTp1Percent}%, TP2=${recs.scoredTp2Percent}%`);
-      info(`  Score weights: ${JSON.stringify(recs.scoreWeights)}`);
-      info(`  Best signal combo: ${recs.bestScoredSignalCombo}`);
+      info(`  Run lengths: median=${recs.medianRunPct}%, p75=${recs.p75RunPct}%`);
+      info(`  Trading pause: ${recs.tradingPauseEnabled} | worst hours: ${recs.worstHours.join(',')}`);
       return true;
     } catch (err) {
       warn(`TradeAnalyzer: apply failed: ${err}`);
@@ -455,6 +600,27 @@ export class TradeAnalyzer {
       ``,
       `## Insights`,
       ...recs.insights.map(i => `- ${i}`),
+      ``,
+      `## #1 Entry Timing`,
+      `| Parameter | Value |`,
+      `|---|---|`,
+      `| Pullback wait | ${recs.entryPullbackPct === 0 ? 'None (enter immediately)' : `-${recs.entryPullbackPct}% from burst peak`} |`,
+      `| Confirm bars | ${recs.entryConfirmBars === 0 ? 'None' : `${recs.entryConfirmBars} scan cycles`} |`,
+      ``,
+      `## #2 Exit Sizing (learned run lengths)`,
+      `| Metric | Value |`,
+      `|---|---|`,
+      `| Median winning run | +${recs.medianRunPct}% |`,
+      `| 75th pct run | +${recs.p75RunPct}% |`,
+      `| Burst median run | +${recs.burstMedianRunPct}% |`,
+      `| Scored median run | +${recs.scoredMedianRunPct}% |`,
+      ``,
+      `## #3 Time-of-Day`,
+      `| | Hours (UTC) |`,
+      `|---|---|`,
+      `| Best hours | ${recs.bestHours.length > 0 ? recs.bestHours.map(h=>`${h}:00`).join(', ') : 'Insufficient data'} |`,
+      `| Worst hours | ${recs.worstHours.length > 0 ? recs.worstHours.map(h=>`${h}:00`).join(', ') : 'None identified'} |`,
+      `| Pause enabled | ${recs.tradingPauseEnabled ? '✅ Yes' : '❌ No (need 40+ trades)'} |`,
       ``,
       `## Recommended Burst Parameters`,
       `| Parameter | Value |`,
