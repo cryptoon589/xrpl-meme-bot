@@ -24,7 +24,6 @@ import { HolderCounter } from './market/holderCounter';
 import { RiskFilter } from './risk/riskFilters';
 import { TokenScorer } from './scoring/tokenScorer';
 import { IssuerReputation } from './scoring/issuerReputation';
-import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { PaperTrader } from './paper/paperTrader';
 import { TelegramAlerter } from './telegram/alerts';
 import { Database } from './db/database';
@@ -62,11 +61,7 @@ let droppedTxCount = 0;
 let lastDropLogTime = 0;
 let txProcessedCount = 0;      // transactions actually queued (passed filter)
 let txIgnoredCount = 0;        // transactions filtered at intake (XRPLClient)
-let newTokenDetections = 0;   // new trustline tokens discovered
 let hourlySummaryTimer: NodeJS.Timeout | null = null;
-let tokensScored = 0;          // number of unique tokens scored this hour
-let tokensScoredSet = new Set<string>(); // deduplicate across scan cycles
-let topTokens: { currency: string; issuer: string; score: number; liquidity: number; change1h: number | null }[] = [];
 
 
 async function main() {
@@ -118,7 +113,6 @@ async function main() {
 
 
   const issuerReputation = new IssuerReputation();
-  const multiTimeframeScorer = new MultiTimeframeScorer(config);
   const positionSizer = new PositionSizer();
   const correlationDetector = new CorrelationDetector();
   const paperTrader = config.mode === 'PAPER' ? new PaperTrader(config, db) : null;
@@ -235,7 +229,6 @@ async function main() {
     // Token discovery
     const discovered = activeDiscovery.processLiveTx(tx);
     if (discovered) {
-      newTokenDetections++;
       const tracked = activeDiscovery.toTrackedToken(discovered);
       tokenDiscovery.addTrackedToken(tracked);
     }
@@ -307,7 +300,7 @@ async function main() {
   isRunning = true;
   startPeriodicScan(
     tokenDiscovery, ammScanner, marketData, volumeTracker, holderCounter,
-    issuerReputation, multiTimeframeScorer, correlationDetector,
+    issuerReputation, correlationDetector,
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
     whaleTracker, liveValidator, socialDetector, runtimeLearning
@@ -487,7 +480,6 @@ function startPeriodicScan(
   volumeTracker: VolumeTracker,
   holderCounter: HolderCounter,
   issuerReputation: IssuerReputation,
-  multiTimeframeScorer: MultiTimeframeScorer,
   correlationDetector: CorrelationDetector,
   riskFilter: RiskFilter,
   tokenScorer: TokenScorer,
@@ -620,10 +612,7 @@ function startPeriodicScan(
               );
               const score = { ...baseScore, totalScore: adjustedTotalScore };
 
-              // Calculate multi-timeframe scores
-              const tfScores = multiTimeframeScorer.calculate(snapshot, score.totalScore);
-
-              return { token, snapshot, risks, score, tfScores };
+              return { token, snapshot, risks, score };
             } catch (err) {
               warn(`Error processing ${token.currency}:${token.issuer}: ${err}`);
               return { token, error: err };
@@ -654,29 +643,7 @@ function startPeriodicScan(
             db.saveRiskFlags(token.currency, token.issuer, risks);
             db.saveScore(score);
             totalProcessed++;
-            // Count unique tokens scored this hour (deduplicated across scan cycles)
-            const scoreKey = `${token.currency}:${token.issuer}`;
-            if (!tokensScoredSet.has(scoreKey)) {
-              tokensScoredSet.add(scoreKey);
-              tokensScored++;
-            }
-
-              // Track top tokens for leaderboard — keep only the best score per token
-              if (snapshot && score) {
-                const existingIdx = topTokens.findIndex(
-                  t => t.currency === token.currency && t.issuer === token.issuer
-                );
-                if (existingIdx >= 0) {
-                  // Update if this scan produced a better score
-                  if (score.totalScore > topTokens[existingIdx].score) {
-                    topTokens[existingIdx] = { currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 };
-                  }
-                } else {
-                  topTokens.push({ currency: token.currency, issuer: token.issuer, score: score.totalScore, liquidity: snapshot.liquidityXRP || 0, change1h: snapshot.priceChange1h || 0 });
-                }
-              }
-
-            // Fix 4: Multi-signal gate — require 3+ signals firing together
+            // Multi-signal gate: require 3+ signals firing together
             const pressure = buyPressureTracker.getSnapshot(token.rawCurrency || token.currency, token.issuer);
             // Has the tracker accumulated data yet? (at least 1 event observed)
             const hasLiveData = pressure.buyCount + pressure.sellCount > 0;
@@ -750,35 +717,16 @@ function startPeriodicScan(
             const lastAlertTime = db.getLastAlertTime(token.currency, token.issuer);
             const alertCooldown = Date.now() - lastAlertTime > 30 * 60 * 1000;
 
-            if (shouldAlert && alertCooldown && riskFilter.isSafe(risks)) {
+            // Auto-execute live trade if tradeExecutor is configured (live mode only)
+            if (shouldAlert && alertCooldown && riskFilter.isSafe(risks) && tradeExecutor && snapshot.priceXRP) {
               db.setLastAlertTime(token.currency, token.issuer, Date.now());
-
-              // Send Telegram signal alert
-              setTimeout(() => sendHighScoreAlert(
-                telegramAlerter, db, token, snapshot, risks, score, result.value.tfScores, config
-              ), 0);
+              const tradeSize = Math.min(config.maxTradeXRP, config.startingBankrollXRP * 0.1);
+              tradeExecutor.openTrade(token.currency, token.issuer, tradeSize, snapshot.priceXRP, score.totalScore)
+                .then(r => r.success
+                  ? info(`✅ Auto-trade: ${token.currency} | ${tradeSize} XRP | tx: ${r.txHash}`)
+                  : warn(`⚠️ Auto-trade skipped: ${token.currency} | ${r.error}`))
+                .catch(err => warn(`Auto-trade error: ${err}`));
               totalAlerts++;
-
-              // Auto-execute trade if executor is configured
-              if (tradeExecutor && snapshot.priceXRP) {
-                const tradeSize = Math.min(
-                  config.maxTradeXRP,
-                  config.startingBankrollXRP * 0.1   // max 10% of bankroll per trade
-                );
-                tradeExecutor.openTrade(
-                  token.currency,
-                  token.issuer,
-                  tradeSize,
-                  snapshot.priceXRP,
-                  score.totalScore
-                ).then(result => {
-                  if (result.success) {
-                    info(`✅ Auto-trade opened: ${token.currency} | ${tradeSize} XRP | tx: ${result.txHash}`);
-                  } else {
-                    warn(`⚠️ Auto-trade skipped: ${token.currency} | ${result.error}`);
-                  }
-                }).catch(err => warn(`Auto-trade error: ${err}`));
-              }
             }
 
             // Paper trade entry - require higher consensus
@@ -929,11 +877,6 @@ function startPeriodicScan(
       return raw.slice(0, 8) + '…';
     };
 
-    topTokens = [];
-    newTokenDetections = 0;
-    tokensScored = 0;
-    tokensScoredSet.clear();
-
     if (!paperTrader) return;
 
     const state         = paperTrader.getState();
@@ -1043,53 +986,7 @@ function startPeriodicScan(
   setTimeout(runAnalysis, 30 * 60 * 1000);
 }
 
-async function sendHighScoreAlert(
-  alerter: TelegramAlerter,
-  db: Database,
-  token: any,
-  snapshot: any,
-  risks: any,
-  score: any,
-  tfScores: any,
-  config: any
-): Promise<void> {
-  // Build fired-signals list for the alert
-  const newWallets = (snapshot as any).newWalletBuys || 0;
-  const newWalletPct = (snapshot as any).newWalletPercent || 0;
-  const buySellRatio = (snapshot as any).buySellRatio || 0;
-  const lastActivityMs = (snapshot as any).lastActivityMs || Infinity;
 
-  const signalLines: string[] = [];
-  if (score.totalScore >= config.minScoreAlert)   signalLines.push('📊 High score');
-  if (buySellRatio >= 0.65)                       signalLines.push('💚 Buy dominant (' + (buySellRatio * 100).toFixed(0) + '% buys)');
-  if ((snapshot.priceChange5m || 0) >= 8)         signalLines.push('📈 Momentum +' + (snapshot.priceChange5m || 0).toFixed(1) + '% (5m)');
-  if (newWallets >= 2)                            signalLines.push('🆕 ' + newWallets + ' new wallets buying (' + newWalletPct.toFixed(0) + '% of buyers)');
-  if (lastActivityMs < 60000)                     signalLines.push('⚡ Active right now');
-
-  const buyPressureStr = `${snapshot.buyCount5m || 0} buys / ${snapshot.sellCount5m || 0} sells` +
-    (newWallets > 0 ? ` | ${newWallets} new wallets` : '');
-
-  await sendAlert(alerter, db, {
-    type: 'high_score',
-    tokenCurrency: token.currency,
-    tokenIssuer: token.issuer,
-    score: score.totalScore,
-    liquidity: snapshot.liquidityXRP,
-    price: snapshot.priceXRP,
-    change5m: snapshot.priceChange5m,
-    change15m: snapshot.priceChange15m,
-    change1h: snapshot.priceChange1h,
-    holders: snapshot.holderEstimate,
-    buyPressure: buyPressureStr,
-    riskFlags: risks.flags,
-    action: signalLines.join('\n'),
-    explorerLinks: {
-      token: `https://livenet.xrpl.org/accounts/${token.issuer}`,
-      issuer: `https://livenet.xrpl.org/accounts/${token.issuer}`,
-    },
-    message: `Score: ${score.totalScore}/100`,
-  }, config);
-}
 
 /**
  * Health check interval

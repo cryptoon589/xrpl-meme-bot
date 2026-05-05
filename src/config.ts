@@ -22,7 +22,7 @@ export function loadConfig(): BotConfig {
     xrplWsUrl: process.env.XRPL_WS_URL || 'wss://rpc.xrplclaw.com/ws',
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
-    mode: mode === 'AUTO' ? 'WATCH' : mode, // AUTO is stub-only, fallback to WATCH
+    mode: mode === 'AUTO' ? 'WATCH' : mode,
     minLiquidityXRP: parseInt(process.env.MIN_LIQUIDITY_XRP || '2000', 10),
     minScoreAlert: parseInt(process.env.MIN_SCORE_ALERT || '75', 10),
     minScorePaperTrade: parseInt(process.env.MIN_SCORE_PAPER_TRADE || '80', 10),
@@ -32,23 +32,11 @@ export function loadConfig(): BotConfig {
     maxOpenTrades: parseInt(process.env.MAX_OPEN_TRADES || '5', 10),
     maxDailyLossXRP: parseInt(process.env.MAX_DAILY_LOSS_XRP || '30', 10),
     liveTrading: process.env.LIVE_TRADING === 'true',
-    weights: {
-      liquidity: parseInt(process.env.WEIGHT_LIQUIDITY || '20', 10),
-      holderGrowth: parseInt(process.env.WEIGHT_HOLDER_GROWTH || '15', 10),
-      buyPressure: parseInt(process.env.WEIGHT_BUY_PRESSURE || '20', 10),
-      volumeAccel: parseInt(process.env.WEIGHT_VOLUME_ACCEL || '15', 10),
-      devSafety: parseInt(process.env.WEIGHT_DEV_SAFETY || '15', 10),
-      whitelistBoost: parseInt(process.env.WEIGHT_WHITELIST_BOOST || '10', 10),
-      spread: parseInt(process.env.WEIGHT_SPREAD || '5', 10),
-    },
+    // weights field kept for type compatibility but scoring uses self-learned
+    // weights from state/recommendations.json — these env vars are ignored.
+    weights: { liquidity: 0, holderGrowth: 0, buyPressure: 0, volumeAccel: 0, devSafety: 0, whitelistBoost: 0, spread: 0 },
     logLevel: process.env.LOG_LEVEL || 'info',
   };
-
-  // FIX #17: Validate configuration values
-  const weightSum = Object.values(config.weights).reduce((sum, w) => sum + w, 0);
-  if (weightSum !== 100) {
-    warn(`WARNING: Scoring weights sum to ${weightSum}, not 100. Normalizing may produce unexpected scores.`);
-  }
 
   if (config.minLiquidityXRP <= 0) {
     warn(`WARNING: MIN_LIQUIDITY_XRP is ${config.minLiquidityXRP}, setting to default 2000`);
@@ -79,18 +67,14 @@ export function loadConfig(): BotConfig {
     warn('WARNING: TELEGRAM_CHAT_ID should be a numeric ID. Alerts may fail.');
   }
 
-  // Log current mode
-  console.log(`\n=== XRPL Meme Bot Configuration ===`);
-  console.log(`Mode: ${config.mode}`);
-  console.log(`XRPL WS: ${config.xrplWsUrl}`);
-  console.log(`Min Liquidity: ${config.minLiquidityXRP} XRP`);
-  console.log(`Alert Score Threshold: ${config.minScoreAlert}`);
-  console.log(`Paper Trade Score Threshold: ${config.minScorePaperTrade}`);
-  console.log(`Starting Bankroll: ${config.startingBankrollXRP} XRP`);
-  console.log(`Max Trade Size: ${config.maxTradeXRP} XRP`);
-  console.log(`Max Open Trades: ${config.maxOpenTrades}`);
-  console.log(`Max Daily Loss: ${config.maxDailyLossXRP} XRP`);
-  console.log(`==================================\n`);
+  console.log(`\n=== XRPL Meme Bot ===`);
+  console.log(`Mode:         ${config.mode}`);
+  console.log(`Liquidity:    ${config.minLiquidityXRP} XRP min`);
+  console.log(`Score gates:  alert=${config.minScoreAlert} trade=${config.minScorePaperTrade}`);
+  console.log(`Sizing:       ${config.minTradeXRP}–${config.maxTradeXRP} XRP | max ${config.maxOpenTrades} open | stop ${config.maxDailyLossXRP} XRP/day`);
+  console.log(`Bankroll:     ${config.startingBankrollXRP} XRP`);
+  console.log(`Scoring:      self-learned weights (state/recommendations.json)`);
+  console.log(`=====================\n`);
 
   return config;
 }
