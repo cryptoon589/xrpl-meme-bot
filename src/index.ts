@@ -1094,7 +1094,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Catch unhandled promise rejections — mainly xrpl.js DisconnectedError bubbling
+// out of event emitters. Log and continue; the reconnect handler will recover.
+process.on('unhandledRejection', (reason: any) => {
+  const msg = reason?.message || String(reason);
+  // DisconnectedError is expected during WS drops — reconnect handles it
+  if (msg.includes('DisconnectedError') || msg.includes('websocket was closed') || msg.includes('threshold exceeded')) {
+    warn(`WS disconnect (handled): ${msg}`);
+  } else {
+    error(`Unhandled rejection: ${msg}`);
+  }
+});
+
+process.on('uncaughtException', (err: Error) => {
+  const msg = err?.message || String(err);
+  if (msg.includes('DisconnectedError') || msg.includes('websocket was closed') || msg.includes('threshold exceeded')) {
+    warn(`WS disconnect (uncaught, handled): ${msg}`);
+  } else {
+    error(`Uncaught exception: ${msg}`);
+    process.exit(1); // only exit on truly unexpected errors
+  }
+});
+
 main().catch((err) => {
-  error(`Fatal error: ${err}`);
+  error(`Fatal startup error: ${err}`);
   process.exit(1);
 });
