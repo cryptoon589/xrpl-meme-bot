@@ -9,8 +9,8 @@ export class XRPLClient {
   private client: Client | null = null;
   private wsUrl: string;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
-  private reconnectDelay = 5000; // 5 seconds
+  private maxReconnectAttempts = Infinity; // never give up — PM2 handles fatal crashes
+  private reconnectDelay = 5000; // 5 seconds base, doubles each attempt up to 60s
   private isConnected = false;
   private rawTxCount = 0;   // all raw txs from WS
   private filteredTxCount = 0; // txs that passed isRelevant filter
@@ -21,13 +21,17 @@ export class XRPLClient {
     this.wsUrl = wsUrl;
   }
 
+
   /**
    * Connect to XRPL WebSocket
    */
   async connect(): Promise<Client> {
     try {
       info(`Connecting to XRPL: ${this.wsUrl}`);
-      this.client = new Client(this.wsUrl);
+      this.client = new Client(this.wsUrl, {
+        timeout: 20000,          // 20s request timeout
+        connectionTimeout: 10000, // 10s to establish WS
+      });
       await this.client.connect();
       this.isConnected = true;
       this.reconnectAttempts = 0;
@@ -319,39 +323,33 @@ export class XRPLClient {
     this.isConnected = false;
     warn('XRPL connection lost');
 
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
+    this.reconnectAttempts++;
 
-      // Exponential backoff: 5s, 10s, 20s, 40s, capped at 60s
-      const baseDelay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 60000);
-      // Add jitter (±20%) to prevent thundering herd
-      const jitter = baseDelay * 0.2 * (Math.random() - 0.5) * 2;
-      const delay = baseDelay + jitter;
+    // Exponential backoff: 5s, 10s, 20s, 40s, capped at 60s then stays flat
+    const backoff = Math.min(this.reconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 10)), 60000);
+    const jitter  = backoff * 0.2 * (Math.random() - 0.5) * 2;
+    const delay   = backoff + jitter;
 
-      warn(`Reconnecting in ${Math.round(delay)}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
+    warn(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`);
 
-      setTimeout(async () => {
-        try {
-          await this.connect();
-          info('Reconnected successfully');
-          this.reconnectAttempts = 0; // Reset on success
+    setTimeout(async () => {
+      try {
+        await this.connect();
+        info('Reconnected successfully');
+        this.reconnectAttempts = 0;
 
-          // Re-subscribe if handlers exist
-          if (this.ledgerHandler) {
-            await this.subscribeLedger(this.ledgerHandler);
-          }
-          if (this.txHandler) {
-            await this.subscribeTransactions(this.txHandler);
-          }
-        } catch (err) {
-          error(`Reconnection failed: ${err}`);
-          this.handleDisconnect();
+        // Re-subscribe if handlers exist
+        if (this.ledgerHandler) {
+          await this.subscribeLedger(this.ledgerHandler);
         }
-      }, delay);
-    } else {
-      error('Max reconnection attempts reached. Bot will stop.');
-      process.exit(1);
-    }
+        if (this.txHandler) {
+          await this.subscribeTransactions(this.txHandler);
+        }
+      } catch (err) {
+        error(`Reconnection attempt ${this.reconnectAttempts} failed: ${err}`);
+        this.handleDisconnect(); // keep retrying
+      }
+    }, delay);
   }
 
   /**
