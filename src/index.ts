@@ -183,7 +183,7 @@ async function main() {
     }
     // Also force-close any position open for more than 2 hours with no recent
     // scan activity (catches tokens pruned before orphan checker was added)
-    const openPositions = paperTrader.getOpenPositions();
+    const openPositions = paperTrader.getOpenPositionsSummary();
     for (const pos of openPositions) {
       const ageMs = Date.now() - (pos.entryTimestamp || 0);
       if (ageMs > 2 * 60 * 60 * 1000) {
@@ -897,116 +897,74 @@ function startPeriodicScan(
 
   // Hourly summary + hot token leaderboard
   hourlySummaryTimer = setInterval(async () => {
-    const rawStats = xrplClientRef ? xrplClientRef.getTxStats() : { raw: 0, filtered: 0 };
-    const processed = rawStats.filtered;
-    const ignored = rawStats.raw - rawStats.filtered;
-    const total = rawStats.raw;
+    // ── Hourly open positions update ────────────────────────────────
+    // Only report on what the bot is actually trading.
+    // No trending tokens, no scanner noise — just the open positions.
 
-    // Blocklist for hourly leaderboard — known stablecoins, established XRPL ecosystem tokens
-    // These are real projects, not meme tokens. Expand as we encounter confirmed non-memes.
-    const HOURLY_BLOCKLIST = new Set([
-      // Fiat / stablecoins
-      'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
-      // L1 / ecosystem tokens
-      'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-      // Confirmed established XRPL projects (operator-verified)
-      'OCT', 'SHX', 'MXI', 'CORE',
-    ]);
-
-    // Brand-impersonation keyword filter — hex tokens that decode to real-world brand names
-    // These are scam/joke tokens, not memes (e.g. "ARK Invest XRP ETF", "Deutsche Bank")
-    const BRAND_IMPERSONATION_KEYWORDS = [
-      'invest', 'etf', 'bank', 'financial', 'finance', 'capital', 'fund', 'asset',
-      'deutsche', 'blackrock', 'vanguard', 'fidelity', 'grayscale', 'nasdaq', 'nyse',
-      'federal', 'reserve', 'treasury', 'sec ', 'cftc', 'imf', 'swift',
-      'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
-    ];
-
-    // Helper: decode hex currency codes to human-readable names
-    const decodeCurrencyName = (raw: string): string => {
-      if (raw.length !== 40) return raw;
+    const fmtP = (xrp: number | null | undefined): string => {
+      if (xrp == null || isNaN(xrp)) return 'N/A';
+      if (xrp >= 1) return xrp.toFixed(4) + ' XRP';
+      if (xrp >= 0.0001) return xrp.toFixed(6) + ' XRP';
+      return xrp.toFixed(8) + ' XRP';
+    };
+    const decodeCurrencyLocal = (raw: string): string => {
+      if (!raw || raw.length !== 40) return raw || 'UNKNOWN';
       try {
         const stripped = raw.replace(/00+$/, '');
-        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-        if (/^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0) return decoded;
+        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/ /g, '').trim();
+        if (/^[ -~]+$/.test(decoded) && decoded.length > 0) return decoded;
       } catch {}
       return raw.slice(0, 8) + '…';
     };
 
-    // Deduplicated top 5 — exclude established/stable tokens, memes only, min 1000 XRP liquidity
-    // Also skip non-decodable hex currencies (starts with non-printable byte = likely garbage/test token)
-    const top5 = topTokens
-      .filter(t => t.liquidity >= 1000)  // skip micro-pools in leaderboard
-      .filter(t => {
-        // Decode hex currency first so blocklist + brand checks work on the readable name
-        let name = t.currency;
-        if (t.currency.length === 40) {
-          try {
-            const stripped = t.currency.replace(/00+$/, '');
-            const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-            if (!/^[\x20-\x7E]+$/.test(decoded) || decoded.length === 0) return false; // non-printable hex
-            name = decoded;
-          } catch { return false; }
-        }
-        if (HOURLY_BLOCKLIST.has(name)) return false;
-        const lower = name.toLowerCase();
-        if (BRAND_IMPERSONATION_KEYWORDS.some(kw => lower.includes(kw))) return false;
-        return true;
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5);
     topTokens = [];
-
-    const lines = [
-      '📊 <b>HOURLY REPORT</b>',
-      '',
-      '<b>Transactions:</b>',
-      '  Processed: ' + processed + ' (queued for scoring)',
-      '  Ignored: ' + ignored + ' (spam/NFT/XRP-only)',
-      '  Total seen: ' + total,
-      '',
-      '<b>Discoveries:</b>',
-      '  New tokens: ' + newTokenDetections,
-      '  Scored: ' + tokensScored + ' tokens',
-      '',
-      '<b>🔥 TOP 5 HOT TOKENS</b>',
-    ];
-
-    if (top5.length === 0) {
-      lines.push('  No tokens scored this hour');
-    } else {
-      top5.forEach((t, i) => {
-        const emoji = t.score >= 80 ? '🔥' : t.score >= 60 ? '⚡' : '📈';
-        const change1hStr = (t.change1h != null && t.change1h !== 0)
-          ? (t.change1h >= 0 ? '+' : '') + t.change1h.toFixed(1) + '%'
-          : 'N/A';
-        const displayName = decodeCurrencyName(t.currency);
-        lines.push('  ' + emoji + ' #' + (i+1) + ' ' + displayName + ' | Score: ' + t.score + ' | Liq: ' + t.liquidity.toFixed(0) + ' XRP | 1h: ' + change1hStr);
-      });
-    }
-
-    // Paper trading summary
-    if (paperTrader) {
-      const state = paperTrader.getState();
-      const openPositions = paperTrader.getOpenPositions();
-      const pnlEmoji = state.dailyPnL >= 0 ? '✅' : '❌';
-      lines.push('');
-      lines.push('<b>💼 PAPER TRADING</b>');
-      lines.push('  Bankroll: ' + state.bankrollXRP.toFixed(2) + ' XRP');
-      lines.push('  Open positions: ' + state.openPositions);
-      lines.push('  ' + pnlEmoji + ' Daily PnL: ' + (state.dailyPnL >= 0 ? '+' : '') + state.dailyPnL.toFixed(4) + ' XRP');
-      if (openPositions.length > 0) {
-        lines.push('  Holding: ' + openPositions.map(p => p.tokenCurrency).join(', '));
-      }
-    }
-
     newTokenDetections = 0;
     tokensScored = 0;
     tokensScoredSet.clear();
 
+    if (!paperTrader) return;
+
+    const state         = paperTrader.getState();
+    const openPositions = paperTrader.getOpenPositionsSummary();
+    const now           = Date.now();
+
+    const lines = [
+      `💼 <b>OPEN POSITIONS</b>`,
+      `<i>${new Date().toUTCString()}</i>`,
+      ``,
+      `<b>Bankroll:</b>  ${state.bankrollXRP.toFixed(2)} XRP`,
+      `<b>Daily P&L:</b> ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP`,
+      `<b>Open:</b>      ${openPositions.length} position${openPositions.length !== 1 ? 's' : ''}`,
+    ];
+
+    if (openPositions.length === 0) {
+      lines.push('', '<i>No open positions.</i>');
+    } else {
+      lines.push('');
+      for (const pos of openPositions) {
+        const ticker   = decodeCurrencyLocal(pos.tokenCurrency);
+        const ageMs    = now - (pos.entryTimestamp || now);
+        const ageMin   = Math.round(ageMs / 60000);
+        const livePnl  = pos.livePnlXRP;
+        const livePct  = pos.livePnlPct;
+        const pnlStr   = livePnl != null
+          ? `${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)} XRP (${livePnl >= 0 ? '+' : ''}${(livePct ?? 0).toFixed(1)}%)`
+          : 'pending price';
+        const pnlIcon  = (livePnl ?? 0) >= 0 ? '🟢' : '🔴';
+        const typeIcon = pos.isBurst ? '🚀' : '📈';
+        lines.push(
+          `${typeIcon} <b>${ticker}</b>`,
+          `  Entry: ${fmtP(pos.entryPriceXRP)} | Size: ${pos.entryAmountXRP.toFixed(2)} XRP`,
+          `  Age: ${ageMin}m | ${pnlIcon} P&L: ${pnlStr}`,
+          `  Remaining: ${pos.remainingPosition ?? 100}% | TP1: ${pos.tp1Hit ? '✅' : '⬜'} TP2: ${pos.tp2Hit ? '✅' : '⬜'}`,
+          '',
+        );
+      }
+    }
+
     await telegramAlerter.sendAlert({
-      type: 'hourly_summary',
-      message: lines.join("\n"),
+      type: 'open_positions_update',
+      message: lines.join('\n'),
     });
   }, 3600000);
 
@@ -1018,37 +976,43 @@ function startPeriodicScan(
     const recs = tradeAnalyzer.analyze();
     if (!recs) return; // Not enough trades yet
 
-    // Format Telegram message
-    const w = recs.scoreWeights;
-    const lines: string[] = [
-      `🧠 <b>TRADE ANALYSIS REPORT</b>`,
+    // ── 6h forwardable bot log ─────────────────────────────────────
+    // Format a clean log you can paste into chat for self-learning review.
+    const state    = paperTrader ? paperTrader.getState() : null;
+    const w        = recs.scoreWeights;
+    const logLines: string[] = [
+      `🤖 <b>BOT LOG — ${new Date().toUTCString()}</b>`,
       ``,
-      `📊 <b>${recs.tradesAnalyzed} trades</b> | Win rate: <b>${recs.overallWinRate}%</b>`,
+      `<b>📊 TRADE HISTORY</b>`,
+      `Trades analyzed: ${recs.tradesAnalyzed} | Win rate: ${recs.overallWinRate}%`,
+      `Auto-apply: ${recs.autoApplyReady ? '✅ Active' : `⏳ Need ${Math.max(0, 30 - recs.tradesAnalyzed)} more trades`}`,
       ``,
-      `<b>Key insights:</b>`,
-      ...recs.insights.slice(0, 10).map(i => `• ${i}`),
+      `<b>💼 PORTFOLIO</b>`,
+      state ? `Bankroll: ${state.bankrollXRP.toFixed(2)} XRP | Daily P&L: ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP | Open: ${state.openPositions}` : 'N/A',
       ``,
-      `<b>Burst params:</b>`,
-      `• Min liquidity: ${recs.minLiquidityXRP} XRP | Stop: ${recs.burstStopLossPercent}% | TP1: +${recs.burstTp1Percent}% | Trail: +${recs.burstTrailingActivation}%`,
+      `<b>🎯 CURRENT PARAMS</b>`,
+      `Min score: ${recs.minScorePaperTrade} | Min liq: ${recs.minLiquidityXRP} XRP`,
+      `Burst — Stop: ${recs.burstStopLossPercent}% | TP1: +${recs.burstTp1Percent}% | TP2: +${recs.burstTp2Percent}%`,
+      `Scored — TP1: +${recs.scoredTp1Percent}% | TP2: +${recs.scoredTp2Percent}%`,
+      `Entry pullback wait: ${recs.entryPullbackPct}% | Confirm bars: ${recs.entryConfirmBars}`,
+      `Trading pause: ${recs.tradingPauseEnabled ? `✅ Worst hours: ${recs.worstHours.map(h => h+':00').join(', ')} UTC` : '❌ Not yet (need 40+ trades)'}`,
       ``,
-      `<b>Scored params:</b>`,
-      `• Min score: ${recs.minScorePaperTrade} | TP1: +${recs.scoredTp1Percent}% | TP2: +${recs.scoredTp2Percent}%`,
-      recs.bestScoredSignalCombo !== 'default' ? `• Best signal combo: ${recs.bestScoredSignalCombo}` : '',
+      `<b>🧠 LEARNED WEIGHTS</b>`,
+      `Momentum: ${w.volumeAccelScore} | Buy pressure: ${w.buyPressureScore} | New wallets: ${w.holderGrowthScore} | Vol surge: ${w.liquidityScore}`,
       ``,
-      `<b>Learned score weights:</b>`,
-      `• Liquidity: ${w.liquidityScore} | BuyPressure: ${w.buyPressureScore} | VolAccel: ${w.volumeAccelScore}`,
-      `• HolderGrowth: ${w.holderGrowthScore} | DevSafety: ${w.devSafetyScore} | Spread: ${w.spreadScore}`,
+      `<b>💡 INSIGHTS</b>`,
+      ...recs.insights.slice(0, 8).map(i => `• ${i}`),
       ``,
-      recs.autoApplyReady
-        ? `✅ Auto-applying now. Full report: <code>state/trade_analysis.md</code>`
-        : `⏳ Need ${Math.max(0, 30 - recs.tradesAnalyzed)} more trades + 50% win rate for auto-apply.`,
-    ].filter(l => l !== '');
+      `<b>📈 RUN LENGTHS (winners)</b>`,
+      `Median: +${recs.medianRunPct}% | P75: +${recs.p75RunPct}% | Burst median: +${recs.burstMedianRunPct}% | Scored median: +${recs.scoredMedianRunPct}%`,
+      ``,
+      `<i>Forward this message to review and improve the bot.</i>`,
+    ].filter(l => l !== undefined);
 
     await telegramAlerter.sendAlert({
-      type: 'hourly_summary', // reuse summary type for plain HTML send
-      message: lines.join('\n'),
+      type: 'bot_log',
+      message: logLines.join('\n'),
     });
-
     // Auto-apply if ready and win rate is solid
     if (recs.autoApplyReady) {
       info('TradeAnalyzer: auto-apply threshold met — applying recommendations');

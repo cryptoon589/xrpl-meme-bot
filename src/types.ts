@@ -125,7 +125,9 @@ export interface AlertPayload {
     | 'paper_trade_partial_close'
     | 'paper_trade_closed'
     | 'daily_summary'
-    | 'hourly_summary';
+    | 'hourly_summary'
+    | 'open_positions_update'
+    | 'bot_log';
   tokenCurrency?: string;
   tokenIssuer?: string;
   score?: number;

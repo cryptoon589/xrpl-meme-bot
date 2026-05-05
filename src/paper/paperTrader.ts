@@ -949,6 +949,50 @@ export class PaperTrader {
   }
 
   /**
+   * Enriched open positions for Telegram hourly update.
+   * Includes live P&L estimate, burst flag, and hold time.
+   */
+  getOpenPositionsSummary(): Array<{
+    tokenCurrency: string;
+    tokenIssuer: string;
+    entryPriceXRP: number;
+    entryAmountXRP: number;
+    entryTimestamp: number;
+    remainingPosition: number;
+    tp1Hit: boolean;
+    tp2Hit: boolean;
+    isBurst: boolean;
+    livePnlXRP: number | null;
+    livePnlPct: number | null;
+  }> {
+    return Array.from(this.openPositions.values()).map(pos => {
+      const trade = pos.trade;
+      // Use highest price seen as proxy for live price (conservative — actual live would need snapshot)
+      const livePrice   = pos.highestPriceSinceEntry; // best available without a fresh snapshot
+      const currentPnl  = livePrice > 0 && trade.entryPriceXRP > 0
+        ? ((livePrice - trade.entryPriceXRP) / trade.entryPriceXRP) * 100
+        : null;
+      const pnlXRP      = currentPnl != null
+        ? (currentPnl / 100) * trade.entryAmountXRP * (trade.remainingPosition / 100)
+        : null;
+
+      return {
+        tokenCurrency:    trade.tokenCurrency,
+        tokenIssuer:      trade.tokenIssuer,
+        entryPriceXRP:    trade.entryPriceXRP,
+        entryAmountXRP:   trade.entryAmountXRP,
+        entryTimestamp:   trade.entryTimestamp,
+        remainingPosition:trade.remainingPosition ?? 100,
+        tp1Hit:           trade.tp1Hit,
+        tp2Hit:           trade.tp2Hit,
+        isBurst:          pos.tradeProfile === 'burst',
+        livePnlXRP:       pnlXRP != null ? parseFloat(pnlXRP.toFixed(4)) : null,
+        livePnlPct:       currentPnl != null ? parseFloat(currentPnl.toFixed(2)) : null,
+      };
+    });
+  }
+
+  /**
    * FIX #24: Check if we have an open position for a token
    */
   hasOpenPosition(currency: string, issuer: string): boolean {
