@@ -14,20 +14,53 @@ export interface PositionSizeRecommendation {
 }
 
 export class PositionSizer {
-  private readonly MAX_POSITION_PERCENT = 5; // Max 5% of bankroll per trade
-  private readonly MIN_POSITION_XRP = 1; // Minimum 1 XRP
-  private readonly KELLY_DIVISOR = 2; // Use half-Kelly for safety
+  private readonly MAX_POSITION_PERCENT = 10; // Max 10% of bankroll per trade (was 5%)
+  private readonly MIN_POSITION_XRP = 1;
+  private readonly KELLY_DIVISOR = 2; // Half-Kelly for safety
+
+  /**
+   * Conviction multiplier: scales position size based on how strong the
+   * entry signal is RIGHT NOW. High score + many unique buyers = big size.
+   * Low score scraping the threshold + 2 buyers = small size.
+   *
+   * Returns a multiplier 0.5–2.0 applied on top of Kelly.
+   */
+  getConvictionMultiplier(score: number, uniqueBuyers: number, buyRatio: number): number {
+    // Score band: 80–90+ maps to 0.7–1.3
+    const scoreMult = score >= 90 ? 1.3
+      : score >= 85 ? 1.1
+      : score >= 80 ? 0.9
+      : 0.7; // borderline entry
+
+    // Unique buyers: more distinct wallets = more organic, more confident
+    const buyerMult = uniqueBuyers >= 10 ? 1.5
+      : uniqueBuyers >= 6  ? 1.2
+      : uniqueBuyers >= 3  ? 1.0
+      : 0.7; // 1-2 buyers = low conviction
+
+    // Buy ratio (0–1): 80%+ buys = strong demand
+    const ratioBand = buyRatio >= 0.8 ? 1.1
+      : buyRatio >= 0.65 ? 1.0
+      : buyRatio >= 0.5  ? 0.85
+      : 0.6; // sell-dominated = skip or tiny size
+
+    const raw = scoreMult * buyerMult * ratioBand;
+    // Clamp to 0.5–2.0 so we never go nuts in either direction
+    return Math.max(0.5, Math.min(2.0, raw));
+  }
 
   /**
    * Calculate optimal position size using Kelly Criterion
    */
   calculatePositionSize(
     bankrollXRP: number,
-    winRate: number,      // 0-1 (e.g., 0.6 = 60%)
-    avgWinXRP: number,    // Average winning trade PnL
-    avgLossXRP: number,   // Average losing trade PnL (positive number)
-    volatility: number,   // Price volatility (0-1)
-    score: number         // Token score (0-100)
+    winRate: number,      // 0-1
+    avgWinXRP: number,
+    avgLossXRP: number,
+    volatility: number,
+    score: number,
+    uniqueBuyers: number = 0,  // live unique buyer count
+    buyRatio: number     = 0.5 // live buy/(buy+sell) ratio
   ): PositionSizeRecommendation {
     // Guard against invalid inputs
     if (winRate <= 0 || winRate >= 1) {
@@ -53,11 +86,11 @@ export class PositionSizer {
     // Adjust based on volatility (high vol = smaller position)
     const volAdjustment = this.getVolatilityAdjustment(volatility);
 
-    // Adjust based on token score (high score = larger position)
-    const scoreAdjustment = score / 100;
+    // Conviction multiplier: combines score + live buyer data + buy ratio
+    const conviction = this.getConvictionMultiplier(score, uniqueBuyers, buyRatio);
 
     // Final position size
-    let positionPercent = safeKelly * volAdjustment * scoreAdjustment * 100;
+    let positionPercent = safeKelly * volAdjustment * conviction * 100;
 
     // Cap at maximum
     positionPercent = Math.min(positionPercent, this.MAX_POSITION_PERCENT);
@@ -72,7 +105,7 @@ export class PositionSizer {
       method: 'kelly',
       kellyFraction: parseFloat(kellyFraction.toFixed(4)),
       riskPercent: parseFloat(positionPercent.toFixed(2)),
-      reasoning: `Kelly=${(kellyFraction * 100).toFixed(1)}%, Vol adj=${volAdjustment.toFixed(2)}, Score adj=${scoreAdjustment.toFixed(2)}`,
+      reasoning: `Kelly=${(kellyFraction * 100).toFixed(1)}%, Vol=${volAdjustment.toFixed(2)}, Conviction=${conviction.toFixed(2)} (score=${score}, buyers=${uniqueBuyers}, buyRatio=${buyRatio.toFixed(2)})`,
     };
   }
 

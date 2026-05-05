@@ -255,13 +255,20 @@ export class PaperTrader {
     const avgLoss = this.totalLossAmount > 0 ? Math.abs(this.totalLossAmount) / (this.totalTrades - this.winningTrades) : 5;
     const volatility = this.estimateVolatility(snapshot);
 
+    // Live conviction signals from snapshot
+    const uniqueBuyers = (snapshot as any)?.uniqueBuyers5m ?? 0;
+    const totalTx      = (snapshot.buyCount5m || 0) + (snapshot.sellCount5m || 0);
+    const buyRatio     = totalTx > 0 ? (snapshot.buyCount5m || 0) / totalTx : 0.5;
+
     const sizeRecommendation = this.positionSizer.calculatePositionSize(
       this.bankrollXRP,
       winRate,
       avgWin,
       avgLoss,
       volatility,
-      score
+      score,
+      uniqueBuyers,
+      buyRatio
     );
 
     const tradeSizeXRP = Math.min(
@@ -391,11 +398,23 @@ export class PaperTrader {
           continue;
         }
 
-        // Sell pressure exit: if sells spike (3+ sells) while we're up, get out
-        const sellCount = (snapshot as any)?.sellCount5m ?? 0;
-        const buyCount  = (snapshot as any)?.buyCount5m  ?? 1;
-        if (pnlPercent > 5 && sellCount > 3 && sellCount > buyCount * 1.5) {
-          info(`🚨 Burst sell-pressure exit for ${key}: ${sellCount} sells vs ${buyCount} buys`);
+        // Momentum reversal exit:
+        // Sells spiking AND buys dropping = move is over, get out now
+        const sellCount    = (snapshot as any)?.sellCount5m ?? 0;
+        const buyCount     = (snapshot as any)?.buyCount5m  ?? 1;
+        const uniqueBuyers = (snapshot as any)?.uniqueBuyers5m ?? 0;
+        const isMomentumDead = (
+          sellCount > buyCount * 2 &&         // sells 2x buys
+          buyCount <= 2 &&                    // buying has nearly stopped
+          pnlPercent > 3                      // only exit if we're in profit
+        );
+        const isSellSpike = (
+          pnlPercent > 5 &&
+          sellCount > 3 &&
+          sellCount > buyCount * 1.5
+        );
+        if (isMomentumDead || isSellSpike) {
+          info(`🚨 Burst momentum reversal for ${key}: ${buyCount} buys / ${sellCount} sells | PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'sell_pressure_exit' });
           closedTrades.push(trade);
           continue;
@@ -476,6 +495,26 @@ export class PaperTrader {
         this.partialClose(key, currentPrice, Math.min(percentOfRemaining, 100), 'take_profit_2', snapshot);
         trade.tp2Hit = true;
         this.db.updatePaperTrade(trade);
+      }
+
+      // Momentum reversal for scored trades:
+      // If we're in profit and demand has clearly collapsed, exit before
+      // the trailing stop catches it (trailing stop is price-reactive;
+      // this is demand-reactive — faster signal)
+      const scoredSells    = (snapshot as any)?.sellCount5m ?? 0;
+      const scoredBuys     = (snapshot as any)?.buyCount5m  ?? 1;
+      const scoredUnique   = (snapshot as any)?.uniqueBuyers5m ?? 0;
+      const demandCollapsed = (
+        pnlPercent > 10 &&          // only exit if meaningfully up
+        scoredBuys <= 1 &&          // demand has basically stopped
+        scoredSells >= 3 &&         // sell pressure present
+        trade.tp1Hit                // at least TP1 already hit — locked some gains
+      );
+      if (demandCollapsed) {
+        info(`🚨 Scored demand collapse exit for ${key}: ${scoredBuys} buys / ${scoredSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
+        keysToClose.push({ key, reason: 'sell_pressure_exit' });
+        closedTrades.push(trade);
+        continue;
       }
 
       // Activate trailing stop based on volatility and gains
@@ -726,14 +765,22 @@ export class PaperTrader {
   /**
    * Estimate slippage based on trade size vs liquidity
    */
+  /**
+   * AMM slippage using constant-product formula: k = x * y
+   * Buying dx tokens from a pool costs dy XRP where:
+   *   dy = y * dx / (x + dx) for tokens, but since we're buying with XRP:
+   *   slippage = tradeSize / (poolSize + tradeSize)
+   *
+   * This is exact for constant-product AMMs (XRPL AMM is CPMM).
+   * A 25 XRP trade in a 1500 XRP pool = 25/1525 = 1.64% slippage (was 0.17%).
+   * Caps at 10% to avoid absurd estimates on micro pools.
+   */
   private estimateSlippage(tradeSizeXRP: number, snapshot: MarketSnapshot | null): number {
     if (!snapshot || !snapshot.liquidityXRP || snapshot.liquidityXRP <= 0) {
-      return 0.02; // Default 2% slippage if unknown
+      return 0.02; // 2% conservative default if pool depth unknown
     }
-
-    // Slippage increases with trade size relative to liquidity
-    const ratio = tradeSizeXRP / snapshot.liquidityXRP;
-    return Math.min(0.05, ratio * 0.1); // Max 5% slippage
+    const slippage = tradeSizeXRP / (snapshot.liquidityXRP + tradeSizeXRP);
+    return Math.min(0.10, slippage);
   }
 
   /**

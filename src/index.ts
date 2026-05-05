@@ -143,6 +143,17 @@ async function main() {
         debug(`Burst trade skipped — bad trading hour (UTC ${new Date().getUTCHours()}:00)`);
         return;
       }
+      // #4 Unified position lock — burst and scored share the same lock set
+      const burstKey = `${currency}:${issuer}`;
+      if (tradeLocks.has(burstKey)) {
+        debug(`Burst trade skipped — position lock held for ${burstKey}`);
+        return;
+      }
+      if (paperTrader.hasOpenPosition(currency, issuer)) {
+        debug(`Burst trade skipped — already have open position for ${burstKey}`);
+        return;
+      }
+      tradeLocks.add(burstKey);
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
       const snapshot = {
         tokenCurrency: currency,
@@ -159,6 +170,7 @@ async function main() {
         `Buy burst — pool: ${poolXRP.toFixed(0)} XRP`,
         burstTp
       );
+      tradeLocks.delete(burstKey); // release lock regardless of outcome
       if (trade) {
         // Notify Telegram about the burst paper entry
         setTimeout(() => sendAlert(telegramAlerter, db, {
