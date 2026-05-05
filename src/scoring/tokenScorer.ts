@@ -1,6 +1,27 @@
 /**
- * Token Scoring Module
- * Scores tokens from 0-100 based on multiple factors
+ * Token Scorer — Profit-First Redesign
+ *
+ * Single objective: is this token moving RIGHT NOW in a way we can profit from?
+ *
+ * Old approach scored token quality (age, liquidity size, dev safety).
+ * That predicted "good token" not "profitable trade".
+ *
+ * New approach scores the MOMENT:
+ *   - Is price accelerating (not just moving)?
+ *   - Are fresh wallets piling in (organic demand)?
+ *   - Is buy pressure intense and building?
+ *   - Is volume surging vs recent baseline?
+ *   - Can we exit cleanly (min liquidity gate, not a score bonus)?
+ *
+ * Token age, holder count, liquidity size = NOT scoring factors.
+ * They are GATES (min liquidity to enter, risk flags to block).
+ * If a token passes the gate and the moment is right — score it high.
+ *
+ * Weights (self-learning overrides these after 20+ trades):
+ *   Momentum / price acceleration   35%
+ *   Buy pressure (intensity)        30%
+ *   New wallet inflow               20%
+ *   Volume surge                    15%
  */
 
 import * as fs from 'fs';
@@ -14,14 +35,13 @@ import { ScoreWeights } from '../analysis/tradeAnalyzer';
 
 const RECOMMENDATIONS_PATH = path.join(process.cwd(), 'state', 'recommendations.json');
 
-// Default hardcoded weights — overridden by learned weights once enough trades exist
 const DEFAULT_WEIGHTS: ScoreWeights = {
-  buyPressureScore:  28,
-  holderGrowthScore: 19,
-  volumeAccelScore:  19,
-  liquidityScore:    11,
-  devSafetyScore:    10,
-  spreadScore:        5,  // maps to tokenAge in scorer
+  buyPressureScore:  30,
+  holderGrowthScore: 20,   // new wallet inflow
+  volumeAccelScore:  35,   // momentum / price acceleration
+  liquidityScore:    15,   // volume surge (repurposed)
+  devSafetyScore:     0,   // hard gate only, not a score component
+  spreadScore:        0,   // unused
 };
 
 export class TokenScorer {
@@ -30,17 +50,13 @@ export class TokenScorer {
   private socialDetector: SocialDetector | null = null;
   private learnedWeights: ScoreWeights = { ...DEFAULT_WEIGHTS };
   private weightsLoadedAt = 0;
-  private readonly WEIGHTS_RELOAD_MS = 15 * 60 * 1000; // re-check file every 15 min
+  private readonly WEIGHTS_RELOAD_MS = 15 * 60 * 1000;
 
   constructor(config: BotConfig) {
     this.config = config;
     this.loadLearnedWeights();
   }
 
-  /**
-   * Load learned score weights from the TradeAnalyzer recommendations file.
-   * Falls back to hardcoded defaults if file doesn’t exist or isn’t ready.
-   */
   loadLearnedWeights(): void {
     try {
       if (!fs.existsSync(RECOMMENDATIONS_PATH)) return;
@@ -48,43 +64,23 @@ export class TokenScorer {
       const recs = JSON.parse(raw);
       if (!recs?.scoreWeights) return;
       const w: ScoreWeights = recs.scoreWeights;
-      // Only apply if all fields are present and plausible
       const vals = Object.values(w) as number[];
-      if (vals.length < 5 || vals.some(v => typeof v !== 'number' || v < 0 || v > 100)) return;
+      if (vals.length < 4 || vals.some(v => typeof v !== 'number' || v < 0 || v > 100)) return;
       this.learnedWeights = w;
       this.weightsLoadedAt = Date.now();
-      info(`[TokenScorer] Loaded learned weights from ${recs.tradesAnalyzed} trades (win rate: ${recs.overallWinRate}%)`);
-      info(`[TokenScorer] Weights: buyPressure=${w.buyPressureScore} holderGrowth=${w.holderGrowthScore} momentum=${w.volumeAccelScore} liquidity=${w.liquidityScore} devSafety=${w.devSafetyScore}`);
+      info(`[TokenScorer] Learned weights loaded (${recs.tradesAnalyzed} trades, ${recs.overallWinRate}% WR)`);
+      info(`[TokenScorer] momentum=${w.volumeAccelScore} buyPressure=${w.buyPressureScore} newWallets=${w.holderGrowthScore} volSurge=${w.liquidityScore}`);
     } catch (err) {
       debug(`[TokenScorer] Could not load learned weights: ${err}`);
     }
   }
 
-  /**
-   * Attach optional whale tracker for score boosts from whale wallet activity.
-   */
-  setWhaleTracker(tracker: WhaleTracker): void {
-    this.whaleTracker = tracker;
-  }
+  setWhaleTracker(tracker: WhaleTracker): void { this.whaleTracker = tracker; }
+  setSocialDetector(detector: SocialDetector): void { this.socialDetector = detector; }
 
   /**
-   * Attach optional social detector for on-chain social signal scoring.
-   */
-  setSocialDetector(detector: SocialDetector): void {
-    this.socialDetector = detector;
-  }
-
-  /**
-   * Score a token for meme trading profit potential.
-   *
-   * Weights are tuned for catching pumps early:
-   *   - Buy pressure (28%): ratio of buys to sells in last 5 min
-   *   - New wallet inflow (19%): fresh wallets buying = strongest pump signal
-   *   - Momentum (19%): price direction across timeframes
-   *   - Liquidity (10%): enough depth to enter/exit without massive slippage
-   *   - Dev safety (9%): no rug flags
-   *   - Whale boost (5%): smart-money wallets present
-   *   - Social signals (8%): on-chain domain/email/age/market-makers
+   * Score this token's current trading opportunity (0–100).
+   * Higher = better entry right now for a clean profit trade.
    */
   score(
     token: TrackedToken,
@@ -94,187 +90,78 @@ export class TokenScorer {
     whaleScore = 0,
     socialScore = 0
   ): TokenScore {
-    const buyPressureScore  = this.scoreBuyPressure(snapshot);
-    const newWalletScore    = this.scoreNewWallets(snapshot);
-    const momentumScore     = this.scoreMomentum(snapshot);
-    const liquidityScore    = this.scoreLiquidity(snapshot);
-    const devSafetyScore    = this.scoreDevSafety(riskFlags);
-    const tokenAgeScore     = this.scoreTokenAge(token, snapshot);
 
-    // Clamp external scores to 0-100 range
-    const clampedWhale  = Math.max(0, Math.min(100, whaleScore));
-    const clampedSocial = Math.max(0, Math.min(100, socialScore));
-
-    // Hot-reload learned weights every 15 min so the scorer picks up
-    // new TradeAnalyzer recommendations without a restart.
+    // Hot-reload learned weights every 15 min
     if (Date.now() - this.weightsLoadedAt > this.WEIGHTS_RELOAD_MS) {
       this.loadLearnedWeights();
     }
 
-    // Normalise learned weights to fractions that sum to ~1.0
-    // The analyzer outputs raw importance values (e.g. 28, 19, 11...).
-    // We reserve 0.10 for whale + social, leaving 0.90 for the core 6 components.
-    const w = this.learnedWeights;
-    const wTotal = w.buyPressureScore + w.holderGrowthScore + w.volumeAccelScore +
-                   w.liquidityScore + w.devSafetyScore + w.spreadScore;
-    const norm = (v: number) => wTotal > 0 ? (v / wTotal) * 0.90 : 0.15;
+    // ── Core signal scores ───────────────────────────────────────────
+    const momentumScore    = this.scoreMomentum(snapshot);
+    const buyPressureScore = this.scoreBuyPressure(snapshot);
+    const newWalletScore   = this.scoreNewWalletInflow(snapshot);
+    const volSurgeScore    = this.scoreVolumeSurge(snapshot);
 
+    // ── Normalise learned weights ────────────────────────────────────
+    const w = this.learnedWeights;
+    const wTotal = w.volumeAccelScore + w.buyPressureScore + w.holderGrowthScore + w.liquidityScore;
+    const norm = (v: number) => wTotal > 0 ? v / wTotal : 0.25;
+
+    const wMom  = norm(w.volumeAccelScore);
     const wBuy  = norm(w.buyPressureScore);
     const wNew  = norm(w.holderGrowthScore);
-    const wMom  = norm(w.volumeAccelScore);
-    const wLiq  = norm(w.liquidityScore);
-    const wDev  = norm(w.devSafetyScore);
-    const wAge  = norm(w.spreadScore); // spreadScore slot reused for tokenAge
+    const wVol  = norm(w.liquidityScore);
 
-    // Adaptive weighting: if buy pressure has live data, weight it heavily.
-    // If no live data yet (window empty), shift weight to momentum + liquidity
-    // so tokens aren't permanently zeroed waiting for tracker data.
-    const hasBuyData = buyPressureScore > 0;
-    const hasNewWalletData = (snapshot as any)?.uniqueBuyers5m > 0;
+    // ── Base score: pure price movement opportunity ──────────────────
+    const hasLiveData = buyPressureScore !== 50 || snapshot?.buyCount5m;
 
-    let totalScore: number;
-    if (hasBuyData || hasNewWalletData) {
-      // Full live-data mode — use learned weights
-      totalScore =
-        buyPressureScore  * wBuy +
-        newWalletScore    * wNew +
-        momentumScore     * wMom +
-        liquidityScore    * wLiq +
-        devSafetyScore    * wDev +
-        tokenAgeScore     * wAge +
-        clampedWhale      * 0.05 +
-        clampedSocial     * 0.05 * (clampedSocial / 100);
+    let baseScore: number;
+    if (hasLiveData) {
+      baseScore =
+        momentumScore    * wMom +
+        buyPressureScore * wBuy +
+        newWalletScore   * wNew +
+        volSurgeScore    * wVol;
     } else {
-      // No live pressure data yet — shift weight to momentum + liquidity + age
-      totalScore =
-        momentumScore     * (wMom  + wBuy * 0.5) +
-        liquidityScore    * (wLiq  + wNew * 0.5) +
-        devSafetyScore    * wDev +
-        tokenAgeScore     * (wAge  + 0.05) +
-        clampedSocial     * 0.05;
+      // No live stream data yet — momentum only, conservative
+      baseScore = momentumScore * 0.7 + volSurgeScore * 0.3;
     }
 
-    const clampedScore = Math.max(0, Math.min(100, totalScore));
+    // ── Boosts (additive, small) ─────────────────────────────────────
+    // Whale presence: smart money entering = mild confidence boost
+    const whaleBoost = Math.min(8, Math.max(0, whaleScore) * 0.08);
+
+    // Liquidity exit safety: penalise if pool is too shallow to exit cleanly
+    // NOT a reward for big pools — just a penalty for tiny ones
+    const exitSafety = this.scoreExitSafety(snapshot);
+
+    const totalScore = baseScore + whaleBoost + exitSafety;
+    const clamped = Math.max(0, Math.min(100, totalScore));
+
+    debug(`[Score] ${token.currency}: momentum=${momentumScore.toFixed(0)} buyPressure=${buyPressureScore.toFixed(0)} newWallets=${newWalletScore.toFixed(0)} volSurge=${volSurgeScore.toFixed(0)} whale=${whaleBoost.toFixed(1)} exit=${exitSafety.toFixed(1)} → ${clamped.toFixed(0)}`);
 
     return {
-      tokenCurrency: token.currency,
-      tokenIssuer: token.issuer,
-      timestamp: Date.now(),
-      totalScore: Math.round(clampedScore),
-      liquidityScore: Math.round(liquidityScore),
-      holderGrowthScore: Math.round(newWalletScore),
+      tokenCurrency:    token.currency,
+      tokenIssuer:      token.issuer,
+      timestamp:        Date.now(),
+      totalScore:       Math.round(clamped),
+      liquidityScore:   Math.round(volSurgeScore),
+      holderGrowthScore:Math.round(newWalletScore),
       buyPressureScore: Math.round(buyPressureScore),
       volumeAccelScore: Math.round(momentumScore),
-      devSafetyScore: Math.round(devSafetyScore),
-      whitelistBoost: 0,
-      spreadScore: 0,
+      devSafetyScore:   100, // not scored — hard gate handled by riskFilter
+      whitelistBoost:   0,
+      spreadScore:      0,
     };
   }
 
-  /**
-   * Score token age (0-100) — newer tokens get a bonus.
-   * A 1-hour-old token with buy activity is much more significant.
-   */
-  private scoreTokenAge(token: TrackedToken, snapshot?: MarketSnapshot | null): number {
-    const ageMs = Date.now() - (token.firstSeen || Date.now());
-    const ageHours = ageMs / (1000 * 60 * 60);
-
-    // Base age score — peak for new tokens, decays over time
-    let base: number;
-    if (ageHours < 1)  base = 100;
-    else if (ageHours < 3)  base = 85;
-    else if (ageHours < 6)  base = 70;
-    else if (ageHours < 12) base = 55;
-    else if (ageHours < 24) base = 40;
-    else if (ageHours < 48) base = 25;
-    else base = 10;
-
-    // Momentum rescue: if a token is older but has real price movement,
-    // don't let age drag it below 30. A 7-day-old token genuinely pumping
-    // shouldn't score 10 on age and lose 28% of its total score.
-    const c5m  = snapshot?.priceChange5m  ?? 0;
-    const c1h  = snapshot?.priceChange1h  ?? 0;
-    const isMoving = Math.abs(c5m) > 5 || Math.abs(c1h) > 10;
-    if (isMoving && base < 30) return 30;
-
-    return base;
-  }
-
-  /**
-   * Score liquidity depth (0-100)
-   * Higher liquidity = higher score
-   */
-  private scoreLiquidity(snapshot: MarketSnapshot | null): number {
-    if (!snapshot || snapshot.liquidityXRP === null) return 0;
-
-    const liquidity = snapshot.liquidityXRP;
-    const minLiq = this.config.minLiquidityXRP;
-    if (liquidity <= minLiq) return 0;
-
-    // Tiered log scale: differentiates across the full 2k–10M+ XRP range
-    // log(2k)=7.6  log(10k)=9.2  log(100k)=11.5  log(1M)=13.8  log(10M)=16.1
-    const logMin = Math.log(minLiq);
-    const logMax = Math.log(10_000_000); // 10M XRP = score 100
-    const score  = (Math.log(liquidity) - logMin) / (logMax - logMin) * 100;
-    return Math.max(0, Math.min(100, score));
-  }
-
-  // (merged into scoreNewWallets)
-
-  /**
-   * Score buy pressure (0-100)
-   * Combines buy/sell ratio + volume dominance.
-   * Returns 50 (neutral) when no live data yet — tokens should not be
-   * permanently zeroed just because no trades happened since bot start.
-   */
-  private scoreBuyPressure(snapshot: MarketSnapshot | null): number {
-    if (!snapshot) return 50; // no snapshot = neutral
-
-    const totalTx = (snapshot.buyCount5m || 0) + (snapshot.sellCount5m || 0);
-    if (totalTx === 0) return 50; // no live data yet = neutral, not zero
-
-    // Buy count ratio (60%)
-    const buyRatio = (snapshot.buyCount5m || 0) / totalTx;
-    const ratioScore = buyRatio * 100;
-
-    // Buy volume dominance (40%)
-    const totalVol = (snapshot.buyVolume5m || 0) + (snapshot.sellVolume5m || 0);
-    const volRatio = totalVol > 0 ? (snapshot.buyVolume5m || 0) / totalVol : 0.5;
-    const volScore = volRatio * 100;
-
-    // Bonus: breadth of unique buyers (signals organic activity, not wash)
-    const uniqueBuyers = snapshot.uniqueBuyers5m || 0;
-    const uniqueBonus = Math.min(20, uniqueBuyers * 2); // +2 pts per unique buyer, max +20
-
-    return Math.min(100, ratioScore * 0.6 + volScore * 0.4 + uniqueBonus);
-  }
-
-  /**
-   * Score new wallet inflow (0-100) — strongest pump predictor
-   * Fresh wallets buying = new capital entering, not just churning
-   */
-  private scoreNewWallets(snapshot: MarketSnapshot | null): number {
-    if (!snapshot) return 50; // no data = neutral, not penalty
-
-    const newWalletBuys = (snapshot as any).newWalletBuys || 0;
-    const newWalletPct  = (snapshot as any).newWalletPercent || 0;
-    const uniqueBuyers  = snapshot.uniqueBuyers5m || 0;
-
-    if (uniqueBuyers === 0) return 50; // no live data yet = neutral
-
-    // Base: new wallet percentage (0-100)
-    const pctScore = newWalletPct; // already 0-100
-
-    // Multiplier: more new wallets = stronger signal
-    const countBonus = Math.min(30, newWalletBuys * 5); // +5 per new wallet, max 30
-
-    return Math.min(100, pctScore * 0.7 + countBonus);
-  }
-
-  /**
-   * Score momentum across timeframes (0-100)
-   * Rewards consistent upward movement across 5m, 15m, 1h
-   */
+  // ──────────────────────────────────────────────────────────────────
+  // MOMENTUM: price acceleration across timeframes
+  //
+  // Key insight: we want ACCELERATION, not just positive price.
+  // A token up 2% in 5m that was up 0% in 15m is accelerating.
+  // A token up 2% in 5m that was up 30% in 1h is decelerating (late).
+  // ──────────────────────────────────────────────────────────────────
   private scoreMomentum(snapshot: MarketSnapshot | null): number {
     if (!snapshot) return 0;
 
@@ -282,45 +169,148 @@ export class TokenScorer {
     const c15 = snapshot.priceChange15m;
     const c1h = snapshot.priceChange1h;
 
-    let score = 50; // neutral baseline
-    let count = 0;
+    if (c5 === null && c15 === null && c1h === null) return 0;
 
-    const addChange = (change: number | null, weight: number) => {
-      if (change === null) return;
-      count++;
-      if (change > 50)  score += 30 * weight;
-      else if (change > 20) score += 20 * weight;
-      else if (change > 10) score += 15 * weight;
-      else if (change > 5)  score += 10 * weight;
-      else if (change > 0)  score += 5 * weight;
-      else if (change > -5) score -= 5 * weight;
-      else if (change > -15)score -= 15 * weight;
-      else score -= 25 * weight;
-    };
+    let score = 50;
 
-    addChange(c5,  1.0);  // 5m most important
-    addChange(c15, 0.6);  // 15m secondary
-    addChange(c1h, 0.4);  // 1h context
+    // 5m move: primary signal (most recent)
+    if (c5 !== null) {
+      if      (c5 > 100) score += 50;  // parabolic — very strong
+      else if (c5 > 50)  score += 40;
+      else if (c5 > 20)  score += 30;
+      else if (c5 > 10)  score += 20;
+      else if (c5 > 5)   score += 12;
+      else if (c5 > 2)   score += 6;
+      else if (c5 > 0)   score += 2;
+      else if (c5 > -3)  score -= 5;
+      else if (c5 > -10) score -= 15;
+      else               score -= 30;
+    }
 
-    if (count === 0) return 0; // no price history = unknown, not neutral
+    // Acceleration check: is the move speeding up?
+    // 5m > 15m/3 means the recent rate is faster than the older rate
+    if (c5 !== null && c15 !== null && c15 !== 0) {
+      const recentRate = c5;
+      const olderRate  = c15 / 3; // normalise to per-5m equivalent
+      if (recentRate > olderRate * 1.5 && c5 > 0) score += 15; // accelerating
+      if (recentRate < olderRate * 0.3 && c15 > 10) score -= 10; // decelerating (late)
+    }
+
+    // 1h context: are we early or late in the move?
+    if (c1h !== null && c5 !== null) {
+      if (c1h > 100 && c5 > 5)  score -= 8;  // already ran hard, c5 still going — risky
+      if (c1h < 5   && c5 > 10) score += 10; // fresh breakout from flat base — ideal
+      if (c1h < 0   && c5 > 5)  score += 8;  // reversal bounce
+    }
+
     return Math.max(0, Math.min(100, score));
   }
 
-  /**
-   * Score dev/issuer safety (0-100)
-   * Lower risk flags = higher score
-   */
-  private scoreDevSafety(riskFlags: RiskFlags): number {
-    let score = 100;
+  // ──────────────────────────────────────────────────────────────────
+  // BUY PRESSURE: intensity of buying RIGHT NOW
+  // ──────────────────────────────────────────────────────────────────
+  private scoreBuyPressure(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 50;
 
-    // Deduct for each risk flag
-    if (riskFlags.devDumping) score -= 50;
-    if (riskFlags.concentratedSupply) score -= 30;
-    if (riskFlags.liquidityRemoved) score -= 40;
-    if (riskFlags.singleWalletPrice) score -= 25;
+    const buys  = snapshot.buyCount5m  || 0;
+    const sells = snapshot.sellCount5m || 0;
+    const total = buys + sells;
+    if (total === 0) return 50;
 
-    return Math.max(0, score);
+    const buyVol  = snapshot.buyVolume5m  || 0;
+    const sellVol = snapshot.sellVolume5m || 0;
+    const totalVol = buyVol + sellVol;
+
+    // Count ratio (50%)
+    const countScore = (buys / total) * 100;
+
+    // Volume ratio (30%)
+    const volScore = totalVol > 0 ? (buyVol / totalVol) * 100 : 50;
+
+    // Unique buyer breadth (20%) — organic vs single wallet pumping
+    const unique = snapshot.uniqueBuyers5m || 0;
+    const breadthScore = Math.min(100, unique * 10); // 10+ unique buyers = max score
+
+    // Intensity bonus: raw buy count matters (more transactions = stronger move)
+    const intensityBonus = Math.min(20, buys * 2); // 2pts per buy, max 20
+
+    return Math.min(100, countScore * 0.5 + volScore * 0.3 + breadthScore * 0.2 + intensityBonus);
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // NEW WALLET INFLOW: fresh capital entering (not churning)
+  // ──────────────────────────────────────────────────────────────────
+  private scoreNewWalletInflow(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 50;
 
+    const unique = snapshot.uniqueBuyers5m || 0;
+    if (unique === 0) return 50;
+
+    const newBuys = (snapshot as any).newWalletBuys    || 0;
+    const newPct  = (snapshot as any).newWalletPercent || 0;
+
+    // No new wallet data available yet
+    if (newBuys === 0 && newPct === 0) {
+      // Fall back to unique buyer count as proxy
+      return Math.min(100, 40 + unique * 6); // 10 unique buyers = ~100
+    }
+
+    // New wallet % (0–100) + count bonus
+    const pctScore   = newPct; // already 0–100
+    const countBonus = Math.min(30, newBuys * 8); // 8pts per new wallet, max 30
+
+    return Math.min(100, pctScore * 0.7 + countBonus);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // VOLUME SURGE: is volume spiking vs what's normal for this token?
+  // We don't have historical volume baseline yet, so use buy count
+  // as a proxy — high absolute buy count = unusually active
+  // ──────────────────────────────────────────────────────────────────
+  private scoreVolumeSurge(snapshot: MarketSnapshot | null): number {
+    if (!snapshot) return 0;
+
+    const buyVol = snapshot.buyVolume5m || 0;
+    const buys   = snapshot.buyCount5m  || 0;
+
+    // Volume in XRP over 5 min — tiered scoring
+    let volScore = 0;
+    if      (buyVol > 50000) volScore = 100;
+    else if (buyVol > 10000) volScore = 85;
+    else if (buyVol > 5000)  volScore = 70;
+    else if (buyVol > 1000)  volScore = 55;
+    else if (buyVol > 500)   volScore = 40;
+    else if (buyVol > 100)   volScore = 25;
+    else if (buyVol > 0)     volScore = 10;
+
+    // Transaction velocity (buys per 5 min)
+    let txScore = 0;
+    if      (buys > 50) txScore = 100;
+    else if (buys > 20) txScore = 80;
+    else if (buys > 10) txScore = 60;
+    else if (buys > 5)  txScore = 40;
+    else if (buys > 2)  txScore = 20;
+    else if (buys > 0)  txScore = 10;
+
+    return Math.min(100, volScore * 0.6 + txScore * 0.4);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // EXIT SAFETY: can we get out without destroying the price?
+  // Returns 0 (no penalty) if liquidity is fine.
+  // Returns negative if pool is dangerously shallow.
+  // NOT a reward — just a penalty gate for very thin pools.
+  // ──────────────────────────────────────────────────────────────────
+  private scoreExitSafety(snapshot: MarketSnapshot | null): number {
+    if (!snapshot || snapshot.liquidityXRP === null) return 0;
+    const liq = snapshot.liquidityXRP;
+    const minLiq = this.config.minLiquidityXRP;
+
+    // Below minimum: already filtered by riskFilter, but penalise here too
+    if (liq < minLiq)      return -20;
+    if (liq < minLiq * 2)  return -10; // borderline: slight penalty
+    if (liq < minLiq * 5)  return  -3; // fine but a bit thin
+    // Comfortable or deep: no penalty or bonus (we don't reward being FUZZY-size)
+    return 0;
+  }
 }
