@@ -35,7 +35,7 @@ import { info, warn, debug } from '../utils/logger';
 // Tuning knobs — adjust via env or constructor
 // ─────────────────────────────────────────────
 const BURST_WINDOW_MS      = 90_000;     // rolling window to cluster buys
-const MIN_UNIQUE_WALLETS   = 3;          // distinct buyers needed to fire
+const MIN_UNIQUE_WALLETS   = 2;          // distinct buyers needed to fire (lowered: whale + 1 = valid signal)
 const MIN_BUY_VOLUME_XRP   = 50;         // total XRP bought in window
 const ALERT_COOLDOWN_MS    = 20 * 60_000; // 20 min per token
 const MIN_POOL_XRP         = 500;        // ignore pools below this TVL
@@ -46,6 +46,7 @@ interface BuyEvent {
   wallet: string;
   xrpAmount: number;
   ts: number;
+  isSell?: boolean; // true if XRP flowed OUT of AMM (token sell)
 }
 
 interface TokenState {
@@ -134,19 +135,18 @@ export class BurstDetector {
       const key = this.ammToToken.get(acct);
       if (!key) continue; // not a tracked AMM account
 
-      // XRP gained by AMM account = token sold into AMM = buyer paid XRP
-      const prevBal = parseInt(n.PreviousFields?.Balance ?? '0', 10);
-      const currBal = parseInt(n.FinalFields?.Balance  ?? '0', 10);
-      const xrpGained = (currBal - prevBal) / 1_000_000;
-      if (xrpGained < 0.001) continue; // ignore dust / sells
+      const prevBal  = parseInt(n.PreviousFields?.Balance ?? '0', 10);
+      const currBal  = parseInt(n.FinalFields?.Balance  ?? '0', 10);
+      const xrpDelta = (currBal - prevBal) / 1_000_000;
+      if (Math.abs(xrpDelta) < 0.001) continue; // dust
 
       const state = this.tokens.get(key);
       if (!state) continue;
 
-      // Attribute the buy to the tx initiator
-      const buyer = t.Account || 'unknown';
-      debug(`AMM flow: ${state.displayName} gained ${xrpGained.toFixed(4)} XRP from ${buyer}`);
-      this.recordBuy(state.rawCurrency, state.issuer, buyer, xrpGained);
+      const wallet = t.Account || 'unknown';
+      const isSell = xrpDelta < 0; // XRP out of AMM = someone sold token for XRP
+      debug(`AMM ${isSell ? 'sell' : 'buy'}: ${state.displayName} ${xrpDelta.toFixed(4)} XRP by ${wallet}`);
+      this.recordBuy(state.rawCurrency, state.issuer, wallet, Math.abs(xrpDelta), isSell);
     }
   }
 
@@ -244,7 +244,7 @@ export class BurstDetector {
   // ─────────────────────────────────────────
   // Core: record a buy event and check burst
   // ─────────────────────────────────────────
-  private recordBuy(rawCurrency: string, issuer: string, wallet: string, xrpAmount: number): void {
+  private recordBuy(rawCurrency: string, issuer: string, wallet: string, xrpAmount: number, isSell = false): void {
     const key = `${rawCurrency}:${issuer}`;
     const now = Date.now();
 
@@ -255,36 +255,47 @@ export class BurstDetector {
     const state = this.tokens.get(key)!;
     state.lastTrade = now;
 
-    // Add buy event
-    state.buys.push({ wallet, xrpAmount, ts: now });
+    // Add event (buy or sell)
+    state.buys.push({ wallet, xrpAmount, ts: now, isSell });
 
     // Prune events outside the burst window
     const cutoff = now - BURST_WINDOW_MS;
     state.buys = state.buys.filter(e => e.ts >= cutoff);
 
+    // Only evaluate burst on buy events
+    if (isSell) return;
+
     // Check if we're in alert cooldown
     if (now - state.lastAlertTs < ALERT_COOLDOWN_MS) return;
 
-    // Evaluate burst
-    const uniqueWallets = new Set(state.buys.map(e => e.wallet));
-    const totalXRP      = state.buys.reduce((s, e) => s + e.xrpAmount, 0);
+    // Evaluate burst using BUY events only
+    const buyEvents     = state.buys.filter(e => !e.isSell);
+    const uniqueWallets = new Set(buyEvents.map(e => e.wallet));
+    const totalXRP      = buyEvents.reduce((s, e) => s + e.xrpAmount, 0);
 
     if (uniqueWallets.size >= MIN_UNIQUE_WALLETS && totalXRP >= MIN_BUY_VOLUME_XRP) {
-      // Wash trade guard: if top wallet accounts for >60% of volume, skip
-      // Real organic bursts have distributed buying — wash trades concentrate in 1-2 wallets
-      const walletVolumes = new Map<string, number>();
+      // Wash trade guard: flag wallets that are BOTH buying AND selling (round-tripping)
+      // A single whale buying aggressively is NOT wash trading
+      const buyVol  = new Map<string, number>();
+      const sellVol = new Map<string, number>();
       for (const e of state.buys) {
-        walletVolumes.set(e.wallet, (walletVolumes.get(e.wallet) || 0) + e.xrpAmount);
+        if (e.isSell) sellVol.set(e.wallet, (sellVol.get(e.wallet) || 0) + e.xrpAmount);
+        else          buyVol.set(e.wallet,  (buyVol.get(e.wallet)  || 0) + e.xrpAmount);
       }
-      const maxWalletVol = Math.max(...walletVolumes.values());
-      const topWalletPct = totalXRP > 0 ? maxWalletVol / totalXRP : 0;
-      if (topWalletPct > 0.60) {
-        debug(`Burst on ${state.displayName} suppressed — wash trade suspected (top wallet = ${(topWalletPct*100).toFixed(0)}% of volume)`);
+      // Count wallets round-tripping (buying AND selling in the window)
+      let roundTripVol = 0;
+      for (const [w, bv] of buyVol.entries()) {
+        const sv = sellVol.get(w) || 0;
+        if (sv > 0) roundTripVol += Math.min(bv, sv); // count the overlap
+      }
+      const roundTripPct = totalXRP > 0 ? roundTripVol / totalXRP : 0;
+      if (roundTripPct > 0.50) {
+        debug(`Burst on ${state.displayName} suppressed — wash trading (${(roundTripPct*100).toFixed(0)}% round-trip volume)`);
         return;
       }
 
       // Burst detected — fetch AMM price and fire alert asynchronously
-      state.lastAlertTs = now; // Set cooldown immediately to prevent duplicate fires
+      state.lastAlertTs = now;
       setTimeout(() => this.onBurstDetected(key, state, uniqueWallets.size, totalXRP), PRICE_FETCH_DELAY_MS);
     }
   }
