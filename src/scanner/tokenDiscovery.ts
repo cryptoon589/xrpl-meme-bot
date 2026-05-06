@@ -8,6 +8,15 @@ import { TrackedToken, TxEvent } from '../types';
 import { info, debug, warn } from '../utils/logger';
 import { Database } from '../db/database';
 
+
+// Currencies that should never be tracked as meme tokens
+const DISCOVERY_BLOCKLIST = new Set([
+  'XRP', 'USD', 'EUR', 'BTC', 'ETH', 'USDT', 'USDC', 'RLUSD', 'CNY', 'GBP', 'JPY',
+  'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO', 'AUD', 'CAD', 'CHF',
+  '524C555344000000000000000000000000000000', // RLUSD hex
+  '5841480000000000000000000000000000000000', // XAH hex
+]);
+
 export class TokenDiscovery {
   private xrplClient: XRPLClient;
   private db: Database;
@@ -74,8 +83,9 @@ export class TokenDiscovery {
     const issuer = limitAmount.issuer;
     const account = transaction.Account;
 
-    // Skip XRP
+    // Skip XRP and blocklisted currencies (stablecoins, non-memes)
     if (currency === 'XRP') return null;
+    if (DISCOVERY_BLOCKLIST.has(currency)) return null;
 
     // Skip if issuer is the same as account (self-trustline, rare but possible)
     if (issuer === account) return null;

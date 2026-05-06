@@ -1085,11 +1085,11 @@ export class PaperTrader {
     // Base stop loss
     let stopLoss = -10;
 
-    // Adjust based on volatility
-    if (volatility > 0.2) stopLoss = -20; // Very volatile: wide stop
-    else if (volatility > 0.1) stopLoss = -15; // Moderate volatility
-    else if (volatility > 0.05) stopLoss = -12; // Low volatility
-    else stopLoss = -8; // Very stable: tight stop
+    // Adjust based on volatility — capped at -10% to maintain positive risk:reward vs TP1 (+10%)
+    if (volatility > 0.2) stopLoss = -10; // Very volatile: still cap at -10%
+    else if (volatility > 0.1) stopLoss = -8;  // Moderate volatility
+    else if (volatility > 0.05) stopLoss = -7; // Low volatility
+    else stopLoss = -6; // Very stable: tight stop
 
     // If already in profit, tighten stop to protect gains
     if (pnlPercent > 20) stopLoss = Math.max(stopLoss, -5);
@@ -1102,11 +1102,11 @@ export class PaperTrader {
    * Get trailing stop activation threshold based on volatility
    */
   private getTrailingActivationThreshold(volatility: number, pnlPercent: number): number {
-    // High volatility: wait for bigger gains before activating trail
-    if (volatility > 0.2) return 30;
-    if (volatility > 0.1) return 25;
-    if (volatility > 0.05) return 20;
-    return 15; // Low volatility: activate early
+    // Activate trailing stop closer to new TP targets (+10/+20%)
+    if (volatility > 0.2) return 15;
+    if (volatility > 0.1) return 12;
+    if (volatility > 0.05) return 10;
+    return 8; // Low volatility: activate early
   }
 
   /**

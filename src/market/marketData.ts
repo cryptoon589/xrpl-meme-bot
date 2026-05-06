@@ -197,6 +197,19 @@ export class MarketDataCollector {
         liquidityXRP = bookResult.liquidity;
       }
 
+      // Price sanity check — reject absurd prices (e.g. drops not converted, bad AMM pools)
+      if (priceXRP !== null && priceXRP > 10_000) {
+        priceXRP = priceXRP / 1_000_000; // likely in drops, convert
+      }
+      if (priceXRP !== null && priceXRP > 500) {
+        warn(`Sanity reject (scored): ${token.currency} price=${priceXRP.toFixed(2)} XRP — too high, discarding`);
+        priceXRP = null;
+      }
+      if (liquidityXRP !== null && liquidityXRP > 500_000_000) {
+        warn(`Sanity reject (scored): ${token.currency} liquidity=${liquidityXRP.toFixed(0)} XRP — too high, discarding`);
+        liquidityXRP = null;
+      }
+
       // Get volume data (mock fallback)
       const volumeData = this.getVolumeEstimate(key);
 
