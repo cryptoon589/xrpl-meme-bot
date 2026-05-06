@@ -135,7 +135,7 @@ export class TradeAnalyzer {
     insights.push(`Overall: ${rawTrades.length} trades | Win rate: ${(winRate*100).toFixed(1)}% | Avg win: +${avgWin.toFixed(1)}% | Avg loss: ${avgLoss.toFixed(1)}% | Total PnL: ${totalPnL.toFixed(2)} XRP`);
 
     // ── Burst trade analysis ───────────────────────────────────────
-    let recMinLiquidity  = 2000;
+    let recMinLiquidity  = 500; // baseline matches .env MIN_LIQUIDITY_XRP
     let recStopLoss      = -8;
     let recTp1Burst      = 15;
     let recTp2Burst      = 30;
@@ -166,8 +166,8 @@ export class TradeAnalyzer {
       }
       // Recommend min liquidity at start of best bucket
       const bucketFloors: Record<string, number> = { '<2k': 0, '2k-5k': 2000, '5k-20k': 5000, '>20k': 20000 };
-      recMinLiquidity = bucketFloors[bestLiqBucket] || 2000;
-      if (recMinLiquidity > 2000) {
+      recMinLiquidity = bucketFloors[bestLiqBucket] || 500;
+      if (recMinLiquidity > 500) {
         insights.push(`📈 Best win rate in ${bestLiqBucket} bucket → raising min liquidity to ${recMinLiquidity} XRP`);
       }
 
@@ -187,7 +187,7 @@ export class TradeAnalyzer {
       const stopHits = burst.filter(t => t.exit_reason?.includes('stop_loss') || t.pnl_percent <= -7).length;
       const stopRate = stopHits / burst.length;
       if (stopRate > 0.4) {
-        recMinLiquidity = Math.max(recMinLiquidity, 5000);
+        recMinLiquidity = Math.max(recMinLiquidity, 2000);
         insights.push(`⚠️ ${(stopRate*100).toFixed(0)}% stop loss rate — entering too early/shallow → min liquidity → ${recMinLiquidity} XRP`);
       } else {
         insights.push(`✅ Stop loss rate ${(stopRate*100).toFixed(0)}% — acceptable`);
@@ -233,9 +233,9 @@ export class TradeAnalyzer {
     }
 
     // ── Scored trade analysis ─────────────────────────────────────
-    let recMinScore   = 65;
-    let recTp1Scored  = 35;
-    let recTp2Scored  = 75;
+    let recMinScore   = 55; // baseline matches .env MIN_SCORE_PAPER_TRADE
+    let recTp1Scored  = 10; // baseline matches paperTrader defaults
+    let recTp2Scored  = 20;
     let recWeights: ScoreWeights = {
       liquidityScore:    17,
       holderGrowthScore: 17,
@@ -257,7 +257,7 @@ export class TradeAnalyzer {
         insights.push(`Scored ≥${thr}: ${above.length} trades | ${(wr*100).toFixed(0)}% win rate`);
         if (wr > bestThrWR) { bestThrWR = wr; recMinScore = thr; }
       }
-      if (recMinScore !== 65) {
+      if (recMinScore !== 55) {
         insights.push(`📊 Optimal score threshold: ${recMinScore} (${(bestThrWR*100).toFixed(0)}% win rate)`);
       }
 
