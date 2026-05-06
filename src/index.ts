@@ -28,7 +28,7 @@ import { PaperTrader } from './paper/paperTrader';
 import { TelegramAlerter } from './telegram/alerts';
 import { Database } from './db/database';
 import { AlertPayload } from './types';
-import { PositionSizer } from './paper/positionSizer';
+// PositionSizer used internally by PaperTrader — not needed here
 import { CorrelationDetector } from './scoring/correlationDetector';
 import { ActiveDiscovery } from './scanner/activeDiscovery';
 import { TrendingSeeder } from './scanner/trendingSeeder';
@@ -115,7 +115,6 @@ async function main() {
 
 
   const issuerReputation = new IssuerReputation();
-  const positionSizer = new PositionSizer();
   const correlationDetector = new CorrelationDetector();
   const paperTrader = config.mode === 'PAPER' ? new PaperTrader(config, db) : null;
   const telegramAlerter = new TelegramAlerter(config);
