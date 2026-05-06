@@ -478,9 +478,16 @@ export class PaperTrader {
         continue;
       }
 
-      // Check Take Profit 1 — use learned target if available, else +35%
-      const scoredTp1 = position.tp1Pct ?? 35;
-      const scoredTp2 = position.tp2Pct ?? 75;
+      // Time stop for scored trades: exit after 60 min if no meaningful gain
+      if (ageMs >= 60 * 60 * 1000 && pnlPercent < 5 && trade.remainingPosition > 0) {
+        keysToClose.push({ key, reason: 'time_stop_loss' });
+        closedTrades.push(trade);
+        continue;
+      }
+
+      // Check Take Profit 1 — use learned target if available, else +10%
+      const scoredTp1 = position.tp1Pct ?? 10;
+      const scoredTp2 = position.tp2Pct ?? 20;
 
       if (!trade.tp1Hit && pnlPercent >= scoredTp1 && trade.remainingPosition > 0) {
         this.partialClose(key, currentPrice, 40, 'take_profit_1', snapshot);

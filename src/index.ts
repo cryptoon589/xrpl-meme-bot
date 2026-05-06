@@ -922,7 +922,6 @@ function startPeriodicScan(
       message: lines.join('\n'),
     });
   }, 3600000);
-
   // ── Trade analysis cron: runs every 6h ────────────────────────────
   const tradeAnalyzer = new TradeAnalyzer(db);
 
