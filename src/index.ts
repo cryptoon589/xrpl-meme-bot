@@ -217,6 +217,10 @@ async function main() {
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
 
+  // Pre-load AMM accounts for all known tokens so burst detector catches
+  // the FIRST buy on any token — not the second (lazy registration miss)
+  await burstDetector.preloadAMMs();
+
   // Subscribe to live tx stream — activeDiscovery handles token extraction
   await xrplClient.subscribeTransactions((tx) => {
     // Real-time buy pressure tracking (runs on every tx, no queue)

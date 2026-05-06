@@ -35,12 +35,12 @@ import { info, warn, debug } from '../utils/logger';
 // Tuning knobs — adjust via env or constructor
 // ─────────────────────────────────────────────
 const BURST_WINDOW_MS      = 90_000;     // rolling window to cluster buys
-const MIN_UNIQUE_WALLETS   = 2;          // distinct buyers needed to fire (lowered: whale + 1 = valid signal)
-const MIN_BUY_VOLUME_XRP   = 50;         // total XRP bought in window
+const MIN_UNIQUE_WALLETS   = 2;          // distinct buyers needed to fire (whale + 1 = valid signal)
+const MIN_BUY_VOLUME_XRP   = 30;         // lowered: catch smaller early bursts (was 50)
 const ALERT_COOLDOWN_MS    = 20 * 60_000; // 20 min per token
-const MIN_POOL_XRP         = 500;        // ignore pools below this TVL
+const MIN_POOL_XRP         = 500;        // ignore pools below this TVL (matches global LP min)
 const MAX_TRACKED_TOKENS   = 1000;       // memory safety cap
-const PRICE_FETCH_DELAY_MS = 2_000;      // wait 2s before fetching AMM price
+const PRICE_FETCH_DELAY_MS = 0;          // fire immediately — no artificial delay (was 2000ms)
 
 interface BuyEvent {
   wallet: string;
@@ -97,6 +97,44 @@ export class BurstDetector {
     this.xrplClient = xrplClient;
     this.alerter   = alerter;
     this.db        = db;
+  }
+
+  /**
+   * Pre-register AMM accounts for all known tracked tokens at startup.
+   * Without this, the first buy on any token is always missed because
+   * ensureAmmRegistered fires an async lookup AFTER scanAmmFlows already ran.
+   * Calling this at startup means every subsequent live buy is caught from tx #1.
+   */
+  async preloadAMMs(): Promise<void> {
+    const tokens = this.db.getTrackedTokens();
+    info(`[BurstDetector] Pre-loading AMM accounts for ${tokens.length} tracked tokens...`);
+    let registered = 0;
+    // Batch in groups of 10 to avoid flooding the WS connection
+    for (let i = 0; i < tokens.length; i += 10) {
+      const batch = tokens.slice(i, i + 10);
+      await Promise.all(batch.map(async (token) => {
+        const key = `${token.currency}:${token.issuer}`;
+        if (this.ammToToken.has(key)) return; // already registered
+        if (STABLECOINS.has(token.currency)) return;
+        // Init state so recordBuy can work immediately
+        if (!this.tokens.has(key)) {
+          const displayName = this.decodeCurrency(token.currency);
+          this.tokens.set(key, {
+            rawCurrency: token.currency, issuer: token.issuer, displayName,
+            buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
+            lastTrade: Date.now(),
+          });
+        }
+        const ammAccount = await this.fetchAMMAccount(token.currency, token.issuer);
+        if (ammAccount) {
+          this.ammToToken.set(ammAccount, key);
+          registered++;
+        }
+      }));
+      // Small pause between batches to avoid WS overload
+      if (i + 10 < tokens.length) await new Promise(r => setTimeout(r, 200));
+    }
+    info(`[BurstDetector] Pre-load complete: ${registered}/${tokens.length} AMMs registered`);
   }
 
   // ─────────────────────────────────────────

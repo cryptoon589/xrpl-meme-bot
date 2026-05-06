@@ -66,10 +66,10 @@ export class PaperTrader {
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
 
-    // Require minimum liquidity for burst trades — below 800 XRP is too risky
+    // Require minimum liquidity for burst trades — consistent with global LP min (500 XRP)
     const liquidity = snapshot?.liquidityXRP ?? 0;
-    if (liquidity < 800) {
-      debug(`Burst trade skipped: pool too shallow (${liquidity.toFixed(0)} XRP < 800 XRP)`);
+    if (liquidity < 500) {
+      debug(`Burst trade skipped: pool too shallow (${liquidity.toFixed(0)} XRP < 500 XRP)`);
       return null;
     }
 
@@ -271,9 +271,11 @@ export class PaperTrader {
       buyRatio
     );
 
+    // Cap scored trades at 10 XRP until win rate improves (burst stays at 25 XRP max)
+    const MAX_SCORED_TRADE_XRP = 10;
     const tradeSizeXRP = Math.min(
       Math.max(sizeRecommendation.sizeXRP, this.config.minTradeXRP),
-      this.config.maxTradeXRP
+      Math.min(this.config.maxTradeXRP, MAX_SCORED_TRADE_XRP)
     );
     const entryPrice = snapshot.priceXRP;
     const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
