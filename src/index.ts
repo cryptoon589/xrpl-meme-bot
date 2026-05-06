@@ -216,11 +216,14 @@ async function main() {
 
   await tokenDiscovery.initialize();
   await ammScanner.initialize();
-  await telegramAlerter.sendTestMessage();
-
   // Pre-load AMM accounts for all known tokens so burst detector catches
   // the FIRST buy on any token — not the second (lazy registration miss)
-  await burstDetector.preloadAMMs();
+  // Non-fatal: if preload fails the bot still runs, just misses first buy per token
+  try {
+    await burstDetector.preloadAMMs();
+  } catch (err) {
+    warn(`[preloadAMMs] Non-fatal error during startup preload: ${err}`);
+  }
 
   // Subscribe to live tx stream — activeDiscovery handles token extraction
   await xrplClient.subscribeTransactions((tx) => {
