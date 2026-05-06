@@ -23,12 +23,24 @@ interface SocialCache {
 
 export class SocialDetector {
   private wsUrl: string;
+  private sharedClient: xrpl.Client | null = null;
   private cache: Map<string, SocialCache> = new Map();
 
   private readonly CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
   constructor(wsUrl: string) {
     this.wsUrl = wsUrl;
+  }
+
+  /** Get or create a shared persistent client (avoids new WS per token). */
+  private async getClient(): Promise<xrpl.Client> {
+    if (this.sharedClient && this.sharedClient.isConnected()) {
+      return this.sharedClient;
+    }
+    const client = new xrpl.Client(this.wsUrl);
+    await client.connect();
+    this.sharedClient = client;
+    return client;
   }
 
   /**
@@ -44,8 +56,7 @@ export class SocialDetector {
     let score = 0;
 
     try {
-      const client = new xrpl.Client(this.wsUrl);
-      await client.connect();
+      const client = await this.getClient();
 
       try {
         const [domainScore, emailScore, ageScore, mmScore] = await Promise.all([

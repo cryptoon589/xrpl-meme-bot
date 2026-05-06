@@ -87,6 +87,8 @@ export class BurstDetector {
   private tokens: Map<string, TokenState> = new Map(); // key = "rawCurrency:issuer"
   /** ammAccount → key (rawCurrency:issuer) — populated lazily */
   private ammToToken: Map<string, string> = new Map();
+  /** key → first seen timestamp — used for age-aware cooldown */
+  private tokenFirstSeen: Map<string, number> = new Map();
   private xrplClient: XRPLClient;
   private alerter: TelegramAlerter;
   private db: Database;
@@ -251,6 +253,7 @@ export class BurstDetector {
       buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
       lastTrade: Date.now(),
     });
+    if (!this.tokenFirstSeen.has(key)) this.tokenFirstSeen.set(key, Date.now());
 
     // Async: fetch AMM pool account and register it
     this.fetchAMMAccount(rawCurrency, issuer).then(ammAccount => {
@@ -303,8 +306,12 @@ export class BurstDetector {
     // Only evaluate burst on buy events
     if (isSell) return;
 
-    // Check if we're in alert cooldown
-    if (now - state.lastAlertTs < ALERT_COOLDOWN_MS) return;
+    // Age-aware cooldown: new tokens (< 24h) get shorter cooldown to catch re-bursts
+    const tokenAgeMs = now - (this.tokenFirstSeen.get(key) || now);
+    const effectiveCooldown = tokenAgeMs < 24 * 60 * 60 * 1000
+      ? 5 * 60 * 1000   // 5 min for tokens < 24h old
+      : ALERT_COOLDOWN_MS; // 20 min for older tokens
+    if (now - state.lastAlertTs < effectiveCooldown) return;
 
     // Evaluate burst using BUY events only
     const buyEvents     = state.buys.filter(e => !e.isSell);

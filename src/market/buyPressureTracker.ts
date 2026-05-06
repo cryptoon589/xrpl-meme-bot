@@ -21,6 +21,7 @@ export interface BuyPressureSnapshot {
   uniqueSellers: number;
   newWalletBuys: number;      // wallets buying this token for the FIRST TIME
   newWalletPercent: number;   // what % of buyers are new wallets (0-100)
+  buyerWallets: string[];     // addresses of unique buyers in window (for whale tracking)
   buySellRatio: number;       // buyCount / (buyCount + sellCount), 0.5 = neutral
   volumeRatio: number;        // buyVolumeXRP / (buyVolumeXRP + sellVolumeXRP)
   lastActivityMs: number;     // ms since last trade
@@ -207,6 +208,7 @@ export class BuyPressureTracker {
       sellVolumeXRP,
       uniqueBuyers: uniqueBuyerSet.size,
       uniqueSellers: uniqueSellerSet.size,
+      buyerWallets: Array.from(uniqueBuyerSet), // expose for whale tracking
       newWalletBuys,
       newWalletPercent,
       buySellRatio,

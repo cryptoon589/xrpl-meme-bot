@@ -41,6 +41,7 @@ import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
+import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 
 // Global state
 let isRunning = false;
@@ -101,6 +102,7 @@ async function main() {
   const whaleTracker = new WhaleTracker();
   const socialDetector = new SocialDetector(config.xrplWsUrl);
   const liveValidator = new LiveValidator(db);
+  const multiTimeframeScorer = new MultiTimeframeScorer(config);
 
   // Load whale data from DB and wire into scorer
   whaleTracker.load(db);
@@ -307,7 +309,7 @@ async function main() {
     issuerReputation, correlationDetector,
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
-    whaleTracker, liveValidator, socialDetector, runtimeLearning
+    whaleTracker, liveValidator, socialDetector, runtimeLearning, multiTimeframeScorer
   );
 
   startHealthCheck(xrplClient);
@@ -497,7 +499,8 @@ function startPeriodicScan(
   whaleTracker: WhaleTracker,
   liveValidator: LiveValidator,
   socialDetector: SocialDetector,
-  runtimeLearning: RuntimeLearning
+  runtimeLearning: RuntimeLearning,
+  multiTimeframeScorer: MultiTimeframeScorer
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
@@ -596,23 +599,26 @@ function startPeriodicScan(
 
               const risks = riskFilter.evaluate(token, snapshot, pool);
 
-              // Get buyer wallets for whale detection
-              const buyerWallets = Array.from(
-                new Set((pressure as any).buyerWallets as string[] | undefined ?? [])
-              );
+              // Get buyer wallets for whale detection (now properly exposed by BuyPressureTracker)
+              const buyerWallets: string[] = pressure.buyerWallets ?? [];
 
               // Whale score (synchronous from in-memory registry)
               const whaleBoost = whaleTracker.getWhaleScore(token.currency, token.issuer, buyerWallets);
 
-              // Social score (async, cached 15min)
+              // Social score (async, cached 15min via shared WS client)
               const socialBoost = await socialDetector.getSocialScore(token.currency, token.issuer);
 
               const baseScore = tokenScorer.score(token, snapshot, pool, risks, whaleBoost, socialBoost);
 
+              // Multi-timeframe consensus — adjusts score based on 5m/15m/1h momentum alignment
+              const mtf = multiTimeframeScorer.calculate(snapshot, baseScore.totalScore);
+              // Only use MTF consensus if trend is bullish — neutral/bearish keeps base score
+              const mtfAdjusted = mtf.trend === 'bullish' ? mtf.consensus : baseScore.totalScore;
+
               // Apply issuer reputation boost/penalty
               const issuerTrust = issuerReputation.getTrustScore(token.issuer);
               const adjustedTotalScore = Math.round(
-                baseScore.totalScore * 0.8 + issuerTrust * 0.2
+                mtfAdjusted * 0.8 + issuerTrust * 0.2
               );
               const score = { ...baseScore, totalScore: adjustedTotalScore };
 
@@ -794,23 +800,21 @@ function startPeriodicScan(
                   message: `Closed paper trade for ${ct.tokenCurrency}`,
                 }, config), 0);
 
-                // Feature 2: Record whale wallets after a winning trade (>50% PnL)
-                if (ct.status === 'closed' && ct.pnlPercent !== null && ct.pnlPercent > 50) {
+                // Record whale wallets after a winning trade (>15% PnL) — lowered from 50%
+                // Now uses real buyerWallets exposed by BuyPressureTracker
+                if (ct.status === 'closed' && ct.pnlPercent !== null && ct.pnlPercent > 15) {
                   const pressure = buyPressureTracker.getSnapshot(ct.tokenCurrency, ct.tokenIssuer);
-                  // Collect unique buyers as early buyer list (best effort)
-                  const earlyBuyers: string[] = [];
-                  // We don't have direct wallet list from BuyPressureTracker snapshot,
-                  // but we can use the known buyer count as an approximation marker.
-                  // The actual whale detection relies on on-chain data; here we record
-                  // the token as a winner so future scans flag it.
-                  whaleTracker.recordWinner(
-                    ct.tokenCurrency,
-                    ct.tokenIssuer,
-                    earlyBuyers,
-                    ct.pnlXRP ?? 0
-                  );
-                  // Persist to DB
-                  whaleTracker.save(db);
+                  const earlyBuyers: string[] = pressure.buyerWallets ?? [];
+                  if (earlyBuyers.length > 0) {
+                    whaleTracker.recordWinner(
+                      ct.tokenCurrency,
+                      ct.tokenIssuer,
+                      earlyBuyers,
+                      ct.pnlXRP ?? 0
+                    );
+                    whaleTracker.save(db);
+                    info(`[WhaleTracker] Recorded ${earlyBuyers.length} early buyers from winning trade ${ct.tokenCurrency} (+${ct.pnlPercent.toFixed(1)}%)`);
+                  }
                 }
               }
             }

@@ -135,7 +135,14 @@ export class TokenScorer {
     // NOT a reward for big pools — just a penalty for tiny ones
     const exitSafety = this.scoreExitSafety(snapshot);
 
-    const totalScore = baseScore + whaleBoost + exitSafety;
+    // Token age boost: newer tokens get higher weight — meme pumps peak early
+    const tokenAgeMs = Date.now() - (token.firstSeen || Date.now());
+    const ageBoost = tokenAgeMs < 1 * 60 * 60 * 1000  ? 8   // < 1h old: +8
+                   : tokenAgeMs < 6 * 60 * 60 * 1000  ? 5   // < 6h old: +5
+                   : tokenAgeMs < 24 * 60 * 60 * 1000 ? 2   // < 24h old: +2
+                   : 0;                                       // older: no boost
+
+    const totalScore = baseScore + whaleBoost + exitSafety + ageBoost;
     const clamped = Math.max(0, Math.min(100, totalScore));
 
     debug(`[Score] ${token.currency}: momentum=${momentumScore.toFixed(0)} buyPressure=${buyPressureScore.toFixed(0)} newWallets=${newWalletScore.toFixed(0)} volSurge=${volSurgeScore.toFixed(0)} whale=${whaleBoost.toFixed(1)} exit=${exitSafety.toFixed(1)} → ${clamped.toFixed(0)}`);

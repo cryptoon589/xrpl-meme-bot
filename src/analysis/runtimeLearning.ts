@@ -88,7 +88,8 @@ export class RuntimeLearning {
   getTpTargets(profile: 'burst' | 'scored'): { tp1: number; tp2: number } {
     this.maybeReload();
     if (!this.recs) {
-      return profile === 'burst' ? { tp1: 15, tp2: 30 } : { tp1: 35, tp2: 75 };
+      // Defaults match current paperTrader hardcoded values
+      return profile === 'burst' ? { tp1: 15, tp2: 30 } : { tp1: 10, tp2: 20 };
     }
     if (profile === 'burst') {
       return {
@@ -97,8 +98,8 @@ export class RuntimeLearning {
       };
     }
     return {
-      tp1: this.recs.scoredTp1Percent || 35,
-      tp2: this.recs.scoredTp2Percent || 75,
+      tp1: this.recs.scoredTp1Percent || 10,
+      tp2: this.recs.scoredTp2Percent || 20,
     };
   }
 

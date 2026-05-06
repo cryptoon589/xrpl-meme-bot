@@ -441,6 +441,23 @@ export class PaperTrader {
           continue;
         }
 
+        // Sell pressure exit for burst: demand collapsed before TP1, cut loss early
+        const burstSells = (snapshot as any)?.sellCount5m ?? 0;
+        const burstBuys  = (snapshot as any)?.buyCount5m  ?? 1;
+        const burstDemandCollapsed = (
+          !trade.tp1Hit &&
+          ageMs > 3 * 60 * 1000 &&
+          burstSells >= 3 &&
+          burstBuys <= 1 &&
+          pnlPercent < 0
+        );
+        if (burstDemandCollapsed) {
+          info(`\uD83D\uDEA8 Burst demand collapse exit for ${key}: ${burstBuys} buys / ${burstSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
+          keysToClose.push({ key, reason: 'sell_pressure_exit' });
+          closedTrades.push(trade);
+          continue;
+        }
+
         // Trailing stop activates at ~2/3 of TP1, distance 5%
         if (!trade.trailingStopActive && pnlPercent >= trailActivation) {
           trade.trailingStopActive = true;
