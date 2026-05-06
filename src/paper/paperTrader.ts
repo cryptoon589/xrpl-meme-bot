@@ -242,9 +242,9 @@ export class PaperTrader {
       return null;
     }
 
-    // Cooldown: don't re-enter a token within 30 minutes of last close
+    // Cooldown: don't re-enter a token within 2 hours of last close
     const lastClose = this.lastCloseTime?.get(key) || 0;
-    if (Date.now() - lastClose < 30 * 60 * 1000) {
+    if (Date.now() - lastClose < 2 * 60 * 60 * 1000) { // 2h cooldown
       debug(`Cooldown active for ${key}, skipping re-entry`);
       return null;
     }
@@ -978,6 +978,15 @@ export class PaperTrader {
       }
     }
     return null;
+  }
+
+  /**
+   * Reset daily P&L tracking at midnight UTC.
+   * Prevents a bad day from permanently shrinking conviction sizing.
+   */
+  resetDailyTracking(): void {
+    this.dailyPnL = 0;
+    info('[PaperTrader] Daily P&L tracking reset (midnight UTC)');
   }
 
   getState(): {

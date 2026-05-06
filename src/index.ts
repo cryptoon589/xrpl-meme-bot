@@ -734,8 +734,19 @@ function startPeriodicScan(
             const tradeKey = `${token.currency}:${token.issuer}`;
             // #3 Time-of-day gate: skip entries during learned losing hours
             const goodHour = runtimeLearning.isGoodTradingHour();
+            // Fix 2: require minimum buy activity before entry (not just score)
+            const minBuyGate = (snapshot.buyCount5m ?? 0) >= 3;
+
+            // Fix 4: reject correlated/coordinated pump tokens
+            const correlationWarning = correlationDetector.getCorrelationWarning(token.currency, token.issuer);
+            if (correlationWarning) debug(`Correlation gate: ${correlationWarning}`);
+
+            // Fix 7: price must still be moving up at entry time
+            const stillMovingUp = (snapshot.priceChange5m ?? 0) >= 0;
+
             if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
-                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && goodHour) {
+                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && goodHour &&
+                minBuyGate && !correlationWarning && stillMovingUp) {
               tradeLocks.add(tradeKey);
               const scoredTp = runtimeLearning.getTpTargets('scored');
               const trade = paperTrader.tryOpenTrade(
@@ -984,6 +995,21 @@ function startPeriodicScan(
   setInterval(runAnalysis, 6 * 60 * 60 * 1000); // every 6 hours
   // Also run once after 30 min (first meaningful data after startup)
   setTimeout(runAnalysis, 30 * 60 * 1000);
+
+  // Fix 9: Reset daily P&L tracking at midnight UTC
+  const scheduleMidnightReset = () => {
+    const now = new Date();
+    const msUntilMidnight = (
+      new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1))
+        .getTime() - Date.now()
+    );
+    setTimeout(() => {
+      if (paperTrader) paperTrader.resetDailyTracking();
+      scheduleMidnightReset(); // reschedule for next midnight
+    }, msUntilMidnight);
+    info(`[DailyReset] Next bankroll reset in ${(msUntilMidnight / 3600000).toFixed(1)}h`);
+  };
+  scheduleMidnightReset();
 }
 
 

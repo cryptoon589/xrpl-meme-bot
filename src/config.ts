@@ -23,7 +23,7 @@ export function loadConfig(): BotConfig {
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
     mode: mode === 'AUTO' ? 'WATCH' : mode,
-    minLiquidityXRP: parseInt(process.env.MIN_LIQUIDITY_XRP || '2000', 10),
+    minLiquidityXRP: parseInt(process.env.MIN_LIQUIDITY_XRP || '500', 10),
     minScoreAlert: parseInt(process.env.MIN_SCORE_ALERT || '75', 10),
     minScorePaperTrade: parseInt(process.env.MIN_SCORE_PAPER_TRADE || '80', 10),
     startingBankrollXRP: parseInt(process.env.STARTING_BANKROLL_XRP || '100', 10),
@@ -39,8 +39,8 @@ export function loadConfig(): BotConfig {
   };
 
   if (config.minLiquidityXRP <= 0) {
-    warn(`WARNING: MIN_LIQUIDITY_XRP is ${config.minLiquidityXRP}, setting to default 2000`);
-    config.minLiquidityXRP = 2000;
+    warn(`WARNING: MIN_LIQUIDITY_XRP is ${config.minLiquidityXRP}, setting to default 500`);
+    config.minLiquidityXRP = 500;
   }
 
   if (config.maxTradeXRP <= 0 || config.maxTradeXRP > config.startingBankrollXRP) {
