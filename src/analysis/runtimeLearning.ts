@@ -52,7 +52,8 @@ export class RuntimeLearning {
    */
   isGoodTradingHour(): boolean {
     this.maybeReload();
-    if (!this.recs?.tradingPauseEnabled) return true; // not enough data yet
+    // Only block hours if pause is enabled AND we have enough trades to trust the data
+    if (!this.recs?.tradingPauseEnabled || (this.recs.tradesAnalyzed < 50)) return true;
     const hour = new Date().getUTCHours();
     const isWorstHour = this.recs.worstHours.includes(hour);
     if (isWorstHour) {

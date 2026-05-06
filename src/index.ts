@@ -928,57 +928,58 @@ function startPeriodicScan(
 
   // Also expose manual trigger via a simple check at startup
   const runAnalysis = async () => {
-    const recs = tradeAnalyzer.analyze();
-    if (!recs) return; // Not enough trades yet
+    const recs = tradeAnalyzer.analyze(); // null if < 5 trades
+    const state = paperTrader ? paperTrader.getState() : null;
 
     // ── 6h forwardable bot log ─────────────────────────────────────
-    // Format a clean log you can paste into chat for self-learning review.
-    const state    = paperTrader ? paperTrader.getState() : null;
-    const w        = recs.scoreWeights;
+    const w = recs?.scoreWeights;
     const logLines: string[] = [
-      `🤖 <b>BOT LOG — ${new Date().toUTCString()}</b>`,
+      `BOT LOG - ${new Date().toUTCString()}`,
       ``,
-      `<b>📊 TRADE HISTORY</b>`,
-      `Trades analyzed: ${recs.tradesAnalyzed} | Win rate: ${recs.overallWinRate}%`,
-      `Auto-apply: ${recs.autoApplyReady ? '✅ Active' : `⏳ Need ${Math.max(0, 30 - recs.tradesAnalyzed)} more trades`}`,
-      ``,
-      `<b>💼 PORTFOLIO</b>`,
+      `PORTFOLIO`,
       state ? `Bankroll: ${state.bankrollXRP.toFixed(2)} XRP | Daily P&L: ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP | Open: ${state.openPositions}` : 'N/A',
       ``,
-      `<b>🎯 CURRENT PARAMS</b>`,
-      `Min score: ${recs.minScorePaperTrade} | Min liq: ${recs.minLiquidityXRP} XRP`,
-      `Burst — Stop: ${recs.burstStopLossPercent}% | TP1: +${recs.burstTp1Percent}% | TP2: +${recs.burstTp2Percent}%`,
-      `Scored — TP1: +${recs.scoredTp1Percent}% | TP2: +${recs.scoredTp2Percent}%`,
-      `Entry pullback wait: ${recs.entryPullbackPct}% | Confirm bars: ${recs.entryConfirmBars}`,
-      `Trading pause: ${recs.tradingPauseEnabled ? `✅ Worst hours: ${recs.worstHours.map(h => h+':00').join(', ')} UTC` : '❌ Not yet (need 40+ trades)'}`,
+      `TRADE HISTORY`,
+      recs
+        ? `Trades: ${recs.tradesAnalyzed} | Win rate: ${recs.overallWinRate}% | Auto-apply: ${recs.autoApplyReady ? 'YES' : 'Need ' + Math.max(0, 30 - recs.tradesAnalyzed) + ' more'}`
+        : `Collecting data (need 5+ closed trades)`,
       ``,
-      `<b>🧠 LEARNED WEIGHTS</b>`,
-      `Momentum: ${w.volumeAccelScore} | Buy pressure: ${w.buyPressureScore} | New wallets: ${w.holderGrowthScore} | Vol surge: ${w.liquidityScore}`,
-      ``,
-      `<b>💡 INSIGHTS</b>`,
-      ...recs.insights.slice(0, 8).map(i => `• ${i}`),
-      ``,
-      `<b>📈 RUN LENGTHS (winners)</b>`,
-      `Median: +${recs.medianRunPct}% | P75: +${recs.p75RunPct}% | Burst median: +${recs.burstMedianRunPct}% | Scored median: +${recs.scoredMedianRunPct}%`,
-      ``,
-      `<i>Forward this message to review and improve the bot.</i>`,
-    ].filter(l => l !== undefined);
+      ...(recs ? [
+        `PARAMS`,
+        `Min score: ${recs.minScorePaperTrade} | Min liq: ${recs.minLiquidityXRP} XRP`,
+        `Burst - Stop: ${recs.burstStopLossPercent}% | TP1: +${recs.burstTp1Percent}% | TP2: +${recs.burstTp2Percent}%`,
+        `Scored - TP1: +${recs.scoredTp1Percent}% | TP2: +${recs.scoredTp2Percent}%`,
+        `Trading pause: ${recs.tradingPauseEnabled ? 'YES - worst hours: ' + recs.worstHours.map((h: number) => h + ':00').join(', ') + ' UTC' : 'NO (need 40+ trades)'}`,
+        ``,
+        `WEIGHTS`,
+        `Momentum: ${w?.volumeAccelScore} | Buy pressure: ${w?.buyPressureScore} | New wallets: ${w?.holderGrowthScore} | Vol surge: ${w?.liquidityScore}`,
+        ``,
+        `INSIGHTS`,
+        ...recs.insights.slice(0, 8).map((i: string) => `- ${i}`),
+        ``,
+        `RUN LENGTHS`,
+        `Median: +${recs.medianRunPct}% | P75: +${recs.p75RunPct}% | Burst: +${recs.burstMedianRunPct}% | Scored: +${recs.scoredMedianRunPct}%`,
+        ``,
+      ] : []),
+      `Forward to review and improve the bot.`,
+    ].filter((l): l is string => l !== undefined);
 
     await telegramAlerter.sendAlert({
       type: 'bot_log',
       message: logLines.join('\n'),
     });
-    // Auto-apply if ready and win rate is solid
-    if (recs.autoApplyReady) {
-      info('TradeAnalyzer: auto-apply threshold met — applying recommendations');
-      const configPath = process.env.CONFIG_PATH || './bot-config.json';
-      tradeAnalyzer.applyRecommendations(recs, configPath);
-    }
 
-    // Hot-reload learned weights + runtime params immediately after analysis
-    tokenScorer.loadLearnedWeights();
-    runtimeLearning.reload();
-    info('TradeAnalyzer: scorer weights and runtime learning reloaded');
+    // Auto-apply and hot-reload only if we have enough data
+    if (recs) {
+      if (recs.autoApplyReady) {
+        info('TradeAnalyzer: auto-apply threshold met - applying recommendations');
+        const configPath = process.env.CONFIG_PATH || './bot-config.json';
+        tradeAnalyzer.applyRecommendations(recs, configPath);
+      }
+      tokenScorer.loadLearnedWeights();
+      runtimeLearning.reload();
+      info('TradeAnalyzer: scorer weights and runtime learning reloaded');
+    }
   };
 
   setInterval(runAnalysis, 6 * 60 * 60 * 1000); // every 6 hours

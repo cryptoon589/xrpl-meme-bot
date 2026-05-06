@@ -14,7 +14,7 @@ import * as path from 'path';
 import { Database } from '../db/database';
 import { info, warn } from '../utils/logger';
 
-const MIN_TRADES_FOR_ANALYSIS = 20;
+const MIN_TRADES_FOR_ANALYSIS = 5; // lowered — send partial log even with few trades
 const RECOMMENDATIONS_PATH = path.join(process.cwd(), 'state', 'recommendations.json');
 const REPORT_PATH          = path.join(process.cwd(), 'state', 'trade_analysis.md');
 
@@ -445,7 +445,7 @@ export class TradeAnalyzer {
       if (b.total < 3) continue; // not enough data
       const wr = b.wins / b.total;
       if (wr >= 0.55) bestHours.push(h);
-      if (wr <= 0.25) worstHours.push(h);
+      if (wr <= 0.15) worstHours.push(h); // only block truly terrible hours (<15% win rate)
     }
 
     if (bestHours.length > 0) {
@@ -457,7 +457,7 @@ export class TradeAnalyzer {
 
     // Enable pause only if worst hours are materially worse than best
     // and we have enough data to be confident
-    const tradingPauseEnabled = worstHours.length >= 2 && rawTrades.length >= 40;
+    const tradingPauseEnabled = worstHours.length >= 1 && rawTrades.length >= 50; // need 50+ trades for reliable hour stats
     if (tradingPauseEnabled) {
       insights.push(`⏸️ Trading pause enabled for worst hours — bot will skip entries during ${worstHours.map(h=>`${h}:00`).join(', ')} UTC`);
     }
