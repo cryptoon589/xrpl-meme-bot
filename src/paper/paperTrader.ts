@@ -396,13 +396,24 @@ export class PaperTrader {
 
       // ── BURST EXIT PROFILE ───────────────────────────────────────────────────
       if (isBurst) {
-        // Safety time stop: exit after 30 min (trailing stop should catch the peak
-        // long before this — this is just a dead-man's switch for stalled trades)
-        if (ageMs >= 30 * 60 * 1000) {
-          info(`⏱️ Burst safety time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
-          keysToClose.push({ key, reason: pnlPercent >= 0 ? 'time_stop_profit' : 'time_stop_loss' });
-          closedTrades.push(trade);
-          continue;
+        // Safety time stop: exit after 45 min ONLY if trade is clearly losing or
+        // clearly winning. Flat trades near entry get extra time — fees make
+        // closing a +0% trade an immediate loss. Let stop-loss handle the exit.
+        if (ageMs >= 45 * 60 * 1000) {
+          const isClearWin  = pnlPercent >= 5;   // worth closing for profit
+          const isClearLoss = pnlPercent <= -4;  // stop bleeding
+          if (isClearWin || isClearLoss) {
+            info(`⏱️ Burst safety time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
+            keysToClose.push({ key, reason: pnlPercent >= 0 ? 'time_stop_profit' : 'time_stop_loss' });
+            closedTrades.push(trade);
+            continue;
+          } else if (ageMs >= 90 * 60 * 1000) {
+            // Hard cap: close any burst trade still open after 90 min regardless
+            info(`⏱️ Burst hard time cap (90m) for ${key} PnL: ${pnlPercent.toFixed(1)}%`);
+            keysToClose.push({ key, reason: pnlPercent >= 0 ? 'time_stop_profit' : 'time_stop_loss' });
+            closedTrades.push(trade);
+            continue;
+          }
         }
 
         // Stop loss: -8% (tight — pump dumps fast)
@@ -514,8 +525,8 @@ export class PaperTrader {
         continue;
       }
 
-      // Time stop for scored trades: exit after 60 min if no meaningful gain
-      if (ageMs >= 60 * 60 * 1000 && pnlPercent < 5 && trade.remainingPosition > 0) {
+      // Time stop for scored trades: exit after 90 min if no meaningful gain
+      if (ageMs >= 90 * 60 * 1000 && pnlPercent < 5 && trade.remainingPosition > 0) {
         keysToClose.push({ key, reason: 'time_stop_loss' });
         closedTrades.push(trade);
         continue;

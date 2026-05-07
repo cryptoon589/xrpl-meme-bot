@@ -370,7 +370,7 @@ export class BurstDetector {
       // Skip illiquid pools (MIN_POOL_XRP is the XRP side only; TVL = poolXRP * 2)
       // New tokens (< 1h old) get a lower minimum pool threshold (150 XRP) to catch early launches
       const tokenAgeMs = Date.now() - (state.firstSeenAt ?? Date.now());
-      const effectiveMinPool = tokenAgeMs < 60 * 60 * 1000 ? 150 : MIN_POOL_XRP;
+      const effectiveMinPool = tokenAgeMs < 60 * 60 * 1000 ? 300 : MIN_POOL_XRP;
       if (ammInfo.poolXRP < effectiveMinPool) {
         debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP one-side < ${effectiveMinPool})`);
         return;
