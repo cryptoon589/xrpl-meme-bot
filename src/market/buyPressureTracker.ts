@@ -41,6 +41,11 @@ export class BuyPressureTracker {
   private knownWallets: Map<string, Set<string>> = new Map();
   // Per-token: last trade timestamp
   private lastTrade: Map<string, number> = new Map();
+  // Per-token: last time onMomentumDetected was fired (cooldown)
+  private momentumCooldown: Map<string, number> = new Map();
+
+  /** Fired when a token crosses the momentum threshold in real-time */
+  public onMomentumDetected?: (currency: string, issuer: string, snapshot: BuyPressureSnapshot) => void;
 
   private readonly WINDOW_MS = 15 * 60 * 1000; // 15-minute window — catches more activity
   private readonly MAX_KNOWN_WALLETS = 500;      // cap per token to prevent memory leak
@@ -140,6 +145,21 @@ export class BuyPressureTracker {
 
     // Prune old events beyond window
     this.pruneOldEvents(key, now);
+
+    // Real-time momentum detection — fire callback when signals cross threshold
+    if (side === 'buy' && this.onMomentumDetected) {
+      const colonIdx = key.indexOf(':');
+      const currency = key.substring(0, colonIdx);
+      const issuer   = key.substring(colonIdx + 1);
+      const lastFire = this.momentumCooldown.get(key) ?? 0;
+      if (Date.now() - lastFire > 5 * 60 * 1000) { // 5 min cooldown per token
+        const snap = this.getSnapshot(currency, issuer);
+        if (snap.uniqueBuyers >= 3 && snap.buySellRatio >= 0.70 && snap.buyVolumeXRP >= 100) {
+          this.momentumCooldown.set(key, Date.now());
+          this.onMomentumDetected(currency, issuer, snap);
+        }
+      }
+    }
 
     // Prune least-active tokens if we're tracking too many
     if (this.events.size > this.MAX_TOKENS_TRACKED) {

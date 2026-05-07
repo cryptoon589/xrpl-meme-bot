@@ -8,6 +8,7 @@ import { BotConfig } from '../config';
 import { Database } from '../db/database';
 import { PositionSizer } from './positionSizer';
 import { info, warn, debug } from '../utils/logger';
+import { BuyPressureTracker } from '../market/buyPressureTracker';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -35,6 +36,7 @@ export class PaperTrader {
   private dailyPnL: number = 0;
   private tradesToday: number = 0;
   private lastResetDate: string = '';
+  private buyPressureTracker: BuyPressureTracker | null = null;
 
   // Trading stats for Kelly Criterion
   private totalTrades: number = 0;
@@ -51,6 +53,10 @@ export class PaperTrader {
 
     // Load existing state from DB
     this.loadState();
+  }
+
+  setBuyPressureTracker(tracker: BuyPressureTracker): void {
+    this.buyPressureTracker = tracker;
   }
 
   /**
@@ -236,10 +242,14 @@ export class PaperTrader {
       return null;
     }
 
-    // Cooldown: don't re-enter a token within 2 hours of last close
+    // Cooldown: 15min if buys still dominating (continuation move), 2h default
     const lastClose = this.lastCloseTime?.get(key) || 0;
-    if (Date.now() - lastClose < 2 * 60 * 60 * 1000) { // 2h cooldown
-      debug(`Cooldown active for ${key}, skipping re-entry`);
+    const liveBuyRatioReentry = (snapshot as any)?.buySellRatio ?? 0.5;
+    const reEntryCooldown = liveBuyRatioReentry >= 0.70
+      ? 15 * 60 * 1000        // 15 min — buys still dominating, ride continuation
+      : 2 * 60 * 60 * 1000;  // 2h default
+    if (Date.now() - lastClose < reEntryCooldown) {
+      debug(`Cooldown active for ${key} (${reEntryCooldown / 60000}min), skipping re-entry`);
       return null;
     }
 
@@ -403,14 +413,16 @@ export class PaperTrader {
         }
 
         // Momentum reversal exit:
-        // Only trigger if sells are HEAVILY dominant and we're in meaningful profit
-        // Note: snapshot.buyCount5m undercounts AMM buys — use higher thresholds
-        const sellCount    = (snapshot as any)?.sellCount5m ?? 0;
-        const buyCount     = (snapshot as any)?.buyCount5m  ?? 1;
+        // Use live pressure tracker for accurate buy/sell counts (catches AMM swaps)
+        const livePressure = this.buyPressureTracker?.getSnapshot(
+          snapshot.tokenCurrency, snapshot.tokenIssuer
+        );
+        const sellCount = livePressure ? livePressure.sellCount : ((snapshot as any)?.sellCount5m ?? 0);
+        const buyCount  = livePressure ? livePressure.buyCount  : ((snapshot as any)?.buyCount5m  ?? 1);
         const isMomentumDead = (
-          sellCount > buyCount * 3 &&         // sells 3x buys (was 2x — too sensitive)
-          sellCount >= 5 &&                   // need real sell volume, not 1 sell vs 0 buys
-          pnlPercent > 8                      // only exit if meaningfully in profit (was 3%)
+          sellCount > buyCount * 3 &&
+          sellCount >= 3 &&   // lower threshold since data is now accurate
+          pnlPercent > 8
         );
         if (isMomentumDead) {
           info(`🚨 Burst momentum reversal for ${key}: ${buyCount} buys / ${sellCount} sells | PnL: ${pnlPercent.toFixed(1)}%`);
@@ -541,14 +553,16 @@ export class PaperTrader {
       // If we're in profit and demand has clearly collapsed, exit before
       // the trailing stop catches it (trailing stop is price-reactive;
       // this is demand-reactive — faster signal)
-      const scoredSells    = (snapshot as any)?.sellCount5m ?? 0;
-      const scoredBuys     = (snapshot as any)?.buyCount5m  ?? 1;
-      const scoredUnique   = (snapshot as any)?.uniqueBuyers5m ?? 0;
+      const liveScore = this.buyPressureTracker?.getSnapshot(
+        snapshot.tokenCurrency, snapshot.tokenIssuer
+      );
+      const scoredSells = liveScore ? liveScore.sellCount : ((snapshot as any)?.sellCount5m ?? 0);
+      const scoredBuys  = liveScore ? liveScore.buyCount  : ((snapshot as any)?.buyCount5m  ?? 1);
       const demandCollapsed = (
-        pnlPercent > 10 &&          // only exit if meaningfully up
-        scoredSells > scoredBuys * 3 && // sells 3x buys (was just scoredBuys <= 1 — too sensitive)
-        scoredSells >= 5 &&         // need real sell volume not noise
-        trade.tp1Hit                // at least TP1 already hit — locked some gains
+        pnlPercent > 10 &&
+        scoredSells > scoredBuys * 3 &&
+        scoredSells >= 3 &&  // lower since data is now accurate
+        trade.tp1Hit
       );
       if (demandCollapsed) {
         info(`🚨 Scored demand collapse exit for ${key}: ${scoredBuys} buys / ${scoredSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
@@ -558,8 +572,8 @@ export class PaperTrader {
       }
 
       // Dead volume exit: flat price + zero activity for 10+ min = cut dead weight
-      const snapshotBuys = snapshot.buyCount5m ?? 0;
-      const snapshotSells = snapshot.sellCount5m ?? 0;
+      const snapshotBuys = liveScore ? liveScore.buyCount : (snapshot.buyCount5m ?? 0);
+      const snapshotSells = liveScore ? liveScore.sellCount : (snapshot.sellCount5m ?? 0);
       const deadVolume = (
         ageMs > 10 * 60 * 1000 &&
         !trade.tp1Hit &&

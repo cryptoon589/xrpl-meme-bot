@@ -174,6 +174,60 @@ async function main() {
     };
   }
 
+  // Stream-driven momentum entry — bypasses 15s scan cycle for fast-moving tokens
+  // Fires when buyPressureTracker detects 3+ unique buyers + 70% buy ratio + 100 XRP in-window
+  if (paperTrader) {
+    paperTrader.setBuyPressureTracker(buyPressureTracker);
+
+    buyPressureTracker.onMomentumDetected = (currency, issuer, snap) => {
+      const momentumKey = `${currency}:${issuer}`;
+      if (BURST_TRADE_BLOCKLIST.has(currency)) return;
+      if (paperTrader!.hasOpenPosition(currency, issuer)) return;
+      if (tradeLocks.has(momentumKey)) return;
+      tradeLocks.add(momentumKey);
+
+      const streamSnapshot: any = {
+        tokenCurrency: currency,
+        tokenIssuer:   issuer,
+        priceXRP:      null,
+        liquidityXRP:  null,
+        buyCount5m:    snap.buyCount,
+        sellCount5m:   snap.sellCount,
+        uniqueBuyers5m: snap.uniqueBuyers,
+        buySellRatio:  snap.buySellRatio,
+        newWalletBuys: snap.newWalletBuys,
+        buyVolumeXRP:  snap.buyVolumeXRP,
+        priceChange5m:  null,
+        priceChange15m: null,
+      };
+
+      ammPriceFetcher.getPrice(currency, issuer).then(ammPrice => {
+        if (!ammPrice || !ammPrice.priceXRP) { tradeLocks.delete(momentumKey); return; }
+        streamSnapshot.priceXRP    = ammPrice.priceXRP;
+        streamSnapshot.liquidityXRP = ammPrice.liquidityXRP;
+        if ((ammPrice.liquidityXRP ?? 0) < config.minLiquidityXRP) { tradeLocks.delete(momentumKey); return; }
+
+        const token = { currency, issuer, rawCurrency: currency, lastUpdated: Date.now() } as any;
+        const scoredTp = runtimeLearning.getTpTargets('scored');
+        const trade = paperTrader!.tryOpenTrade(
+          token, streamSnapshot, 75,
+          `⚡ Stream momentum: ${snap.uniqueBuyers} buyers, ${(snap.buySellRatio*100).toFixed(0)}% buys, ${snap.buyVolumeXRP.toFixed(0)} XRP vol`,
+          scoredTp
+        );
+        tradeLocks.delete(momentumKey);
+        if (trade) {
+          setTimeout(() => sendAlert(telegramAlerter, db, {
+            type: 'paper_trade_opened',
+            tokenCurrency: currency,
+            tokenIssuer:   issuer,
+            paperTrade:    trade,
+            message:       `⚡ Stream entry: ${currency}`,
+          }, config), 0);
+        }
+      }).catch(() => tradeLocks.delete(momentumKey));
+    };
+  }
+
   // On startup: force-close any positions in blocklisted tokens
   // (opened before the blocklist was added, e.g. XAH, 666, LOX)
   if (paperTrader) {
