@@ -64,8 +64,9 @@ export class TelegramAlerter {
 
   // Per-type cooldowns to prevent duplicate alerts from parallel scan workers
   private lastAlertTime: Map<string, number> = new Map();
-  private readonly TRADE_COOLDOWN_MS = 10 * 1000;       // 10s for trade alerts
-  private readonly SUMMARY_COOLDOWN_MS = 50 * 60 * 1000; // 50 min for summaries
+  private readonly TRADE_COOLDOWN_MS = 10 * 1000;          // 10s for trade alerts
+  private readonly SUMMARY_COOLDOWN_MS = 50 * 60 * 1000;   // 50 min for hourly position updates
+  private readonly BOT_LOG_COOLDOWN_MS = 5 * 60 * 60 * 1000; // 5h for bot_log (separate from summary)
 
   constructor(config: BotConfig) {
     if (config.telegramBotToken && config.telegramChatId) {
@@ -119,9 +120,12 @@ export class TelegramAlerter {
     if (!html) return; // suppressed type
 
     // Cooldown guard
-    const isSummary = payload.type === 'open_positions_update' || payload.type === 'bot_log';
     const cdKey = this.cooldownKey(payload.type, payload.tokenCurrency);
-    const cdMs  = isSummary ? this.SUMMARY_COOLDOWN_MS : this.TRADE_COOLDOWN_MS;
+    const cdMs  = payload.type === 'bot_log'
+      ? this.BOT_LOG_COOLDOWN_MS
+      : payload.type === 'open_positions_update'
+        ? this.SUMMARY_COOLDOWN_MS
+        : this.TRADE_COOLDOWN_MS;
 
     if (this.isOnCooldown(cdKey, cdMs)) {
       debug(`Alert cooldown: ${cdKey}`);

@@ -155,7 +155,7 @@ async function main() {
   };
 
   const isBlocklistedToken = (currency: string): boolean =>
-    isBlocklistedToken(currency) || BURST_TRADE_BLOCKLIST.has(decodeCurrency(currency));
+    BURST_TRADE_BLOCKLIST.has(currency) || BURST_TRADE_BLOCKLIST.has(decodeCurrency(currency));
 
   // Hook burst detector into paper trader — opens a burst trade on every confirmed burst
   if (paperTrader) {
