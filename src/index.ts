@@ -1184,6 +1184,14 @@ function startHealthEndpoint(
     }
   });
 
+  healthServer.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      warn(`Port ${PORT} already in use — health endpoint skipped (bot continues normally)`);
+    } else {
+      warn(`Health server error: ${err.message}`);
+    }
+  });
+
   healthServer.listen(PORT, () => {
     info(`🩺 Health endpoint on port ${PORT} — GET http://localhost:${PORT}/health`);
   });
