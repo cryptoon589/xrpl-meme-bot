@@ -121,15 +121,46 @@ async function main() {
   const burstDetector = new BurstDetector(xrplClient, telegramAlerter, db);
 
   // Tokens that should never be burst-traded (native chain tokens, stablecoins, etc.)
+  // Includes both ASCII names AND hex-encoded equivalents
   const BURST_TRADE_BLOCKLIST = new Set([
+    // ASCII names
     'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-    'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP',
+    'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP', 'EUR',
+    // Hex-encoded equivalents (40-char, right-padded with 00s)
+    '524C555344000000000000000000000000000000', // RLUSD
+    '5553440000000000000000000000000000000000', // USD
+    '5553444300000000000000000000000000000000', // USDC
+    '5553445400000000000000000000000000000000', // USDT
+    '4555520000000000000000000000000000000000', // EUR
+    '4254430000000000000000000000000000000000', // BTC
+    '4554480000000000000000000000000000000000', // ETH
+    '5841480000000000000000000000000000000000', // XAH
+    '584C4D0000000000000000000000000000000000', // XLM
+    '5347420000000000000000000000000000000000', // SGB
+    '464C520000000000000000000000000000000000', // FLR
+    '534F4C4F00000000000000000000000000000000', // SOLO
+    '4556520000000000000000000000000000000000', // EVR
+    '4353430000000000000000000000000000000000', // CSC
+    '44524F0000000000000000000000000000000000', // DRO
   ]);
+
+  // Helper: decode 40-char hex currency to ASCII (for blocklist checks)
+  const decodeCurrency = (raw: string): string => {
+    if (raw.length !== 40) return raw;
+    try {
+      const stripped = raw.replace(/00+$/, '');
+      const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
+      return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : raw;
+    } catch { return raw; }
+  };
+
+  const isBlocklistedToken = (currency: string): boolean =>
+    isBlocklistedToken(currency) || BURST_TRADE_BLOCKLIST.has(decodeCurrency(currency));
 
   // Hook burst detector into paper trader — opens a burst trade on every confirmed burst
   if (paperTrader) {
     burstDetector.onBurst = (currency, issuer, rawCurrency, poolXRP, priceXRP) => {
-      if (BURST_TRADE_BLOCKLIST.has(currency)) {
+      if (isBlocklistedToken(currency)) {
         debug(`Burst trade skipped — blocklisted token: ${currency}`);
         return;
       }
@@ -181,7 +212,7 @@ async function main() {
 
     buyPressureTracker.onMomentumDetected = (currency, issuer, snap) => {
       const momentumKey = `${currency}:${issuer}`;
-      if (BURST_TRADE_BLOCKLIST.has(currency)) return;
+      if (isBlocklistedToken(currency)) return;
       if (paperTrader!.hasOpenPosition(currency, issuer)) return;
       if (tradeLocks.has(momentumKey)) return;
       tradeLocks.add(momentumKey);
