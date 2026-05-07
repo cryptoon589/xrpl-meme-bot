@@ -401,21 +401,16 @@ export class PaperTrader {
         }
 
         // Momentum reversal exit:
-        // Sells spiking AND buys dropping = move is over, get out now
+        // Only trigger if sells are HEAVILY dominant and we're in meaningful profit
+        // Note: snapshot.buyCount5m undercounts AMM buys — use higher thresholds
         const sellCount    = (snapshot as any)?.sellCount5m ?? 0;
         const buyCount     = (snapshot as any)?.buyCount5m  ?? 1;
-        const uniqueBuyers = (snapshot as any)?.uniqueBuyers5m ?? 0;
         const isMomentumDead = (
-          sellCount > buyCount * 2 &&         // sells 2x buys
-          buyCount <= 2 &&                    // buying has nearly stopped
-          pnlPercent > 3                      // only exit if we're in profit
+          sellCount > buyCount * 3 &&         // sells 3x buys (was 2x — too sensitive)
+          sellCount >= 5 &&                   // need real sell volume, not 1 sell vs 0 buys
+          pnlPercent > 8                      // only exit if meaningfully in profit (was 3%)
         );
-        const isSellSpike = (
-          pnlPercent > 5 &&
-          sellCount > 3 &&
-          sellCount > buyCount * 1.5
-        );
-        if (isMomentumDead || isSellSpike) {
+        if (isMomentumDead) {
           info(`🚨 Burst momentum reversal for ${key}: ${buyCount} buys / ${sellCount} sells | PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'sell_pressure_exit' });
           closedTrades.push(trade);
@@ -532,8 +527,8 @@ export class PaperTrader {
       const scoredUnique   = (snapshot as any)?.uniqueBuyers5m ?? 0;
       const demandCollapsed = (
         pnlPercent > 10 &&          // only exit if meaningfully up
-        scoredBuys <= 1 &&          // demand has basically stopped
-        scoredSells >= 3 &&         // sell pressure present
+        scoredSells > scoredBuys * 3 && // sells 3x buys (was just scoredBuys <= 1 — too sensitive)
+        scoredSells >= 5 &&         // need real sell volume not noise
         trade.tp1Hit                // at least TP1 already hit — locked some gains
       );
       if (demandCollapsed) {

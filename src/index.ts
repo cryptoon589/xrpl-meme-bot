@@ -748,15 +748,17 @@ function startPeriodicScan(
             const tradeKey = `${token.currency}:${token.issuer}`;
             // #3 Time-of-day gate: skip entries during learned losing hours
             const goodHour = runtimeLearning.isGoodTradingHour();
-            // Fix 2: require minimum buy activity before entry (not just score)
-            const minBuyGate = (snapshot.buyCount5m ?? 0) >= 3;
+            // Buy activity gate: use buyPressure.buyCount (AMM-aware) not snapshot.buyCount5m
+            // snapshot.buyCount5m only counts Payment txs — misses most AMM swaps
+            const liveBuyCount = pressure?.buyCount ?? snapshot.buyCount5m ?? 0;
+            const minBuyGate = liveBuyCount >= 2; // lowered: 2 buys is enough signal
 
             // Fix 4: reject correlated/coordinated pump tokens
             const correlationWarning = correlationDetector.getCorrelationWarning(token.currency, token.issuer);
             if (correlationWarning) debug(`Correlation gate: ${correlationWarning}`);
 
-            // Fix 7: price must still be moving up at entry time
-            const stillMovingUp = (snapshot.priceChange5m ?? 0) >= 0;
+            // Price direction: allow flat/tiny dip (-3%) — don't miss entries on scan timing noise
+            const stillMovingUp = (snapshot.priceChange5m ?? 0) >= -3;
 
             if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
                 riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && goodHour &&
