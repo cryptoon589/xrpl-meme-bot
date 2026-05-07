@@ -58,6 +58,7 @@ interface TokenState {
   poolXRP: number | null;      // last known XRP side of AMM pool
   baselinePrice: number | null; // price at first burst alert
   lastTrade: number;
+  firstSeenAt: number;         // timestamp when token was first registered
 }
 
 // Currency codes that are NOT meme tokens
@@ -125,6 +126,7 @@ export class BurstDetector {
             rawCurrency: token.currency, issuer: token.issuer, displayName,
             buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
             lastTrade: Date.now(),
+            firstSeenAt: Date.now(),
           });
         }
         const ammAccount = await this.fetchAMMAccount(token.currency, token.issuer);
@@ -248,12 +250,14 @@ export class BurstDetector {
     // Init token state
     if (this.tokens.size >= MAX_TRACKED_TOKENS) this.evictOldest();
     const displayName = this.decodeCurrency(rawCurrency);
+    const nowTs = Date.now();
     this.tokens.set(key, {
       rawCurrency, issuer, displayName,
       buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
-      lastTrade: Date.now(),
+      lastTrade: nowTs,
+      firstSeenAt: nowTs,
     });
-    if (!this.tokenFirstSeen.has(key)) this.tokenFirstSeen.set(key, Date.now());
+    if (!this.tokenFirstSeen.has(key)) this.tokenFirstSeen.set(key, nowTs);
 
     // Async: fetch AMM pool account and register it
     this.fetchAMMAccount(rawCurrency, issuer).then(ammAccount => {
@@ -364,8 +368,11 @@ export class BurstDetector {
       }
 
       // Skip illiquid pools (MIN_POOL_XRP is the XRP side only; TVL = poolXRP * 2)
-      if (ammInfo.poolXRP < MIN_POOL_XRP) {
-        debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP one-side < ${MIN_POOL_XRP})`);
+      // New tokens (< 1h old) get a lower minimum pool threshold (150 XRP) to catch early launches
+      const tokenAgeMs = Date.now() - (state.firstSeenAt ?? Date.now());
+      const effectiveMinPool = tokenAgeMs < 60 * 60 * 1000 ? 150 : MIN_POOL_XRP;
+      if (ammInfo.poolXRP < effectiveMinPool) {
+        debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP one-side < ${effectiveMinPool})`);
         return;
       }
 

@@ -196,12 +196,6 @@ export class PaperTrader {
       return null;
     }
 
-    // Check score threshold
-    if (score < this.config.minScorePaperTrade) {
-      debug(`Score ${score} below threshold ${this.config.minScorePaperTrade}`);
-      return null;
-    }
-
     // Check max open trades
     if (this.openPositions.size >= this.config.maxOpenTrades) {
       warn(`Max open trades (${this.config.maxOpenTrades}) reached`);
@@ -272,10 +266,18 @@ export class PaperTrader {
     );
 
     // Cap scored trades at 10 XRP until win rate improves (burst stays at 25 XRP max)
+    const liveBuyRatio   = (snapshot as any)?.buySellRatio  ?? 0.5;
+    const liveNewWallets = (snapshot as any)?.newWalletBuys ?? 0;
+    const priceChange5m  = snapshot.priceChange5m ?? 0;
+    const convictionMultiplier =
+      (liveBuyRatio >= 0.75 && liveNewWallets >= 2 && priceChange5m >= 10) ? 2.0 :
+      (liveBuyRatio >= 0.65 && liveNewWallets >= 1 && priceChange5m >= 5)  ? 1.5 :
+      (liveBuyRatio >= 0.60)                                                ? 1.0 :
+                                                                              0.5;
     const MAX_SCORED_TRADE_XRP = 10;
     const tradeSizeXRP = Math.min(
-      Math.max(sizeRecommendation.sizeXRP, this.config.minTradeXRP),
-      Math.min(this.config.maxTradeXRP, MAX_SCORED_TRADE_XRP)
+      Math.max(sizeRecommendation.sizeXRP * convictionMultiplier, this.config.minTradeXRP),
+      Math.min(this.config.maxTradeXRP, MAX_SCORED_TRADE_XRP * convictionMultiplier)
     );
     const entryPrice = snapshot.priceXRP;
     const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
@@ -436,6 +438,14 @@ export class PaperTrader {
           continue;
         }
 
+        // Trending hard for burst: up 50%+ in first 10 min — ride to 100%
+        const burstTrendingHard = pnlPercent >= 50 && ageMs < 10 * 60 * 1000;
+        if (trade.tp2Hit && burstTrendingHard && trade.remainingPosition > 0) {
+          keysToClose.push({ key, reason: 'take_profit_3_trending' });
+          closedTrades.push(trade);
+          continue;
+        }
+
         // Sell pressure exit for burst: demand collapsed before TP1, cut loss early
         const burstSells = (snapshot as any)?.sellCount5m ?? 0;
         const burstBuys  = (snapshot as any)?.buyCount5m  ?? 1;
@@ -518,6 +528,15 @@ export class PaperTrader {
         this.db.updatePaperTrade(trade);
       }
 
+      // Trending hard: if up 30%+ within 15 min, raise ceiling to 60% and hold remaining
+      const trendingHard = pnlPercent >= 30 && ageMs < 15 * 60 * 1000;
+      const scoredTp3 = trendingHard ? 60 : (scoredTp2 + 20);
+      if (trade.tp2Hit && pnlPercent >= scoredTp3 && trade.remainingPosition > 0) {
+        keysToClose.push({ key, reason: 'take_profit_3_trending' });
+        closedTrades.push(trade);
+        continue;
+      }
+
       // Momentum reversal for scored trades:
       // If we're in profit and demand has clearly collapsed, exit before
       // the trailing stop catches it (trailing stop is price-reactive;
@@ -534,6 +553,23 @@ export class PaperTrader {
       if (demandCollapsed) {
         info(`🚨 Scored demand collapse exit for ${key}: ${scoredBuys} buys / ${scoredSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
         keysToClose.push({ key, reason: 'sell_pressure_exit' });
+        closedTrades.push(trade);
+        continue;
+      }
+
+      // Dead volume exit: flat price + zero activity for 10+ min = cut dead weight
+      const snapshotBuys = snapshot.buyCount5m ?? 0;
+      const snapshotSells = snapshot.sellCount5m ?? 0;
+      const deadVolume = (
+        ageMs > 10 * 60 * 1000 &&
+        !trade.tp1Hit &&
+        pnlPercent > -3 && pnlPercent < 3 &&
+        snapshotBuys === 0 &&
+        snapshotSells === 0
+      );
+      if (deadVolume) {
+        info(`💀 Dead volume exit for ${key}: flat at ${pnlPercent.toFixed(1)}% with zero activity`);
+        keysToClose.push({ key, reason: 'dead_volume_exit' });
         closedTrades.push(trade);
         continue;
       }

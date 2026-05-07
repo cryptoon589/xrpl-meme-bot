@@ -133,11 +133,6 @@ async function main() {
         debug(`Burst trade skipped — blocklisted token: ${currency}`);
         return;
       }
-      // #3 Time-of-day gate applies to burst entries too
-      if (!runtimeLearning.isGoodTradingHour()) {
-        debug(`Burst trade skipped — bad trading hour (UTC ${new Date().getUTCHours()}:00)`);
-        return;
-      }
       // #4 Unified position lock — burst and scored share the same lock set
       const burstKey = `${currency}:${issuer}`;
       if (tradeLocks.has(burstKey)) {
@@ -508,7 +503,7 @@ function startPeriodicScan(
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
-  const HOLDER_SCAN_INTERVAL = 6; // Scan holders every 6th cycle (~6 minutes)
+  const HOLDER_SCAN_INTERVAL = 24; // Scan holders every 24th cycle (~6 minutes)
   let scanCycle = 0;
   let isScanning = false;
 
@@ -889,7 +884,7 @@ function startPeriodicScan(
   };
 
   scanTokens();
-  scanInterval = setInterval(scanTokens, 60000);
+  scanInterval = setInterval(scanTokens, 15000);
 
   // Hourly summary + hot token leaderboard
   hourlySummaryTimer = setInterval(async () => {
