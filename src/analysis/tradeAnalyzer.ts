@@ -236,13 +236,15 @@ export class TradeAnalyzer {
     let recMinScore   = 55; // baseline matches .env MIN_SCORE_PAPER_TRADE
     let recTp1Scored  = 10; // baseline matches paperTrader defaults
     let recTp2Scored  = 20;
+    // Start from intentional defaults — never flatten to equal weights
+    // Momentum + buy pressure are the primary signals for momentum trading
     let recWeights: ScoreWeights = {
-      liquidityScore:    17,
-      holderGrowthScore: 17,
-      buyPressureScore:  17,
-      volumeAccelScore:  17,
-      devSafetyScore:    17,
-      spreadScore:       15,
+      volumeAccelScore:  35,  // momentum / price acceleration
+      buyPressureScore:  30,  // buy vs sell intensity right now
+      holderGrowthScore: 20,  // new wallet inflow
+      liquidityScore:    15,  // volume surge
+      devSafetyScore:     0,  // hard gate only
+      spreadScore:        0,  // unused
     };
     let bestSignalCombo = 'default';
 
