@@ -78,6 +78,12 @@ async function main() {
 
   // Initialize components
   const db = new Database();
+
+  // Prune stale tokens at startup to keep the tracked list lean.
+  // 4000+ tokens causes preloadAMMs to take 5-15 min and slows every scan.
+  const pruned = db.pruneStaleTokens();
+  if (pruned > 0) info(`Startup: pruned ${pruned} stale tokens from DB`);
+
   const xrplClient = new XRPLClient(config.xrplWsUrl);
   xrplClientRef = xrplClient;
 
@@ -298,14 +304,13 @@ async function main() {
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
 
-  // Pre-load AMM accounts for all known tokens so burst detector catches
-  // the FIRST buy on any token — not the second (lazy registration miss)
-  // Non-fatal: if preload fails the bot still runs, just misses first buy per token
-  try {
-    await burstDetector.preloadAMMs();
-  } catch (err) {
-    warn(`[preloadAMMs] Non-fatal error during startup preload: ${err}`);
-  }
+  // Pre-load AMM accounts in the background — don't block startup.
+  // With 4000+ tracked tokens this can take 5-15 min if awaited; the bot
+  // would miss all trades during that window. Lazy registration still catches
+  // tokens on their second buy; preload just closes the first-buy gap.
+  burstDetector.preloadAMMs().catch(err =>
+    warn(`[preloadAMMs] Non-fatal error during startup preload: ${err}`)
+  );
 
   // Subscribe to live tx stream — activeDiscovery handles token extraction
   await xrplClient.subscribeTransactions((tx) => {

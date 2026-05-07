@@ -152,6 +152,33 @@ export class Database {
     }
   }
 
+  /**
+   * Prune tokens that haven't been updated in 48h AND have no score in 48h.
+   * Reduces startup preload time and scan overhead.
+   */
+  pruneStaleTokens(): number {
+    try {
+      const cutoff = Date.now() - 48 * 60 * 60 * 1000;
+      // Keep tokens that have either been updated recently OR have a recent score
+      const result = this.db.prepare(`
+        DELETE FROM tokens
+        WHERE last_updated < ?
+          AND currency NOT IN (
+            SELECT DISTINCT token_currency FROM scores
+            WHERE timestamp > ?
+          )
+          AND currency NOT IN (
+            SELECT DISTINCT token_currency FROM trades
+            WHERE status = 'open'
+          )
+      `).run(cutoff, cutoff) as any;
+      return result.changes ?? 0;
+    } catch (err) {
+      warn(`Error pruning stale tokens: ${err}`);
+      return 0;
+    }
+  }
+
   getTokenCount(): number {
     try {
       const row = this.db.prepare('SELECT COUNT(*) as count FROM tokens').get() as any;
