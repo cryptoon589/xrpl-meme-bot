@@ -18,6 +18,9 @@ fi
 echo $$ > "$LOCKFILE"
 trap "rm -f '$LOCKFILE'" EXIT
 
+# Kill any orphaned bot process still holding port 3000
+fuser -k 3000/tcp 2>/dev/null && echo "[supervisor] Freed port 3000" | tee -a "$LOG"
+
 echo "[supervisor] Starting xrpl-meme-bot from $BOT_DIR (PID $$)" | tee -a "$LOG"
 
 while true; do
@@ -26,5 +29,7 @@ while true; do
   node dist/index.js >> "$LOG" 2>&1
   EXIT_CODE=$?
   echo "[supervisor] $(date -u +%Y-%m-%dT%H:%M:%SZ) Bot exited with code $EXIT_CODE. Restarting in 10s..." | tee -a "$LOG"
-  sleep 10
+  sleep 5
+  fuser -k 3000/tcp 2>/dev/null # free port before next launch
+  sleep 5
 done

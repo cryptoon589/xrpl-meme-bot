@@ -457,7 +457,9 @@ export class TradeAnalyzer {
 
     // Enable pause only if worst hours are materially worse than best
     // and we have enough data to be confident
-    const tradingPauseEnabled = worstHours.length >= 1 && rawTrades.length >= 50; // need 50+ trades for reliable hour stats
+    // Only pause if win rate is at least 20% overall (enough signal to trust hour stats)
+    // AND we have enough trades. At 6.5% win rate the data is too noisy to trust.
+    const tradingPauseEnabled = worstHours.length >= 1 && rawTrades.length >= 50 && winRate >= 0.20;
     if (tradingPauseEnabled) {
       insights.push(`⏸️ Trading pause enabled for worst hours — bot will skip entries during ${worstHours.map(h=>`${h}:00`).join(', ')} UTC`);
     }
