@@ -746,28 +746,39 @@ function startPeriodicScan(
             // Paper trade entry - require higher consensus
             // tradeLocks prevents parallel batch workers opening duplicate positions
             const tradeKey = `${token.currency}:${token.issuer}`;
-            // #3 Time-of-day gate: skip entries during learned losing hours
-            const goodHour = runtimeLearning.isGoodTradingHour();
-            // Buy activity gate: use buyPressure.buyCount (AMM-aware) not snapshot.buyCount5m
-            // snapshot.buyCount5m only counts Payment txs — misses most AMM swaps
-            const liveBuyCount = pressure?.buyCount ?? snapshot.buyCount5m ?? 0;
-            const minBuyGate = liveBuyCount >= 2; // lowered: 2 buys is enough signal
 
-            // Fix 4: reject correlated/coordinated pump tokens
+            // ── PURE MOMENTUM ENTRY GATE ────────────────────────────────────
+            // No score threshold. Enter when momentum signals align directly.
+            // This catches moves the score system misses due to data lag.
+
             const correlationWarning = correlationDetector.getCorrelationWarning(token.currency, token.issuer);
             if (correlationWarning) debug(`Correlation gate: ${correlationWarning}`);
 
-            // Price direction: allow flat/tiny dip (-3%) — don't miss entries on scan timing noise
-            const stillMovingUp = (snapshot.priceChange5m ?? 0) >= -3;
+            const priceUp5m    = (snapshot.priceChange5m  ?? 0) >= 5;   // price moving up 5%+
+            const priceUp15m   = (snapshot.priceChange15m ?? 0) >= 3;   // confirmed over 15m
+            const buyDominated = pressure.buySellRatio >= 0.60 && pressure.buyCount >= 2;
+            const volumeSpike  = pressure.buyVolumeXRP >= 50;            // 50+ XRP bought in window
+            const newMoneyIn   = pressure.newWalletBuys >= 1;            // fresh wallets entering
+            const liquidOk     = (snapshot.liquidityXRP ?? 0) >= config.minLiquidityXRP;
 
-            if (paperTrader && score.totalScore >= config.minScorePaperTrade &&
-                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && goodHour &&
-                minBuyGate && !correlationWarning && stillMovingUp) {
+            // Need at least 2 of the 4 momentum signals + buys dominating + liquidity ok
+            const momentumSignals = [priceUp5m, priceUp15m, volumeSpike, newMoneyIn].filter(Boolean).length;
+            const momentumEntry = momentumSignals >= 2 && buyDominated && liquidOk;
+
+            if (paperTrader && momentumEntry &&
+                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && !correlationWarning) {
               tradeLocks.add(tradeKey);
+              const entryReason = [
+                priceUp5m  ? `+${snapshot.priceChange5m?.toFixed(1)}% 5m` : null,
+                priceUp15m ? `+${snapshot.priceChange15m?.toFixed(1)}% 15m` : null,
+                buyDominated ? `buys ${(pressure.buySellRatio*100).toFixed(0)}%` : null,
+                volumeSpike ? `vol ${pressure.buyVolumeXRP.toFixed(0)} XRP` : null,
+                newMoneyIn  ? `${pressure.newWalletBuys} new wallets` : null,
+              ].filter(Boolean).join(' | ');
               const scoredTp = runtimeLearning.getTpTargets('scored');
               const trade = paperTrader.tryOpenTrade(
                 token, snapshot, score.totalScore,
-                `Score: ${score.totalScore}, Liquidity: ${snapshot.liquidityXRP?.toFixed(0)} XRP`,
+                entryReason,
                 scoredTp
               );
               tradeLocks.delete(tradeKey);
