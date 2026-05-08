@@ -164,6 +164,41 @@ export const SCHEMA = {
       size_xrp REAL NOT NULL
     )
   `,
+
+  missedOpportunities: `
+    CREATE TABLE IF NOT EXISTS missed_opportunities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      currency TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      skipped_at INTEGER NOT NULL,
+      skip_reason TEXT NOT NULL,
+      price_at_skip REAL NOT NULL,
+      pool_xrp_reserve REAL NOT NULL,
+      max_price_10m REAL,
+      max_price_30m REAL,
+      max_price_60m REAL,
+      pct_gain_10m REAL,
+      pct_gain_30m REAL,
+      pct_gain_60m REAL
+    )
+  `,
+
+  profileStats: `
+    CREATE TABLE IF NOT EXISTS profile_stats (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile TEXT NOT NULL,
+      closed_at INTEGER NOT NULL,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      entry_xrp REAL NOT NULL,
+      exit_xrp REAL NOT NULL,
+      pnl_xrp REAL NOT NULL,
+      pnl_pct REAL NOT NULL,
+      hold_ms INTEGER NOT NULL,
+      exit_reason TEXT NOT NULL,
+      won INTEGER NOT NULL
+    )
+  `,
 };
 
 // Index definitions for performance

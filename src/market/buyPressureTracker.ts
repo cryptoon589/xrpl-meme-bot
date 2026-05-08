@@ -66,7 +66,42 @@ export class BuyPressureTracker {
       this.processOffer(t, meta);
     } else if (txType === 'Payment') {
       this.processPayment(t, meta);
+    } else if (txType === 'AMMDeposit' || txType === 'AMMWithdraw') {
+      // AMM deposits/withdrawals also signal intent — treat deposit as buy pressure
+      this.processAMMFlow(t, meta, txType);
     }
+  }
+
+  /**
+   * Process AMMDeposit / AMMWithdraw as buy/sell pressure.
+   * XRP flowing INTO the AMM pool (deposit) signals buy-side interest.
+   * XRP flowing OUT (withdrawal) signals potential sell pressure.
+   */
+  private processAMMFlow(t: any, meta: any, txType: string): void {
+    // Determine the token from the AMM asset fields
+    const asset2 = t.Asset2;
+    if (!asset2 || typeof asset2 !== 'object' || !asset2.currency) return;
+    const currency = asset2.currency;
+    const issuer = asset2.issuer;
+    if (!currency || currency === 'XRP' || !issuer) return;
+
+    const nodes: any[] = meta.AffectedNodes || [];
+    let xrpDelta = 0;
+    for (const node of nodes) {
+      const n = node.ModifiedNode;
+      if (!n || n.LedgerEntryType !== 'AccountRoot') continue;
+      if (n.FinalFields?.Account !== t.Account) continue;
+      const prev = parseInt(n.PreviousFields?.Balance ?? '0', 10);
+      const curr = parseInt(n.FinalFields?.Balance ?? '0', 10);
+      xrpDelta += curr - prev;
+    }
+
+    if (xrpDelta === 0) return;
+    const xrpValue = Math.abs(xrpDelta) / 1_000_000;
+    // XRP leaving wallet (negative delta) = depositing XRP into AMM = buy pressure
+    // XRP entering wallet (positive delta) = withdrawing = sell pressure
+    const side: 'buy' | 'sell' = xrpDelta < 0 ? 'buy' : 'sell';
+    this.recordTrade(`${currency}:${issuer}`, t.Account, side, xrpValue);
   }
 
   private processOffer(t: any, meta: any): void {

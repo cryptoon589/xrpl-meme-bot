@@ -9,6 +9,7 @@ import { Database } from '../db/database';
 import { PositionSizer } from './positionSizer';
 import { info, warn, debug } from '../utils/logger';
 import { BuyPressureTracker } from '../market/buyPressureTracker';
+import { TradeProfileName, PROFILES } from '../execution/tradeProfiles';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -21,9 +22,13 @@ interface OpenPosition {
   priceHistory: number[]; // Last 10 prices for volatility calculation
   openedAt: number;       // Timestamp of entry — used to enforce minimum hold time
   tradeProfile: 'scored' | 'burst'; // exit rules differ
+  profileName: TradeProfileName;    // full profile used for sizing + kill switches
   stopLossPercent?: number; // override for dynamic stop (e.g. tightened on concentrated supply)
   tp1Pct?: number;          // learned TP1 target (overrides hardcoded default)
   tp2Pct?: number;          // learned TP2 target
+  /** Kill switch tracking */
+  lastBuySeenAt: number;            // last timestamp a new buy was recorded
+  liquidityAtEntry: number;         // poolXrpReserve at entry
 }
 
 export class PaperTrader {
@@ -177,6 +182,9 @@ export class PaperTrader {
       priceHistory: [entryPrice],
       openedAt: Date.now(),
       tradeProfile: 'burst',
+      profileName: tvl < 500 ? 'LOW_LIQ_PROBE' : 'BURST_SCALP',
+      lastBuySeenAt: Date.now(),
+      liquidityAtEntry: snapshot?.poolXrpReserve ?? tvl / 2,
       tp1Pct: tpTargets?.tp1,
       tp2Pct: tpTargets?.tp2,
     });
@@ -341,6 +349,10 @@ export class PaperTrader {
       // Timestamp used to enforce minimum hold time before exits are checked
       openedAt: Date.now(),
       tradeProfile: 'scored',
+      profileName: (snapshot?.poolXrpReserve ?? snapshot?.liquidityXRP ?? 0) / 2 >= 2000
+        ? 'MOMENTUM_RUNNER' : 'BURST_SCALP',
+      lastBuySeenAt: Date.now(),
+      liquidityAtEntry: snapshot?.poolXrpReserve ?? (snapshot?.liquidityXRP ?? 0) / 2,
       tp1Pct: tpTargets?.tp1,
       tp2Pct: tpTargets?.tp2,
     });
@@ -393,6 +405,57 @@ export class PaperTrader {
       const pnlPercent = ((currentPrice - trade.entryPriceXRP) / trade.entryPriceXRP) * 100;
       const ageMs = Date.now() - (position.openedAt || 0);
       const isBurst = position.tradeProfile === 'burst';
+
+      // ── KILL SWITCHES (all profiles) ────────────────────────────────────────
+      const prof = PROFILES[position.profileName] ?? PROFILES.BURST_SCALP;
+      const ks = prof.killSwitches;
+
+      // Update lastBuySeenAt if there are recent buys
+      const liveSnap = this.buyPressureTracker?.getSnapshot(
+        snapshot.tokenCurrency, snapshot.tokenIssuer
+      );
+      if (liveSnap && liveSnap.buyCount > 0) {
+        position.lastBuySeenAt = Date.now();
+      }
+
+      // Kill 1: no new buy within N min AND price below entry
+      const msSinceLastBuy = Date.now() - (position.lastBuySeenAt ?? position.openedAt);
+      if (
+        !trade.tp1Hit &&
+        msSinceLastBuy > ks.noNewBuyMins * 60 * 1000 &&
+        currentPrice < trade.entryPriceXRP
+      ) {
+        info(`⚡ Kill switch 1 (no follow-through) for ${key}: ${(msSinceLastBuy/60000).toFixed(1)}m no buys`);
+        keysToClose.push({ key, reason: 'kill_no_followthrough' });
+        closedTrades.push(trade);
+        continue;
+      }
+
+      // Kill 2: sell volume > buy volume * N before TP1
+      if (liveSnap && !trade.tp1Hit) {
+        const sellBuyRatio = liveSnap.buyVolumeXRP > 0
+          ? liveSnap.sellVolumeXRP / liveSnap.buyVolumeXRP
+          : (liveSnap.sellVolumeXRP > 0 ? Infinity : 0);
+        if (sellBuyRatio >= ks.sellVolumeMultiple && liveSnap.sellVolumeXRP > 10) {
+          info(`⚡ Kill switch 2 (sell flood) for ${key}: sell/buy ratio ${sellBuyRatio.toFixed(1)}x`);
+          keysToClose.push({ key, reason: 'kill_sell_flood' });
+          closedTrades.push(trade);
+          continue;
+        }
+      }
+
+      // Kill 3: liquidity dropped > N% since entry
+      const currentPool = snapshot.poolXrpReserve ?? (snapshot.liquidityXRP ? snapshot.liquidityXRP / 2 : 0);
+      if (
+        position.liquidityAtEntry > 0 &&
+        currentPool > 0 &&
+        ((position.liquidityAtEntry - currentPool) / position.liquidityAtEntry) > (ks.liqDropPct / 100)
+      ) {
+        info(`⚡ Kill switch 3 (liq drop) for ${key}: ${position.liquidityAtEntry.toFixed(0)} → ${currentPool.toFixed(0)} XRP`);
+        keysToClose.push({ key, reason: 'kill_liq_drop' });
+        closedTrades.push(trade);
+        continue;
+      }
 
       // ── BURST EXIT PROFILE ───────────────────────────────────────────────────
       if (isBurst) {
@@ -542,11 +605,10 @@ export class PaperTrader {
         this.db.updatePaperTrade(trade);
       }
 
-      // Check Take Profit 2 — use learned target
-      // After TP1 (40% sold), remaining is 60%. Sell 30/60 = 50% of remaining.
+      // TP2: sell exactly 30% of ORIGINAL position — leaves 30% runner (100 - 40 - 30).
+      // partialClose now takes % of original, not % of remaining, so this is exact.
       if (!trade.tp2Hit && pnlPercent >= scoredTp2 && trade.remainingPosition > 0) {
-        const percentOfRemaining = (30 / trade.remainingPosition) * 100;
-        this.partialClose(key, currentPrice, Math.min(percentOfRemaining, 100), 'take_profit_2', snapshot);
+        this.partialClose(key, currentPrice, 30, 'take_profit_2', snapshot);
         trade.tp2Hit = true;
         this.db.updatePaperTrade(trade);
       }
@@ -688,6 +750,7 @@ export class PaperTrader {
     // Remove from open positions
     this.openPositions.delete(key);
     this.lastCloseTime.set(key, Date.now());
+    this.recordProfileStat(position, trade);
 
     // Save to DB
     this.db.updatePaperTrade(trade);
@@ -706,13 +769,18 @@ export class PaperTrader {
   }
 
   /**
-   * Partially close position
-   * FIX #3: Track cost basis per token unit for accurate PnL on partial closes
+   * Partially close position.
+   *
+   * percentOfOriginal: what % of the ORIGINAL (entry) position to sell.
+   * e.g. TP1 = 40 means sell 40% of what was bought at entry.
+   *      TP2 = 30 means sell another 30%, leaving 30% runner.
+   *
+   * This keeps accounting correct regardless of how many legs we've done.
    */
   private partialClose(
     key: string,
     exitPrice: number,
-    percentToClose: number,
+    percentOfOriginal: number,   // % of ORIGINAL position (not remaining)
     reason: string,
     snapshot: MarketSnapshot | null
   ): void {
@@ -721,10 +789,15 @@ export class PaperTrader {
 
     const trade = position.trade;
 
-    // percentToClose is percentage of REMAINING position to close
-    const tokensToSell = position.tokensHeld * (percentToClose / 100);
+    // Clamp to what's actually remaining
+    const actualPct = Math.min(percentOfOriginal, trade.remainingPosition);
+    if (actualPct <= 0) return;
 
-    // FIX #25: Slippage based on trade value vs liquidity
+    // Tokens to sell = original tokens * fraction of original being sold
+    const originalTokens = trade.entryAmountXRP / trade.entryPriceXRP;
+    const tokensToSell = originalTokens * (actualPct / 100);
+
+    // Slippage on trade value vs pool XRP reserve
     const tradeValueXRP = tokensToSell * exitPrice;
     const slippage = this.estimateSlippage(tradeValueXRP, snapshot);
 
@@ -733,19 +806,20 @@ export class PaperTrader {
     const fees = proceeds * 0.003;
     const netProceeds = proceeds - fees;
 
-    // FIX #3: Cost basis is proportional to tokens sold vs total tokens held
-    const fractionSold = percentToClose / 100;
-    const costBasisSold = trade.entryAmountXRP * fractionSold;
-    const pnlXRP = netProceeds - costBasisSold;
-    const pnlPercent = costBasisSold > 0 ? (pnlXRP / costBasisSold) * 100 : 0;
+    // Cost basis for the portion being sold = proportional to original entry cost
+    const costBasisSold = trade.entryAmountXRP * (actualPct / 100);
+    const legPnlXRP = netProceeds - costBasisSold;
 
-    // Update trade
+    // Update in-memory token tracking
+    position.tokensHeld -= tokensToSell;
+
+    // Update trade record
     trade.feesPaid += fees;
     trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
-    // pnlXRP = cumulative total across all legs (stays accurate through partial closes)
+    trade.remainingPosition = Math.max(0, trade.remainingPosition - actualPct);
+    // Cumulative PnL = total returned - total invested
     trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
     trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
-    trade.remainingPosition -= percentToClose;
 
     // If fully closed, mark as closed
     if (trade.remainingPosition <= 0) {
@@ -755,19 +829,21 @@ export class PaperTrader {
       trade.exitReason = reason;
       trade.status = 'closed';
       this.openPositions.delete(key);
+      this.lastCloseTime.set(key, Date.now());
+      this.recordProfileStat(position, trade);
     } else {
       trade.status = 'partial';
     }
 
     // Return proceeds to bankroll
     this.bankrollXRP += netProceeds;
-    this.dailyPnL += pnlXRP;
+    this.dailyPnL += legPnlXRP;
     this.tradesToday++;
 
     // Save to DB
     this.db.updatePaperTrade(trade);
 
-    info(`📊 Partial close: ${trade.tokenCurrency} | Sold ${percentToClose}% | PnL: ${pnlXRP.toFixed(4)} XRP`);
+    info(`📊 Partial close: ${trade.tokenCurrency} | Sold ${actualPct}% of original | PnL leg: ${legPnlXRP.toFixed(4)} XRP | Remaining: ${trade.remainingPosition}%`);
   }
 
   /**
@@ -848,20 +924,19 @@ export class PaperTrader {
    * Estimate slippage based on trade size vs liquidity
    */
   /**
-   * AMM slippage using constant-product formula: k = x * y
-   * Buying dx tokens from a pool costs dy XRP where:
-   *   dy = y * dx / (x + dx) for tokens, but since we're buying with XRP:
-   *   slippage = tradeSize / (poolSize + tradeSize)
+   * AMM slippage using constant-product formula, using poolXrpReserve (XRP side only).
+   * slippage = tradeSize / (poolXrpReserve + tradeSize)
    *
-   * This is exact for constant-product AMMs (XRPL AMM is CPMM).
-   * A 25 XRP trade in a 1500 XRP pool = 25/1525 = 1.64% slippage (was 0.17%).
-   * Caps at 10% to avoid absurd estimates on micro pools.
+   * Uses poolXrpReserve, NOT total TVL, because only the XRP side matters
+   * for a token-buy price impact. TVL = poolXRP * 2 overstates depth by 2x.
+   * Caps at 10%.
    */
   private estimateSlippage(tradeSizeXRP: number, snapshot: MarketSnapshot | null): number {
-    if (!snapshot || !snapshot.liquidityXRP || snapshot.liquidityXRP <= 0) {
-      return 0.02; // 2% conservative default if pool depth unknown
-    }
-    const slippage = tradeSizeXRP / (snapshot.liquidityXRP + tradeSizeXRP);
+    // Prefer explicit poolXrpReserve; fall back to half of TVL (liquidityXRP = TVL = 2*poolXRP)
+    const poolXrp = snapshot?.poolXrpReserve
+      ?? (snapshot?.liquidityXRP ? snapshot.liquidityXRP / 2 : 0);
+    if (poolXrp <= 0) return 0.02; // 2% default if unknown
+    const slippage = tradeSizeXRP / (poolXrp + tradeSizeXRP);
     return Math.min(0.10, slippage);
   }
 
@@ -946,6 +1021,9 @@ export class PaperTrader {
       priceHistory: [trade.entryPriceXRP],
       openedAt: trade.entryTimestamp || 0,
       tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
+      profileName: (trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
+      lastBuySeenAt: trade.entryTimestamp || 0,
+      liquidityAtEntry: 0,
     });
   }
 
@@ -988,6 +1066,9 @@ export class PaperTrader {
         // Loaded from DB = already past hold time; set openedAt far in the past
         openedAt: trade.entryTimestamp || 0,
         tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
+        profileName: (trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
+        lastBuySeenAt: trade.entryTimestamp || 0,
+        liquidityAtEntry: 0,
       });
     }
 
@@ -1143,6 +1224,30 @@ export class PaperTrader {
    */
   private getCurrentDate(): string {
     return new Date().toISOString().split('T')[0];
+  }
+
+  /**
+   * Persist trade outcome to profile_stats table for per-profile analytics.
+   */
+  private recordProfileStat(position: OpenPosition, trade: PaperTrade): void {
+    try {
+      const holdMs = trade.exitTimestamp
+        ? trade.exitTimestamp - trade.entryTimestamp
+        : Date.now() - trade.entryTimestamp;
+      this.db.saveProfileStat({
+        profile: position.profileName,
+        closedAt: Date.now(),
+        tokenCurrency: trade.tokenCurrency,
+        tokenIssuer: trade.tokenIssuer,
+        entryXRP: trade.entryAmountXRP,
+        exitXRP: trade.xrpReturned ?? 0,
+        pnlXRP: trade.pnlXRP ?? 0,
+        pnlPct: trade.pnlPercent ?? 0,
+        holdMs,
+        exitReason: trade.exitReason ?? 'unknown',
+        won: (trade.pnlXRP ?? 0) > 0,
+      });
+    } catch { /* non-critical */ }
   }
 
   /**

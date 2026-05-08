@@ -31,6 +31,8 @@ export interface MarketSnapshot {
   timestamp: number;
   priceXRP: number | null;
   liquidityXRP: number | null;
+  /** XRP side of the AMM reserve — used for slippage and sizing. Separate from TVL. */
+  poolXrpReserve?: number;
   buyVolume5m: number;
   sellVolume5m: number;
   buyCount5m: number;
@@ -74,6 +76,8 @@ export interface TokenScore {
 
 // Paper trade record
 export interface PaperTrade {
+  /** Profile used for this trade (from tradeProfiles.ts) */
+  tradeProfile?: string;
   id?: number;
   tokenCurrency: string;
   tokenIssuer: string;
@@ -127,7 +131,8 @@ export interface AlertPayload {
     | 'daily_summary'
     | 'hourly_summary'
     | 'open_positions_update'
-    | 'bot_log';
+    | 'bot_log'
+    | 'live_preflight_failed';
   tokenCurrency?: string;
   tokenIssuer?: string;
   score?: number;
@@ -154,7 +159,7 @@ export interface BotConfig {
   xrplWsUrl: string;
   telegramBotToken: string;
   telegramChatId: string;
-  mode: 'WATCH' | 'PAPER' | 'AUTO';
+  mode: 'WATCH' | 'PAPER' | 'AUTO' | 'LIVE';
   minLiquidityXRP: number;
   minScoreAlert: number;
   minScorePaperTrade: number;

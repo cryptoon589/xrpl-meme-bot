@@ -42,6 +42,8 @@ import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
+import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
+import { MissedOpportunityTracker } from './market/missedOpportunityTracker';
 
 // Global state
 let isRunning = false;
@@ -109,6 +111,8 @@ async function main() {
   const socialDetector = new SocialDetector(config.xrplWsUrl);
   const liveValidator = new LiveValidator(db);
   const multiTimeframeScorer = new MultiTimeframeScorer(config);
+  const tradeDecisionEngine = new TradeDecisionEngine(config);
+  const missedOpportunityTracker = new MissedOpportunityTracker(db, ammPriceFetcher);
 
   // Load whale data from DB and wire into scorer
   whaleTracker.load(db);
@@ -398,7 +402,8 @@ async function main() {
     issuerReputation, correlationDetector,
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
-    whaleTracker, liveValidator, socialDetector, runtimeLearning, multiTimeframeScorer
+    whaleTracker, liveValidator, socialDetector, runtimeLearning, multiTimeframeScorer,
+    missedOpportunityTracker
   );
 
   startHealthCheck(xrplClient);
@@ -589,7 +594,8 @@ function startPeriodicScan(
   liveValidator: LiveValidator,
   socialDetector: SocialDetector,
   runtimeLearning: RuntimeLearning,
-  multiTimeframeScorer: MultiTimeframeScorer
+  multiTimeframeScorer: MultiTimeframeScorer,
+  missedOpportunityTracker: import('./market/missedOpportunityTracker').MissedOpportunityTracker
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
@@ -850,6 +856,21 @@ function startPeriodicScan(
             const momentumSignals = [priceUp5m, priceUp15m, volumeSpike, newMoneyIn].filter(Boolean).length;
             const momentumEntry = momentumSignals >= 2 && buyDominated && liquidOk;
 
+            // Track near-miss signals for missed opportunity analysis
+            if (!momentumEntry && momentumSignals >= 1 && snapshot.priceXRP && snapshot.liquidityXRP) {
+              missedOpportunityTracker.record({
+                currency: token.currency,
+                issuer: token.issuer,
+                rawCurrency: token.rawCurrency,
+                skippedAt: Date.now(),
+                skipReason: !liquidOk ? 'low_liquidity'
+                  : !buyDominated ? 'buy_not_dominant'
+                  : `signals_${momentumSignals}_of_4`,
+                priceAtSkip: snapshot.priceXRP,
+                poolXrpReserve: snapshot.poolXrpReserve ?? snapshot.liquidityXRP / 2,
+              });
+            }
+
             if (paperTrader && momentumEntry &&
                 riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && !correlationWarning) {
               tradeLocks.add(tradeKey);
@@ -1085,6 +1106,24 @@ function startPeriodicScan(
       ] : []),
       `Forward to review and improve the bot.`,
     ].filter((l): l is string => l !== undefined);
+
+    // Append profile stats if available
+    try {
+      const profileStats = db.getProfileStats();
+      const profileNames = Object.keys(profileStats);
+      if (profileNames.length > 0) {
+        logLines.push('', 'PROFILE STATS');
+        for (const [pName, ps] of Object.entries(profileStats)) {
+          const s = ps as any;
+          logLines.push(
+            `${pName}: ${s.trades}t | WR ${(s.winRate*100).toFixed(0)}% | ` +
+            `avgW +${s.avgWinPct.toFixed(1)}% avgL ${s.avgLossPct.toFixed(1)}% | ` +
+            `best +${s.bestRunPct.toFixed(1)}% | hold ${(s.avgHoldMs/60000).toFixed(0)}m | ` +
+            `net ${s.netPnlXRP >= 0 ? '+' : ''}${s.netPnlXRP.toFixed(2)} XRP`
+          );
+        }
+      }
+    } catch { /* non-critical */ }
 
     await telegramAlerter.sendAlert({
       type: 'bot_log',

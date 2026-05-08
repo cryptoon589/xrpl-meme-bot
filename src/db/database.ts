@@ -818,6 +818,114 @@ export class Database {
     }
   }
 
+  // ==================== MISSED OPPORTUNITIES ====================
+
+  ensureMissedOpportunitiesTable(): void {
+    try {
+      this.db.exec(SCHEMA.missedOpportunities);
+      this.db.exec(SCHEMA.profileStats);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_missed_opp_currency ON missed_opportunities(currency, issuer)`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_stats_profile ON profile_stats(profile, closed_at)`);
+    } catch { /* already exists */ }
+  }
+
+  saveMissedOpportunity(sig: import('../market/missedOpportunityTracker').MissedSignal): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO missed_opportunities
+          (currency, issuer, skipped_at, skip_reason, price_at_skip, pool_xrp_reserve,
+           max_price_10m, max_price_30m, max_price_60m, pct_gain_10m, pct_gain_30m, pct_gain_60m)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      `);
+      this.runWithRetry(stmt, [
+        sig.currency, sig.issuer, sig.skippedAt, sig.skipReason,
+        sig.priceAtSkip, sig.poolXrpReserve,
+        sig.maxPrice10m ?? null, sig.maxPrice30m ?? null, sig.maxPrice60m ?? null,
+        sig.pctGain10m ?? null, sig.pctGain30m ?? null, sig.pctGain60m ?? null,
+      ]);
+    } catch (err) {
+      warn(`Error saving missed opportunity: ${err}`);
+    }
+  }
+
+  getTopMissedOpportunities(limit = 20): any[] {
+    try {
+      return this.db.prepare(`
+        SELECT * FROM missed_opportunities
+        WHERE pct_gain_60m IS NOT NULL
+        ORDER BY pct_gain_60m DESC
+        LIMIT ?
+      `).all(limit) as any[];
+    } catch { return []; }
+  }
+
+  // ==================== PROFILE STATS ====================
+
+  saveProfileStat(stat: {
+    profile: string;
+    closedAt: number;
+    tokenCurrency: string;
+    tokenIssuer: string;
+    entryXRP: number;
+    exitXRP: number;
+    pnlXRP: number;
+    pnlPct: number;
+    holdMs: number;
+    exitReason: string;
+    won: boolean;
+  }): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO profile_stats
+          (profile, closed_at, token_currency, token_issuer,
+           entry_xrp, exit_xrp, pnl_xrp, pnl_pct, hold_ms, exit_reason, won)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `);
+      this.runWithRetry(stmt, [
+        stat.profile, stat.closedAt, stat.tokenCurrency, stat.tokenIssuer,
+        stat.entryXRP, stat.exitXRP, stat.pnlXRP, stat.pnlPct,
+        stat.holdMs, stat.exitReason, stat.won ? 1 : 0,
+      ]);
+    } catch (err) {
+      warn(`Error saving profile stat: ${err}`);
+    }
+  }
+
+  getProfileStats(): Record<string, {
+    trades: number;
+    wins: number;
+    winRate: number;
+    avgWinPct: number;
+    avgLossPct: number;
+    bestRunPct: number;
+    avgHoldMs: number;
+    netPnlXRP: number;
+  }> {
+    try {
+      const rows = this.db.prepare('SELECT * FROM profile_stats').all() as any[];
+      const result: Record<string, any> = {};
+      for (const row of rows) {
+        const p = row.profile;
+        if (!result[p]) result[p] = { trades: 0, wins: 0, totalWinPct: 0, totalLossPct: 0, bestRunPct: 0, totalHoldMs: 0, netPnlXRP: 0 };
+        const s = result[p];
+        s.trades++;
+        if (row.won) { s.wins++; s.totalWinPct += row.pnl_pct; }
+        else { s.totalLossPct += row.pnl_pct; }
+        if (row.pnl_pct > s.bestRunPct) s.bestRunPct = row.pnl_pct;
+        s.totalHoldMs += row.hold_ms;
+        s.netPnlXRP += row.pnl_xrp;
+      }
+      for (const [p, s] of Object.entries(result) as any[]) {
+        s.winRate = s.trades > 0 ? s.wins / s.trades : 0;
+        s.avgWinPct = s.wins > 0 ? s.totalWinPct / s.wins : 0;
+        s.avgLossPct = (s.trades - s.wins) > 0 ? s.totalLossPct / (s.trades - s.wins) : 0;
+        s.avgHoldMs = s.trades > 0 ? s.totalHoldMs / s.trades : 0;
+        delete s.totalWinPct; delete s.totalLossPct; delete s.totalHoldMs;
+      }
+      return result;
+    } catch { return {}; }
+  }
+
   /**
    * Close database connection
    */

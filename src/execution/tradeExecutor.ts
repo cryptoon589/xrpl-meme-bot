@@ -17,6 +17,7 @@ import * as xrpl from 'xrpl';
 import { BotConfig } from '../config';
 import { TelegramAlerter } from '../telegram/alerts';
 import { info, warn, error, debug } from '../utils/logger';
+import { TradeDecisionEngine } from './tradeDecisionEngine';
 
 export interface LivePosition {
   id: string;
@@ -65,12 +66,31 @@ export class TradeExecutor {
     this.config = config;
     this.alerter = alerter;
     this.wsUrl = config.xrplWsUrl;
-    this.dryRun = dryRun;
 
+    // Triple-lock: require MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED
+    // If any are missing, force dry-run. Never default to live.
     const seed = process.env.TRADING_WALLET_SEED;
-    if (!seed) throw new Error('TRADING_WALLET_SEED not set in .env');
-    this.wallet = xrpl.Wallet.fromSeed(seed);
-    info(`Trading wallet: ${this.wallet.address} (${dryRun ? 'DRY-RUN' : 'LIVE'})`);
+    const isLiveMode = (config.mode as string) === 'LIVE';
+    const liveFlag = config.liveTrading;
+    const hasWallet = !!seed;
+    const effectiveLive = isLiveMode && liveFlag && hasWallet && !dryRun;
+
+    if (!effectiveLive) {
+      if ((isLiveMode || liveFlag) && !hasWallet) {
+        warn('[TradeExecutor] LIVE/LIVE_TRADING set but TRADING_WALLET_SEED missing — forcing dry-run');
+      } else if (!isLiveMode || !liveFlag) {
+        info('[TradeExecutor] Dry-run mode (MODE or LIVE_TRADING not set to live)');
+      }
+      this.dryRun = true;
+      // Use a dummy wallet for dry-run so address is available without a real seed
+      this.wallet = seed
+        ? xrpl.Wallet.fromSeed(seed)
+        : xrpl.Wallet.generate();
+    } else {
+      this.dryRun = false;
+      this.wallet = xrpl.Wallet.fromSeed(seed!);
+    }
+    info(`Trading wallet: ${this.wallet.address} (${this.dryRun ? 'DRY-RUN' : 'LIVE'})`);
   }
 
   getWalletAddress(): string {
@@ -182,8 +202,8 @@ export class TradeExecutor {
           typeof result.result.meta === 'object' &&
           (result.result.meta as any).TransactionResult === 'tesSUCCESS') {
 
-        // Parse actual fill from metadata
-        const fill = this.parseOfferFill(result.result.meta, currency, issuer);
+        // Parse actual fill from metadata (buy side)
+        const fill = this.parseOfferFill(result.result.meta, currency, issuer, 'buy');
 
         if (fill.tokensReceived <= 0) {
           return { success: false, error: 'Order not filled — no liquidity at this price' };
@@ -275,8 +295,9 @@ export class TradeExecutor {
           typeof result.result.meta === 'object' &&
           (result.result.meta as any).TransactionResult === 'tesSUCCESS') {
 
-        const fill = this.parseOfferFill(result.result.meta, 'XRP', '');
-        const xrpReceived = fill.xrpSpent; // reversed: we're selling tokens for XRP
+        // Parse sell fill — xrpSpent is repurposed as xrpReceived for sell side
+        const fill = this.parseOfferFill(result.result.meta, position.currency, position.issuer, 'sell');
+        const xrpReceived = fill.xrpSpent;
         const actualPrice = tokensToSell > 0 ? xrpReceived / tokensToSell : currentPriceXRP;
 
         // Update position
@@ -411,34 +432,35 @@ export class TradeExecutor {
     };
   }
 
-  private parseOfferFill(meta: any, currency: string, issuer: string): {
-    tokensReceived: number;
-    xrpSpent: number;
-  } {
-    let tokensReceived = 0;
-    let xrpSpent = 0;
-
-    const nodes: any[] = meta?.AffectedNodes || [];
-    for (const node of nodes) {
-      const n = node.ModifiedNode || node.CreatedNode || node.DeletedNode;
-      if (!n) continue;
-
-      if (n.LedgerEntryType === 'AccountRoot') {
-        const prev = parseInt(n.PreviousFields?.Balance || '0');
-        const curr = parseInt(n.FinalFields?.Balance || '0');
-        const delta = curr - prev;
-        if (delta < 0) xrpSpent = Math.abs(delta) / 1_000_000;
-      }
-
-      if (n.LedgerEntryType === 'RippleState') {
-        const prevBal = parseFloat(n.PreviousFields?.Balance?.value || '0');
-        const currBal = parseFloat(n.FinalFields?.Balance?.value || '0');
-        const delta = currBal - prevBal;
-        if (delta > 0) tokensReceived = delta;
-      }
+  /**
+   * Parse actual fill amounts from transaction metadata.
+   * Delegates to TradeDecisionEngine.parseMetadata for reliable accounting.
+   *
+   * For a BUY: xrpDelta < 0 (XRP spent), tokenDelta > 0 (tokens received).
+   * For a SELL: xrpDelta > 0 (XRP received), tokenDelta < 0 (tokens sold).
+   */
+  private parseOfferFill(
+    meta: any,
+    tokenCurrency: string,
+    tokenIssuer: string,
+    side: 'buy' | 'sell' = 'buy'
+  ): { tokensReceived: number; xrpSpent: number } {
+    const { xrpDelta, tokenDelta } = TradeDecisionEngine.parseMetadata(
+      meta, this.wallet.address, tokenCurrency, tokenIssuer
+    );
+    if (side === 'buy') {
+      // Buying: we spent XRP (negative delta) and received tokens (positive delta)
+      return {
+        xrpSpent: xrpDelta < 0 ? Math.abs(xrpDelta) : 0,
+        tokensReceived: tokenDelta > 0 ? tokenDelta : 0,
+      };
+    } else {
+      // Selling: we received XRP (positive delta) and sent tokens (negative delta)
+      return {
+        xrpSpent: xrpDelta > 0 ? xrpDelta : 0,   // repurposed as xrpReceived
+        tokensReceived: tokenDelta < 0 ? Math.abs(tokenDelta) : 0, // repurposed as tokensSold
+      };
     }
-
-    return { tokensReceived, xrpSpent };
   }
 
   private simulateOpen(

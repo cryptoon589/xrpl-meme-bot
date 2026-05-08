@@ -83,6 +83,7 @@ export class MarketDataCollector {
       // Fix 5+6: Use pre-fetched AMM price when available (correct price for history/changes)
       let priceXRP: number | null = ammPrice?.priceXRP ?? null;
       let liquidityXRP: number | null = ammPrice?.liquidityXRP ?? null;
+      let poolXrpReserve: number | undefined = (ammPrice as any)?.poolXRP ?? undefined;
 
       // Sanity guard: if liquidity looks like raw drops (>100M XRP is impossible for meme pools)
       // this means someone passed drops instead of XRP — correct it
@@ -131,6 +132,7 @@ export class MarketDataCollector {
         timestamp: Date.now(),
         priceXRP,
         liquidityXRP,
+        poolXrpReserve: poolXrpReserve ?? (liquidityXRP ? liquidityXRP / 2 : undefined),
         buyVolume5m: volumeData.buyVolume,
         sellVolume5m: volumeData.sellVolume,
         buyCount5m: volumeData.buyCount,

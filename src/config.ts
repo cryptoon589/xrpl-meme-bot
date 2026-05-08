@@ -12,11 +12,11 @@ dotenv.config();
 export type { BotConfig };
 
 export function loadConfig(): BotConfig {
-  const mode = (process.env.MODE || 'WATCH').toUpperCase() as 'WATCH' | 'PAPER' | 'AUTO';
-
-  if (!['WATCH', 'PAPER', 'AUTO'].includes(mode)) {
-    error(`Invalid MODE: ${mode}. Defaulting to WATCH`);
+  const rawMode = (process.env.MODE || 'WATCH').toUpperCase();
+  if (!['WATCH', 'PAPER', 'AUTO', 'LIVE'].includes(rawMode)) {
+    error(`Invalid MODE: ${rawMode}. Defaulting to WATCH`);
   }
+  const mode = rawMode === 'AUTO' ? 'WATCH' : rawMode as 'WATCH' | 'PAPER' | 'AUTO';
 
   const config: BotConfig = {
     xrplWsUrl: process.env.XRPL_WS_URL || 'wss://rpc.xrplclaw.com/ws',
@@ -31,7 +31,12 @@ export function loadConfig(): BotConfig {
     maxTradeXRP: parseInt(process.env.MAX_TRADE_XRP || '25', 10),
     maxOpenTrades: parseInt(process.env.MAX_OPEN_TRADES || '5', 10),
     maxDailyLossXRP: parseInt(process.env.MAX_DAILY_LOSS_XRP || '30', 10),
-    liveTrading: process.env.LIVE_TRADING === 'true',
+    // Live trading requires ALL THREE: MODE=LIVE, LIVE_TRADING=true, TRADING_WALLET_SEED set.
+    // Any missing → force dry-run. Never default to live.
+    liveTrading:
+      rawMode === 'LIVE' &&
+      process.env.LIVE_TRADING === 'true' &&
+      !!process.env.TRADING_WALLET_SEED,
     // weights field kept for type compatibility but scoring uses self-learned
     // weights from state/recommendations.json — these env vars are ignored.
     weights: { liquidity: 0, holderGrowth: 0, buyPressure: 0, volumeAccel: 0, devSafety: 0, whitelistBoost: 0, spread: 0 },
