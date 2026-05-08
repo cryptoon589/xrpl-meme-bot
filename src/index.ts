@@ -1048,6 +1048,8 @@ function startPeriodicScan(
 
   // Also expose manual trigger via a simple check at startup
   const runAnalysis = async () => {
+    info('[BotLog] 6h analysis triggered — building bot log...');
+    try {
     const recs = tradeAnalyzer.analyze(); // null if < 5 trades
     const state = paperTrader ? paperTrader.getState() : null;
 
@@ -1099,6 +1101,10 @@ function startPeriodicScan(
       tokenScorer.loadLearnedWeights();
       runtimeLearning.reload();
       info('TradeAnalyzer: scorer weights and runtime learning reloaded');
+    }
+    info('[BotLog] Bot log sent successfully.');
+    } catch (err) {
+      error(`[BotLog] runAnalysis failed: ${err}`);
     }
   };
 
