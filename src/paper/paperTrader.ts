@@ -190,7 +190,10 @@ export class PaperTrader {
     });
 
     this.db.savePaperTrade(trade);
-    info(`🚀 BURST paper trade OPENED: ${token.currency} @ ${entryPrice.toFixed(8)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, liq: ${liquidity.toFixed(0)} XRP`);
+    const displayName = token.currency.length === 40
+      ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
+      : token.currency;
+    info(`🚀 BURST paper trade OPENED: ${displayName} (profile: ${(this.openPositions.get(key) as any)?.profileName ?? '?'}) @ ${entryPrice.toFixed(8)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, pool: ${liquidity.toFixed(0)} XRP`);
     return trade;
   }
 
@@ -360,7 +363,10 @@ export class PaperTrader {
     // Save to DB
     this.db.savePaperTrade(trade);
 
-    info(`📈 Paper trade OPENED: ${token.currency} @ ${entryPrice.toFixed(6)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, score: ${score}`);
+    const displayName2 = token.currency.length === 40
+      ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
+      : token.currency;
+    info(`📈 Paper trade OPENED: ${displayName2} (profile: ${(this.openPositions.get(key) as any)?.profileName ?? '?'}) @ ${entryPrice.toFixed(6)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, score: ${score}`);
 
     return trade;
   }

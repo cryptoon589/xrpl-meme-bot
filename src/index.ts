@@ -182,7 +182,9 @@ async function main() {
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
-    burstDetector.onBurst = (currency, issuer, rawCurrency, poolXRP, priceXRP) => {
+    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP) => {
+      // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
+      const poolXrpReserve = poolTVL / 2;
       if (isBlocklistedToken(currency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
       const burstKey = `${currency}:${issuer}`;
       if (tradeLocks.has(burstKey)) { debug(`Burst skipped — lock held: ${burstKey}`); return; }
@@ -191,14 +193,14 @@ async function main() {
 
       const snapshot: any = {
         tokenCurrency: currency, tokenIssuer: issuer,
-        priceXRP, liquidityXRP: poolXRP * 2,
-        poolXrpReserve: poolXRP,
+        priceXRP, liquidityXRP: poolTVL,
+        poolXrpReserve,
         buyCount5m: 0, sellCount5m: 0,
       };
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
 
       tradeDecisionEngine.decide({
-        currency, issuer, rawCurrency, snapshot,
+        currency, issuer, rawCurrency, snapshot,  // snapshot has correct poolXrpReserve
         signalType: 'burst', signalScore: 0,
         bankrollXRP: paperTrader.getState().bankrollXRP,
         openPositions: paperTrader.getOpenPositionsSummary().length,
@@ -214,7 +216,7 @@ async function main() {
         const burstTp = runtimeLearning.getTpTargets('burst');
         const trade = paperTrader.tryOpenBurstTrade(
           token, snapshot,
-          `[BURST] pool: ${poolXRP.toFixed(0)} XRP | profile: ${decision.profile.name}`,
+          `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${decision.profile.name}`,
           burstTp
         );
         tradeLocks.delete(burstKey);
@@ -228,7 +230,7 @@ async function main() {
             paperTrade: trade,
             tradeProfileName: decision.profile.name,
             tradeSource: 'burst',
-            poolXrpReserve: poolXRP,
+            poolXrpReserve: poolXrpReserve,
             slippage: decision.slippage,
             decisionSizeXRP: decision.sizeXRP,
             message: `Burst entry: ${currency}`,
@@ -252,14 +254,24 @@ async function main() {
       ammPriceFetcher.getPrice(currency, issuer).then(async ammPrice => {
         if (!ammPrice?.priceXRP) { tradeLocks.delete(momentumKey); return; }
 
+        // Decode hex currency for display — BuyPressureTracker keys use raw hex
+        const displayCurrency = decodeCurrency(currency);
+
         const streamSnapshot: any = {
           tokenCurrency: currency, tokenIssuer: issuer,
           priceXRP: ammPrice.priceXRP, liquidityXRP: ammPrice.liquidityXRP,
-          poolXrpReserve: ammPrice.poolXRP,
+          poolXrpReserve: ammPrice.poolXRP,  // XRP side of AMM only
           buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
           uniqueBuyers5m: snap.uniqueBuyers, buySellRatio: snap.buySellRatio,
           newWalletBuys: snap.newWalletBuys, buyVolumeXRP: snap.buyVolumeXRP,
         };
+
+        // Guard: skip if price is 0 or missing
+        if (!ammPrice.priceXRP || ammPrice.priceXRP <= 0) {
+          debug(`[Stream] Skipping ${displayCurrency} — no valid price from AMM`);
+          tradeLocks.delete(momentumKey);
+          return;
+        }
 
         const decision = await tradeDecisionEngine.decide({
           currency, issuer, snapshot: streamSnapshot,
@@ -271,12 +283,13 @@ async function main() {
           blocklist: BURST_TRADE_BLOCKLIST,
         });
         if (decision.outcome === 'REJECTED') {
-          debug(`[TDE] Stream rejected: ${decision.rejectReason}`);
+          debug(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
           tradeLocks.delete(momentumKey);
           return;
         }
 
-        const token = { currency, issuer, rawCurrency: currency, lastUpdated: Date.now() } as any;
+        // Use decoded name for token.currency so DB and logs show human-readable name
+        const token = { currency: displayCurrency, issuer, rawCurrency: currency, lastUpdated: Date.now() } as any;
         const scoredTp = runtimeLearning.getTpTargets('scored');
         const trade = paperTrader!.tryOpenTrade(
           token, streamSnapshot, 75,
@@ -297,7 +310,7 @@ async function main() {
             poolXrpReserve: ammPrice.poolXRP,
             slippage: decision.slippage,
             decisionSizeXRP: decision.sizeXRP,
-            message: `Stream entry: ${currency}`,
+            message: `Stream entry: ${displayCurrency}`,
           }, config), 0);
         }
       }).catch(() => tradeLocks.delete(momentumKey));
