@@ -201,28 +201,71 @@ export class TelegramAlerter {
     if (!t) return '';
 
     const ticker  = decodeCurrency(t.tokenCurrency);
-    const isBurst = t.entryReason?.startsWith('[BURST]');
-    const typeStr = isBurst ? '🚀 BURST' : '📈 SCORED';
+
+    // Profile (new) vs legacy source (fallback)
+    const profileName = payload.tradeProfileName ?? t.tradeProfile ?? null;
+    const source      = payload.tradeSource ?? t.tradeSource
+      ?? (t.entryReason?.startsWith('[BURST]') ? 'burst'
+        : t.entryReason?.startsWith('[STREAM]') ? 'stream' : 'scored');
+
+    // Profile emoji + label
+    const PROFILE_EMOJI: Record<string, string> = {
+      LOW_LIQ_PROBE:   '🔬',
+      BURST_SCALP:     '🚀',
+      MOMENTUM_RUNNER: '📈',
+      WAKEUP_TRADE:    '⏰',
+    };
+    const SOURCE_EMOJI: Record<string, string> = {
+      burst: '💥', scored: '🎯', stream: '⚡', wakeup: '⏰',
+    };
+    const profileEmoji = PROFILE_EMOJI[profileName ?? ''] ?? '📊';
+    const sourceEmoji  = SOURCE_EMOJI[source] ?? '🔔';
+
+    // Grab profile thresholds if available
+    let tp1Line = '', tp2Line = '', slLine = '', trailLine = '', timeLine = '';
+    try {
+      const { PROFILES } = require('../execution/tradeProfiles');
+      const prof = profileName ? PROFILES[profileName] : null;
+      if (prof) {
+        tp1Line   = `TP1 +${prof.tp1Pct}% → sell ${prof.tp1SellPct}% | TP2 +${prof.tp2Pct}% → sell ${prof.tp2SellPct}%`;
+        slLine    = `Stop -${prof.stopLossPct}% | Trail @+${prof.trailActivationPct}% (${prof.trailDistancePct}% dist)`;
+        timeLine  = prof.timeStopMs > 0 ? `Time stop: ${prof.timeStopMs / 60000}min` : 'No time stop';
+      }
+    } catch { /* profile module unavailable */ }
+
+    // Slippage — prefer TDE value, fall back to trade estimate
+    const slipPct = payload.slippage != null
+      ? (payload.slippage * 100).toFixed(2)
+      : (t.slippageEstimate * 100).toFixed(2);
+
+    const poolXrp = payload.poolXrpReserve;
 
     // Score display
-    const scoreStr = isBurst ? '(burst signal)' : `score ${t.entryScore ?? '—'}/100`;
+    const scoreStr = source === 'burst' ? 'burst signal'
+      : t.entryScore ? `score ${t.entryScore}/100` : '—';
 
     // Issuer link
-    const issuer = t.tokenIssuer || '';
-    const rawCur = t.tokenCurrency || '';
-    const link   = `https://firstledger.net/token/${issuer}/${rawCur}`;
+    const link = `https://firstledger.net/token/${t.tokenIssuer}/${t.tokenCurrency}`;
 
-    return [
-      `${typeStr} <b>TRADE OPENED</b>`,
+    const lines = [
+      `${profileEmoji} <b>TRADE OPENED</b>`,
       ``,
-      `<b>Token:</b>  <code>${ticker}</code>`,
-      `<b>Entry:</b>  ${fmtPrice(t.entryPriceXRP)}`,
-      `<b>Size:</b>   ${fmtXRP(t.entryAmountXRP)}`,
-      `<b>Signal:</b> ${scoreStr}`,
-      `<b>Slip:</b>   ${(t.slippageEstimate * 100).toFixed(2)}%`,
+      `<b>Profile:</b> <code>${profileName ?? '—'}</code>  ${sourceEmoji} Source: ${source}`,
+      `<b>Token:</b>   <code>${ticker}</code>`,
+      `<b>Entry:</b>   ${fmtPrice(t.entryPriceXRP)}`,
+      `<b>Size:</b>    ${fmtXRP(t.entryAmountXRP)}`,
+      poolXrp != null ? `<b>Pool XRP:</b> ${poolXrp.toFixed(0)} XRP reserve` : null,
+      `<b>Signal:</b>  ${scoreStr}`,
+      `<b>Slip:</b>    ${slipPct}%`,
+      tp1Line   ? `<b>TPs:</b>    ${tp1Line}` : null,
+      slLine    ? `<b>Risk:</b>   ${slLine}` : null,
+      timeLine  ? `<b>Time:</b>   ${timeLine}` : null,
+      `<b>Reason:</b>  ${(t.entryReason ?? '').replace(/\[BURST\]\s*|\[SCORED\]\s*|\[STREAM\]\s*/g, '').split('|').slice(0, 3).join(' | ')}`,
       ``,
       `<a href="${link}">FirstLedger ↗</a>`,
-    ].join('\n');
+    ].filter(Boolean) as string[];
+
+    return lines.join('\n');
   }
 
   // ── Partial close (TP1) ───────────────────────────────────────────────────

@@ -111,7 +111,9 @@ export const SCHEMA = {
       tp2_hit INTEGER DEFAULT 0,
       trailing_stop_active INTEGER DEFAULT 0,
       remaining_position REAL DEFAULT 100,
-      xrp_returned REAL DEFAULT 0
+      xrp_returned REAL DEFAULT 0,
+      trade_profile TEXT,
+      trade_source TEXT
     )
   `,
 

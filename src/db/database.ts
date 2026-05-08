@@ -111,6 +111,8 @@ export class Database {
       `ALTER TABLE market_snapshots ADD COLUMN unique_sellers_5m INTEGER DEFAULT 0`,
       `ALTER TABLE tracked_tokens ADD COLUMN raw_currency TEXT`,
       `ALTER TABLE paper_trades ADD COLUMN xrp_returned REAL DEFAULT 0`,
+      `ALTER TABLE paper_trades ADD COLUMN trade_profile TEXT`,
+      `ALTER TABLE paper_trades ADD COLUMN trade_source TEXT`,
       // whale_wallets and execution_validation are created via SCHEMA (CREATE TABLE IF NOT EXISTS)
       // so no ALTER TABLE needed; these are no-op guards for idempotency
     ];
@@ -416,8 +418,9 @@ export class Database {
          entry_timestamp, entry_score, entry_reason, exit_price_xrp,
          exit_timestamp, exit_score, exit_reason, status, pnl_xrp,
          pnl_percent, slippage_estimate, fees_paid, tp1_hit, tp2_hit,
-         trailing_stop_active, remaining_position, xrp_returned)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         trailing_stop_active, remaining_position, xrp_returned,
+         trade_profile, trade_source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       this.runWithRetry(stmt, [
         trade.tokenCurrency,
@@ -440,7 +443,9 @@ export class Database {
         trade.tp2Hit ? 1 : 0,
         trade.trailingStopActive ? 1 : 0,
         trade.remainingPosition,
-        trade.xrpReturned ?? 0
+        trade.xrpReturned ?? 0,
+        trade.tradeProfile ?? null,
+        trade.tradeSource ?? null,
       ]);
 
       // Set the ID on the trade object
@@ -458,7 +463,9 @@ export class Database {
         SET exit_price_xrp = ?, exit_timestamp = ?, exit_score = ?,
             exit_reason = ?, status = ?, pnl_xrp = ?, pnl_percent = ?,
             fees_paid = ?, tp1_hit = ?, tp2_hit = ?,
-            trailing_stop_active = ?, remaining_position = ?, xrp_returned = ?
+            trailing_stop_active = ?, remaining_position = ?, xrp_returned = ?,
+            trade_profile = COALESCE(trade_profile, ?),
+            trade_source  = COALESCE(trade_source,  ?)
         WHERE id = ?
       `);
       this.runWithRetry(stmt, [
@@ -475,6 +482,8 @@ export class Database {
         trade.trailingStopActive ? 1 : 0,
         trade.remainingPosition,
         trade.xrpReturned ?? 0,
+        trade.tradeProfile ?? null,
+        trade.tradeSource ?? null,
         trade.id
       ]);
     } catch (err) {
@@ -553,6 +562,8 @@ export class Database {
       tp2Hit: row.tp2_hit === 1,
       trailingStopActive: row.trailing_stop_active === 1,
       remainingPosition: row.remaining_position,
+      tradeProfile: row.trade_profile ?? undefined,
+      tradeSource: row.trade_source ?? undefined,
     };
   }
 

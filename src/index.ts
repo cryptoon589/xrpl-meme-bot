@@ -74,6 +74,19 @@ async function main() {
   info('🚀 Starting XRPL Meme Bot v1.3.0...');
   info(`Mode: ${config.mode}`);
 
+  // Startup profile summary
+  (() => {
+    const { PROFILES } = require('./execution/tradeProfiles');
+    info('\n🎨 TRADE PROFILES ENABLED:');
+    for (const [name, p] of Object.entries(PROFILES) as any[]) {
+      info(`  ${name}: pool≥${p.minPoolXrpReserve}XRP | size ${p.baseSizeXRP}–${p.maxSizeXRP}XRP | ` +
+        `stop-${p.stopLossPct}% | TP1+${p.tp1Pct}%(sell${p.tp1SellPct}%) TP2+${p.tp2Pct}%(sell${p.tp2SellPct}%) | ` +
+        `trail@+${p.trailActivationPct}%/${p.trailDistancePct}% | ` +
+        `slip≤${(p.maxSlippage*100).toFixed(0)}% | timeStop ${p.timeStopMs>0 ? p.timeStopMs/60000+'min' : 'off'}`);
+    }
+    info('');
+  })();
+
   if (config.mode === 'AUTO') {
     warn('⚠️  AUTO mode is not implemented! Falling back to WATCH mode for safety.');
   }
@@ -167,56 +180,65 @@ async function main() {
   const isBlocklistedToken = (currency: string): boolean =>
     BURST_TRADE_BLOCKLIST.has(currency) || BURST_TRADE_BLOCKLIST.has(decodeCurrency(currency));
 
-  // Hook burst detector into paper trader — opens a burst trade on every confirmed burst
+  // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
     burstDetector.onBurst = (currency, issuer, rawCurrency, poolXRP, priceXRP) => {
-      if (isBlocklistedToken(currency)) {
-        debug(`Burst trade skipped — blocklisted token: ${currency}`);
-        return;
-      }
-      // #4 Unified position lock — burst and scored share the same lock set
+      if (isBlocklistedToken(currency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
       const burstKey = `${currency}:${issuer}`;
-      if (tradeLocks.has(burstKey)) {
-        debug(`Burst trade skipped — position lock held for ${burstKey}`);
-        return;
-      }
-      if (paperTrader.hasOpenPosition(currency, issuer)) {
-        debug(`Burst trade skipped — already have open position for ${burstKey}`);
-        return;
-      }
+      if (tradeLocks.has(burstKey)) { debug(`Burst skipped — lock held: ${burstKey}`); return; }
+      if (paperTrader.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — open position: ${burstKey}`); return; }
       tradeLocks.add(burstKey);
+
+      const snapshot: any = {
+        tokenCurrency: currency, tokenIssuer: issuer,
+        priceXRP, liquidityXRP: poolXRP * 2,
+        poolXrpReserve: poolXRP,
+        buyCount5m: 0, sellCount5m: 0,
+      };
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
-      const snapshot = {
-        tokenCurrency: currency,
-        tokenIssuer: issuer,
-        priceXRP,
-        liquidityXRP: poolXRP,
-        buyCount5m: 0,
-        sellCount5m: 0,
-      } as any;
-      const burstTp = runtimeLearning.getTpTargets('burst');
-      const trade = paperTrader.tryOpenBurstTrade(
-        token,
-        snapshot,
-        `Buy burst — pool: ${poolXRP.toFixed(0)} XRP`,
-        burstTp
-      );
-      tradeLocks.delete(burstKey); // release lock regardless of outcome
-      if (trade) {
-        // Notify Telegram about the burst paper entry
-        setTimeout(() => sendAlert(telegramAlerter, db, {
-          type: 'paper_trade_opened',
-          tokenCurrency: currency,
-          tokenIssuer: issuer,
-          paperTrade: trade,
-          message: `🚀 Burst entry: ${currency} @ ${priceXRP.toFixed(8)} XRP`,
-        }, config), 0);
-      }
+
+      tradeDecisionEngine.decide({
+        currency, issuer, rawCurrency, snapshot,
+        signalType: 'burst', signalScore: 0,
+        bankrollXRP: paperTrader.getState().bankrollXRP,
+        openPositions: paperTrader.getOpenPositionsSummary().length,
+        dailyPnL: paperTrader.getState().dailyPnL,
+        openPositionKeys: new Set(paperTrader.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
+        blocklist: BURST_TRADE_BLOCKLIST,
+      }).then(decision => {
+        if (decision.outcome === 'REJECTED') {
+          debug(`[TDE] Burst rejected: ${decision.rejectReason}`);
+          tradeLocks.delete(burstKey);
+          return;
+        }
+        const burstTp = runtimeLearning.getTpTargets('burst');
+        const trade = paperTrader.tryOpenBurstTrade(
+          token, snapshot,
+          `[BURST] pool: ${poolXRP.toFixed(0)} XRP | profile: ${decision.profile.name}`,
+          burstTp
+        );
+        tradeLocks.delete(burstKey);
+        if (trade) {
+          trade.tradeProfile = decision.profile.name;
+          trade.tradeSource  = 'burst';
+          db.updatePaperTrade(trade);
+          setTimeout(() => sendAlert(telegramAlerter, db, {
+            type: 'paper_trade_opened',
+            tokenCurrency: currency, tokenIssuer: issuer,
+            paperTrade: trade,
+            tradeProfileName: decision.profile.name,
+            tradeSource: 'burst',
+            poolXrpReserve: poolXRP,
+            slippage: decision.slippage,
+            decisionSizeXRP: decision.sizeXRP,
+            message: `Burst entry: ${currency}`,
+          }, config), 0);
+        }
+      }).catch(err => { warn(`[TDE] Burst decision error: ${err}`); tradeLocks.delete(burstKey); });
     };
   }
 
-  // Stream-driven momentum entry — bypasses 15s scan cycle for fast-moving tokens
-  // Fires when buyPressureTracker detects 3+ unique buyers + 70% buy ratio + 100 XRP in-window
+  // Stream-driven momentum entry — routes through TradeDecisionEngine
   if (paperTrader) {
     paperTrader.setBuyPressureTracker(buyPressureTracker);
 
@@ -227,42 +249,55 @@ async function main() {
       if (tradeLocks.has(momentumKey)) return;
       tradeLocks.add(momentumKey);
 
-      const streamSnapshot: any = {
-        tokenCurrency: currency,
-        tokenIssuer:   issuer,
-        priceXRP:      null,
-        liquidityXRP:  null,
-        buyCount5m:    snap.buyCount,
-        sellCount5m:   snap.sellCount,
-        uniqueBuyers5m: snap.uniqueBuyers,
-        buySellRatio:  snap.buySellRatio,
-        newWalletBuys: snap.newWalletBuys,
-        buyVolumeXRP:  snap.buyVolumeXRP,
-        priceChange5m:  null,
-        priceChange15m: null,
-      };
+      ammPriceFetcher.getPrice(currency, issuer).then(async ammPrice => {
+        if (!ammPrice?.priceXRP) { tradeLocks.delete(momentumKey); return; }
 
-      ammPriceFetcher.getPrice(currency, issuer).then(ammPrice => {
-        if (!ammPrice || !ammPrice.priceXRP) { tradeLocks.delete(momentumKey); return; }
-        streamSnapshot.priceXRP    = ammPrice.priceXRP;
-        streamSnapshot.liquidityXRP = ammPrice.liquidityXRP;
-        if ((ammPrice.liquidityXRP ?? 0) < config.minLiquidityXRP) { tradeLocks.delete(momentumKey); return; }
+        const streamSnapshot: any = {
+          tokenCurrency: currency, tokenIssuer: issuer,
+          priceXRP: ammPrice.priceXRP, liquidityXRP: ammPrice.liquidityXRP,
+          poolXrpReserve: ammPrice.poolXRP,
+          buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
+          uniqueBuyers5m: snap.uniqueBuyers, buySellRatio: snap.buySellRatio,
+          newWalletBuys: snap.newWalletBuys, buyVolumeXRP: snap.buyVolumeXRP,
+        };
+
+        const decision = await tradeDecisionEngine.decide({
+          currency, issuer, snapshot: streamSnapshot,
+          signalType: 'stream', signalScore: 75,
+          bankrollXRP: paperTrader!.getState().bankrollXRP,
+          openPositions: paperTrader!.getOpenPositionsSummary().length,
+          dailyPnL: paperTrader!.getState().dailyPnL,
+          openPositionKeys: new Set(paperTrader!.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
+          blocklist: BURST_TRADE_BLOCKLIST,
+        });
+        if (decision.outcome === 'REJECTED') {
+          debug(`[TDE] Stream rejected: ${decision.rejectReason}`);
+          tradeLocks.delete(momentumKey);
+          return;
+        }
 
         const token = { currency, issuer, rawCurrency: currency, lastUpdated: Date.now() } as any;
         const scoredTp = runtimeLearning.getTpTargets('scored');
         const trade = paperTrader!.tryOpenTrade(
           token, streamSnapshot, 75,
-          `⚡ Stream momentum: ${snap.uniqueBuyers} buyers, ${(snap.buySellRatio*100).toFixed(0)}% buys, ${snap.buyVolumeXRP.toFixed(0)} XRP vol`,
+          `[STREAM] ${snap.uniqueBuyers} buyers ${(snap.buySellRatio*100).toFixed(0)}% buys ${snap.buyVolumeXRP.toFixed(0)} XRP | profile: ${decision.profile.name}`,
           scoredTp
         );
         tradeLocks.delete(momentumKey);
         if (trade) {
+          trade.tradeProfile = decision.profile.name;
+          trade.tradeSource  = 'stream';
+          db.updatePaperTrade(trade);
           setTimeout(() => sendAlert(telegramAlerter, db, {
             type: 'paper_trade_opened',
-            tokenCurrency: currency,
-            tokenIssuer:   issuer,
-            paperTrade:    trade,
-            message:       `⚡ Stream entry: ${currency}`,
+            tokenCurrency: currency, tokenIssuer: issuer,
+            paperTrade: trade,
+            tradeProfileName: decision.profile.name,
+            tradeSource: 'stream',
+            poolXrpReserve: ammPrice.poolXRP,
+            slippage: decision.slippage,
+            decisionSizeXRP: decision.sizeXRP,
+            message: `Stream entry: ${currency}`,
           }, config), 0);
         }
       }).catch(() => tradeLocks.delete(momentumKey));
@@ -403,7 +438,7 @@ async function main() {
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
     whaleTracker, liveValidator, socialDetector, runtimeLearning, multiTimeframeScorer,
-    missedOpportunityTracker
+    missedOpportunityTracker, tradeDecisionEngine, BURST_TRADE_BLOCKLIST
   );
 
   startHealthCheck(xrplClient);
@@ -595,7 +630,9 @@ function startPeriodicScan(
   socialDetector: SocialDetector,
   runtimeLearning: RuntimeLearning,
   multiTimeframeScorer: MultiTimeframeScorer,
-  missedOpportunityTracker: import('./market/missedOpportunityTracker').MissedOpportunityTracker
+  missedOpportunityTracker: import('./market/missedOpportunityTracker').MissedOpportunityTracker,
+  tradeDecisionEngine: import('./execution/tradeDecisionEngine').TradeDecisionEngine,
+  BURST_TRADE_BLOCKLIST: Set<string>
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = 10; // Process 10 tokens concurrently
@@ -825,12 +862,28 @@ function startPeriodicScan(
             // Auto-execute live trade if tradeExecutor is configured (live mode only)
             if (shouldAlert && alertCooldown && riskFilter.isSafe(risks) && tradeExecutor && snapshot.priceXRP) {
               db.setLastAlertTime(token.currency, token.issuer, Date.now());
-              const tradeSize = Math.min(config.maxTradeXRP, config.startingBankrollXRP * 0.1);
-              tradeExecutor.openTrade(token.currency, token.issuer, tradeSize, snapshot.priceXRP, score.totalScore)
-                .then(r => r.success
-                  ? info(`✅ Auto-trade: ${token.currency} | ${tradeSize} XRP | tx: ${r.txHash}`)
-                  : warn(`⚠️ Auto-trade skipped: ${token.currency} | ${r.error}`))
-                .catch(err => warn(`Auto-trade error: ${err}`));
+              // Route live auto-trade through TDE too
+              tradeDecisionEngine.decide({
+                currency: token.currency, issuer: token.issuer, rawCurrency: token.rawCurrency,
+                snapshot: { ...snapshot } as any,
+                signalType: 'scored', signalScore: score.totalScore,
+                bankrollXRP: config.startingBankrollXRP,
+                openPositions: tradeExecutor.getPositionCount(),
+                dailyPnL: tradeExecutor.getDailyPnL(),
+                openPositionKeys: new Set(tradeExecutor.getOpenPositions().map(p => `${p.currency}:${p.issuer}`)),
+                blocklist: BURST_TRADE_BLOCKLIST,
+                walletAddress: tradeExecutor.getWalletAddress(),
+                walletXrpBalance: undefined,
+                wsUrl: config.xrplWsUrl,
+                walletSeed: process.env.TRADING_WALLET_SEED,
+              }).then(decision => {
+                if (decision.outcome === 'REJECTED') { warn(`[TDE] Live auto-trade rejected: ${decision.rejectReason}`); return; }
+                tradeExecutor!.openTrade(token.currency, token.issuer, decision.sizeXRP, snapshot.priceXRP!, score.totalScore)
+                  .then(r => r.success
+                    ? info(`✅ Live trade [${decision.profile.name}]: ${token.currency} | ${decision.sizeXRP.toFixed(2)} XRP | tx: ${r.txHash}`)
+                    : warn(`⚠️ Live trade skipped [${decision.profile.name}]: ${token.currency} | ${r.error}`))
+                  .catch(err => warn(`Live trade error: ${err}`));
+              }).catch(err => warn(`[TDE] Live decision error: ${err}`));
               totalAlerts++;
             }
 
@@ -881,34 +934,51 @@ function startPeriodicScan(
                 volumeSpike ? `vol ${pressure.buyVolumeXRP.toFixed(0)} XRP` : null,
                 newMoneyIn  ? `${pressure.newWalletBuys} new wallets` : null,
               ].filter(Boolean).join(' | ');
-              const scoredTp = runtimeLearning.getTpTargets('scored');
-              const trade = paperTrader.tryOpenTrade(
-                token, snapshot, score.totalScore,
-                entryReason,
-                scoredTp
-              );
-              tradeLocks.delete(tradeKey);
 
-              if (trade) {
-                setTimeout(() => sendAlert(telegramAlerter, db, {
-                  type: 'paper_trade_opened',
-                  tokenCurrency: token.currency,
-                  tokenIssuer: token.issuer,
-                  paperTrade: trade,
-                  message: `Opened paper trade for ${token.currency}`,
-                }, config), 0);
-                totalTrades++;
-
-                // Feature 4: Record intended price for live validation
-                if (process.env.TRADING_WALLET_SEED && snapshot.priceXRP) {
-                  liveValidator.recordIntended(
-                    token.currency,
-                    token.issuer,
-                    snapshot.priceXRP,
-                    trade.entryAmountXRP
-                  );
+              // Route through TradeDecisionEngine
+              tradeDecisionEngine.decide({
+                currency: token.currency, issuer: token.issuer, rawCurrency: token.rawCurrency,
+                snapshot: { ...snapshot, poolXrpReserve: snapshot.poolXrpReserve } as any,
+                signalType: 'scored', signalScore: score.totalScore,
+                bankrollXRP: paperTrader.getState().bankrollXRP,
+                openPositions: paperTrader.getOpenPositionsSummary().length,
+                dailyPnL: paperTrader.getState().dailyPnL,
+                openPositionKeys: new Set(paperTrader.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
+                blocklist: BURST_TRADE_BLOCKLIST,
+              }).then(decision => {
+                if (decision.outcome === 'REJECTED') {
+                  debug(`[TDE] Scored rejected: ${decision.rejectReason}`);
+                  tradeLocks.delete(tradeKey);
+                  return;
                 }
-              }
+                const scoredTp = runtimeLearning.getTpTargets('scored');
+                const trade = paperTrader.tryOpenTrade(
+                  token, snapshot, score.totalScore,
+                  `[SCORED] ${entryReason} | profile: ${decision.profile.name}`,
+                  scoredTp
+                );
+                tradeLocks.delete(tradeKey);
+                if (trade) {
+                  trade.tradeProfile = decision.profile.name;
+                  trade.tradeSource  = 'scored';
+                  db.updatePaperTrade(trade);
+                  setTimeout(() => sendAlert(telegramAlerter, db, {
+                    type: 'paper_trade_opened',
+                    tokenCurrency: token.currency, tokenIssuer: token.issuer,
+                    paperTrade: trade,
+                    tradeProfileName: decision.profile.name,
+                    tradeSource: 'scored',
+                    poolXrpReserve: snapshot.poolXrpReserve,
+                    slippage: decision.slippage,
+                    decisionSizeXRP: decision.sizeXRP,
+                    message: `Opened scored trade for ${token.currency}`,
+                  }, config), 0);
+                  totalTrades++;
+                  if (process.env.TRADING_WALLET_SEED && snapshot.priceXRP) {
+                    liveValidator.recordIntended(token.currency, token.issuer, snapshot.priceXRP, trade.entryAmountXRP);
+                  }
+                }
+              }).catch(err => { warn(`[TDE] Scored decision error: ${err}`); tradeLocks.delete(tradeKey); });
             }
 
             // Check exits
@@ -1107,12 +1177,12 @@ function startPeriodicScan(
       `Forward to review and improve the bot.`,
     ].filter((l): l is string => l !== undefined);
 
-    // Append profile stats if available
+    // Append profile stats (grouped by profile, not old BURST/SCORED labels)
     try {
       const profileStats = db.getProfileStats();
       const profileNames = Object.keys(profileStats);
       if (profileNames.length > 0) {
-        logLines.push('', 'PROFILE STATS');
+        logLines.push('', 'PROFILE STATS (by TradeDecisionEngine profile)');
         for (const [pName, ps] of Object.entries(profileStats)) {
           const s = ps as any;
           logLines.push(
@@ -1122,6 +1192,8 @@ function startPeriodicScan(
             `net ${s.netPnlXRP >= 0 ? '+' : ''}${s.netPnlXRP.toFixed(2)} XRP`
           );
         }
+      } else {
+        logLines.push('', 'PROFILE STATS: no closed trades with profile data yet');
       }
     } catch { /* non-critical */ }
 

@@ -76,8 +76,10 @@ export interface TokenScore {
 
 // Paper trade record
 export interface PaperTrade {
-  /** Profile used for this trade (from tradeProfiles.ts) */
+  /** Profile name: LOW_LIQ_PROBE | BURST_SCALP | MOMENTUM_RUNNER | WAKEUP_TRADE */
   tradeProfile?: string;
+  /** Signal source: burst | scored | stream | wakeup */
+  tradeSource?: string;
   id?: number;
   tokenCurrency: string;
   tokenIssuer: string;
@@ -151,6 +153,12 @@ export interface AlertPayload {
     amm?: string;
   };
   paperTrade?: PaperTrade;
+  /** DecisionResult fields surfaced to alert formatter */
+  tradeProfileName?: string;   // LOW_LIQ_PROBE | BURST_SCALP | MOMENTUM_RUNNER | WAKEUP_TRADE
+  tradeSource?: string;        // burst | scored | stream | wakeup
+  poolXrpReserve?: number;
+  slippage?: number;
+  decisionSizeXRP?: number;
   message: string;
 }
 
