@@ -7,3 +7,5 @@ data/*.db-wal
 logs/*.log
 *.tsbuildinfo
 .DS_Store
+state/recommendations.json
+state/trade_analysis.md
