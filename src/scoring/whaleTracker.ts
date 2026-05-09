@@ -11,10 +11,14 @@
 
 import { Database } from '../db/database';
 import { info, debug } from '../utils/logger';
+import fs from 'fs';
+import path from 'path';
 
 interface WhaleRecord {
   wins: number;
   totalXrpProfit: number;
+  winRatePct?: number;    // externally validated win rate (FirstLedger)
+  volumeXrp?: number;     // externally validated total volume
   firstSeen: number;
   lastSeen: number;
 }
@@ -62,6 +66,43 @@ export class WhaleTracker {
   }
 
   /**
+   * Import a top trader validated by external sources (e.g. FirstLedger radar).
+   * Stores their win rate and volume alongside the bot's own tracking.
+   * If the wallet is already tracked, updates winRatePct and volumeXrp with
+   * the externally validated figures (they are more reliable than bot-internal).
+   *
+   * @param address     XRPL wallet address
+   * @param winRatePct  Win rate 0-100 from FirstLedger
+   * @param volumeXrp   Total volume in XRP
+   * @param positionsOpen Currently open positions (informational)
+   */
+  importTopTrader(
+    address: string,
+    winRatePct: number,
+    volumeXrp: number,
+    positionsOpen = 0
+  ): void {
+    const now = Date.now();
+    const existing = this.registry.get(address);
+    if (existing) {
+      // External data is authoritative — update win rate and volume
+      existing.winRatePct = winRatePct;
+      existing.volumeXrp = volumeXrp;
+      existing.lastSeen = now;
+    } else {
+      this.registry.set(address, {
+        wins: 0,               // unknown — bot hasn't tracked this wallet
+        totalXrpProfit: 0,
+        winRatePct,
+        volumeXrp,
+        firstSeen: now,
+        lastSeen: now,
+      });
+    }
+  }
+
+
+  /**
    * Get a score boost (0-30) based on how many known whale wallets
    * appear in this token's current buyer list.
    *
@@ -87,11 +128,18 @@ export class WhaleTracker {
       const record = this.registry.get(wallet);
       if (!record) continue;
 
-      // +5 for first win, +2 for each additional win, up to +10 per whale
-      const walletContribution = Math.min(10, 5 + (record.wins - 1) * 2);
-      score += walletContribution;
-
-      debug(`[WhaleTracker] Whale detected: ${wallet} (wins=${record.wins}) in ${currency}:${issuer} → +${walletContribution}`);
+      if (record.winRatePct !== undefined) {
+        // Externally imported top trader — winRatePct is the signal
+        const wr = record.winRatePct;
+        const contribution = wr >= 90 ? 10 : wr >= 80 ? 7 : wr >= 70 ? 5 : wr >= 60 ? 3 : 0;
+        score += contribution;
+        debug(`[WhaleTracker] TopTrader ${wallet} (WR=${wr}%) in ${currency}:${issuer} → +${contribution}`);
+      } else {
+        // Internally tracked whale — legacy wins-based scoring
+        const contribution = Math.min(10, 5 + (record.wins - 1) * 2);
+        score += contribution;
+        debug(`[WhaleTracker] Whale detected: ${wallet} (wins=${record.wins}) in ${currency}:${issuer} → +${contribution}`);
+      }
     }
 
     return Math.min(30, score);
@@ -108,7 +156,9 @@ export class WhaleTracker {
         record.wins,
         record.totalXrpProfit,
         record.firstSeen,
-        record.lastSeen
+        record.lastSeen,
+        record.winRatePct ?? 0,
+        record.volumeXrp ?? 0
       );
     }
     debug(`[WhaleTracker] Saved ${this.registry.size} whale wallet records`);
@@ -124,6 +174,8 @@ export class WhaleTracker {
       this.registry.set(row.address, {
         wins: row.wins,
         totalXrpProfit: row.totalXrpProfit,
+        winRatePct: row.winRatePct ?? 0,
+        volumeXrp: row.volumeXrp ?? 0,
         firstSeen: row.firstSeen,
         lastSeen: row.lastSeen,
       });
@@ -138,5 +190,43 @@ export class WhaleTracker {
 
   isWhale(address: string): boolean {
     return this.registry.has(address);
+  }
+
+  /**
+   * Load top trader whitelist from a JSON file written by the TopTraderWebhook.
+   * Safe to call repeatedly — re-imports on every bot restart and lets external
+   * sources (FirstLedger) update the whale registry without a code deploy.
+   */
+  loadTopTradersFromFile(): number {
+    try {
+      const statePath = path.join(process.cwd(), 'state', 'top_traders_import.json');
+      if (!fs.existsSync(statePath)) return 0;
+      const data = JSON.parse(fs.readFileSync(statePath, 'utf8')) as {
+        importedAt: number;
+        traders: Array<{
+          address: string;
+          winRatePct: number;
+          volumeXrp: number;
+          positionsOpen?: number;
+        }>;
+      };
+      if (!data.traders?.length) return 0;
+      // Only import if file is fresh (within last 24h)
+      if (Date.now() - data.importedAt > 24 * 3600 * 1000) {
+        debug('[WhaleTracker] Stale top_traders_import.json, skipping');
+        return 0;
+      }
+      let imported = 0;
+      for (const t of data.traders) {
+        if (t.winRatePct >= 60 && t.volumeXrp >= 1000) {
+          this.importTopTrader(t.address, t.winRatePct, t.volumeXrp, t.positionsOpen ?? 0);
+          imported++;
+        }
+      }
+      if (imported > 0) info(`[WhaleTracker] Imported ${imported} top traders from file`);
+      return imported;
+    } catch {
+      return 0;
+    }
   }
 }

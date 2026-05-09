@@ -1,0 +1,27 @@
+{
+  "importedAt": 1746808320000,
+  "source": "firstledger_radar_top20",
+  "traders": [
+    { "address": "rajQGCYdTV5wBEaDcCk1YAtLQNnyXKGFhU", "winRatePct": 95, "volumeXrp": 637630 },
+    { "address": "raw7oFXXMSQHPEZqtc5EoH6kqWzrRy41WB", "winRatePct": 81, "volumeXrp": 218150 },
+    { "address": "rhsLgyfK87bZXmbqjvGbYc9bGvoUNmkMWF", "winRatePct": 81, "volumeXrp": 59400 },
+    { "address": "rpEtstQZGLKiVJaeQwi8GesvEat1JEpTSA", "winRatePct": 79, "volumeXrp": 58340 },
+    { "address": "r31CuT8qHkqWXqHyyMQaX4CNMRjCXJC5Vi", "winRatePct": 77, "volumeXrp": 76700 },
+    { "address": "rDJA26o68Z9aHSsTRWtuc7g1Y71tFV7Xyv", "winRatePct": 78, "volumeXrp": 42900 },
+    { "address": "rPXAVY5kf8ztmoWYLBbkjPFbPM6o7cwi49", "winRatePct": 77, "volumeXrp": 25510 },
+    { "address": "ragjdcp7dv3g7CRXSVdjEvdJSiTyZhAaAZ", "winRatePct": 82, "volumeXrp": 15980 },
+    { "address": "r48C8crehi4u3MhSApsvx5R7v62TtV47MG", "winRatePct": 77, "volumeXrp": 14190 },
+    { "address": "rLNZENxLazQujv945URYZ8qZktuhhLby2p", "winRatePct": 81, "volumeXrp": 5890 },
+    { "address": "r4ppN97P132Fn9w3TYax8ZLgJgS8ygt3xx", "winRatePct": 79, "volumeXrp": 12160 },
+    { "address": "raDgmh4WP7awkYsbAE1SPDegcf4KV8K3uw", "winRatePct": 86, "volumeXrp": 4920 },
+    { "address": "rs7WJf8TsB7WnNiohdhEZQN7UFMhPWiCRa", "winRatePct": 76, "volumeXrp": 394840 },
+    { "address": "rneai5fm3PWwAcGHXDdyvP8YHDxgkQPihd", "winRatePct": 71, "volumeXrp": 245630 },
+    { "address": "rHdPXRw1mHgQT631qcoV7JPzmbG1WHCP9b", "winRatePct": 73, "volumeXrp": 120180 },
+    { "address": "rHphua6M9XNRsXfvthE6VeDpQwst1StKMV", "winRatePct": 71, "volumeXrp": 121980 },
+    { "address": "rKfcfA5bLsELJfbkjKRqc5kAzrd22esfy", "winRatePct": 71, "volumeXrp": 116580 },
+    { "address": "rLC3Kt1JYS5PBgMEu4Rcs7RxcDWzjTmoA2", "winRatePct": 71, "volumeXrp": 46260 },
+    { "address": "rBvroubySF995SrhNyG6vfdT7mtvPFM5PG", "winRatePct": 70, "volumeXrp": 37050 },
+    { "address": "rf8QY4cg1C2uUJjL8oxQ5i24y6qa4BHbHU", "winRatePct": 73, "volumeXrp": 23200 },
+    { "address": "rnDfE8Hd1iWyxqsJN3ChybTAYSEA4cnkeK", "winRatePct": 75, "volumeXrp": 23150 }
+  ]
+}

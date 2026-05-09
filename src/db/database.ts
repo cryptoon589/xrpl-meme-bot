@@ -113,6 +113,8 @@ export class Database {
       `ALTER TABLE paper_trades ADD COLUMN xrp_returned REAL DEFAULT 0`,
       `ALTER TABLE paper_trades ADD COLUMN trade_profile TEXT`,
       `ALTER TABLE paper_trades ADD COLUMN trade_source TEXT`,
+      `ALTER TABLE whale_wallets ADD COLUMN win_rate_pct REAL DEFAULT 0`,
+      `ALTER TABLE whale_wallets ADD COLUMN volume_xrp REAL DEFAULT 0`,
       // whale_wallets and execution_validation are created via SCHEMA (CREATE TABLE IF NOT EXISTS)
       // so no ALTER TABLE needed; these are no-op guards for idempotency
     ];
@@ -731,24 +733,28 @@ export class Database {
     wins: number,
     totalXrpProfit: number,
     firstSeen: number,
-    lastSeen: number
+    lastSeen: number,
+    winRatePct = 0,
+    volumeXrp = 0
   ): void {
     try {
       const stmt = this.db.prepare(`
-        INSERT INTO whale_wallets (address, wins, total_xrp_profit, first_seen, last_seen)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO whale_wallets (address, wins, total_xrp_profit, first_seen, last_seen, win_rate_pct, volume_xrp)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(address) DO UPDATE SET
-          wins = wins + excluded.wins,
-          total_xrp_profit = total_xrp_profit + excluded.total_xrp_profit,
-          last_seen = excluded.last_seen
+          wins = excluded.wins,
+          total_xrp_profit = excluded.total_xrp_profit,
+          last_seen = excluded.last_seen,
+          win_rate_pct = excluded.win_rate_pct,
+          volume_xrp = excluded.volume_xrp
       `);
-      this.runWithRetry(stmt, [address, wins, totalXrpProfit, firstSeen, lastSeen]);
+      this.runWithRetry(stmt, [address, wins, totalXrpProfit, firstSeen, lastSeen, winRatePct, volumeXrp]);
     } catch (err) {
       warn(`Error upserting whale wallet: ${err}`);
     }
   }
 
-  getWhaleWallets(): { address: string; wins: number; totalXrpProfit: number; firstSeen: number; lastSeen: number }[] {
+  getWhaleWallets(): { address: string; wins: number; totalXrpProfit: number; firstSeen: number; lastSeen: number; winRatePct: number; volumeXrp: number }[] {
     try {
       const rows = this.db.prepare('SELECT * FROM whale_wallets').all() as any[];
       return rows.map(row => ({
@@ -757,6 +763,8 @@ export class Database {
         totalXrpProfit: row.total_xrp_profit,
         firstSeen: row.first_seen,
         lastSeen: row.last_seen,
+        winRatePct: row.win_rate_pct ?? 0,
+        volumeXrp: row.volume_xrp ?? 0,
       }));
     } catch (err) {
       warn(`Error getting whale wallets: ${err}`);

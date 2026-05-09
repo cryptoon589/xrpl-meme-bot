@@ -129,6 +129,7 @@ async function main() {
 
   // Load whale data from DB and wire into scorer
   whaleTracker.load(db);
+  whaleTracker.loadTopTradersFromFile();
   tokenScorer.setWhaleTracker(whaleTracker);
   tokenScorer.setSocialDetector(socialDetector);
 
