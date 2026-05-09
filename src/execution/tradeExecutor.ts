@@ -475,6 +475,7 @@ export class TradeExecutor {
     this.positions.set(`${currency}:${issuer}`, position);
     this.totalTradesOpened++;
     info(`[DRY-RUN] Simulated buy: ${tokens.toFixed(4)} ${currency} @ ${price.toFixed(8)}`);
+    this.sendEntryAlert(position, 0, 0).catch(() => {});
     return { success: true, txHash: fakeTxHash, actualPrice: price, actualTokens: tokens, actualXRP: xrpAmount, slippage: 0 };
   }
 
