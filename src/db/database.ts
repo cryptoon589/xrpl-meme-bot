@@ -129,11 +129,16 @@ export class Database {
 
   saveToken(token: TrackedToken): void {
     try {
-      const stmt = this.db.prepare(`
-        INSERT OR REPLACE INTO tokens (currency, issuer, first_seen, last_updated)
-        VALUES (?, ?, ?, ?)
-      `);
-      this.runWithRetry(stmt, [token.currency, token.issuer, token.firstSeen, token.lastUpdated]);
+      const now = Date.now();
+      // Always touch last_updated so tokens don't starve due to stale timestamps.
+      // INSERT OR REPLACE deletes and re-inserts, which would lose the original first_seen;
+      // use UPDATE then INSERT only if the token is genuinely new.
+      const updateStmt = this.db.prepare(`UPDATE tokens SET last_updated = ? WHERE currency = ? AND issuer = ?`);
+      const updateResult = this.runWithRetry(updateStmt, [now, token.currency, token.issuer]);
+      if (updateResult.changes === 0) {
+        const insertStmt = this.db.prepare(`INSERT INTO tokens (currency, issuer, first_seen, last_updated) VALUES (?, ?, ?, ?)`);
+        this.runWithRetry(insertStmt, [token.currency, token.issuer, token.firstSeen, now]);
+      }
     } catch (err) {
       warn(`Error saving token: ${err}`);
     }
