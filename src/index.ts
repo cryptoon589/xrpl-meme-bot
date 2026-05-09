@@ -190,6 +190,8 @@ async function main() {
       const burstKey = `${currency}:${issuer}`;
       if (tradeLocks.has(burstKey)) { debug(`Burst skipped — lock held: ${burstKey}`); return; }
       if (paperTrader.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — open position: ${burstKey}`); return; }
+      // Belt-and-suspenders: also check tradeExecutor positions (real trades) to prevent cross-path duplicates
+      if (tradeExecutor && tradeExecutor.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — real position open: ${burstKey}`); return; }
       tradeLocks.add(burstKey);
 
       const snapshot: any = {
@@ -215,29 +217,37 @@ async function main() {
           return;
         }
         const burstTp = runtimeLearning.getTpTargets('burst');
-        const trade = paperTrader.tryOpenBurstTrade(
-          token, snapshot,
-          `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${decision.profile.name}`,
-          burstTp
-        );
-        tradeLocks.delete(burstKey);
-        if (trade) {
-          trade.tradeProfile = decision.profile.name;
-          trade.tradeSource  = 'burst';
-          db.updatePaperTrade(trade);
-          setTimeout(() => sendAlert(telegramAlerter, db, {
-            type: 'paper_trade_opened',
-            tokenCurrency: currency, tokenIssuer: issuer,
-            paperTrade: trade,
-            tradeProfileName: decision.profile.name,
-            tradeSource: 'burst',
-            poolXrpReserve: poolXrpReserve,
-            slippage: decision.slippage,
-            decisionSizeXRP: decision.sizeXRP,
-            message: `Burst entry: ${currency}`,
-          }, config), 0);
-        }
-      }).catch(err => { warn(`[TDE] Burst decision error: ${err}`); tradeLocks.delete(burstKey); });
+        // Validate entry price against a live AMM fetch — protects against stale/corrupted snapshot price
+        ammPriceFetcher.getPrice(currency, issuer).then(ammPrice => {
+          const livePrice = ammPrice?.priceXRP ?? priceXRP;
+          if (livePrice > 0 && (priceXRP <= 0 || Math.abs(priceXRP - livePrice) / livePrice > 0.1)) {
+            debug(`Burst price corrected: snapshot=${priceXRP} → AMM=${livePrice}`);
+          }
+          const validatedSnapshot = { ...snapshot, priceXRP: livePrice };
+          const trade = paperTrader.tryOpenBurstTrade(
+            token, validatedSnapshot,
+            `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${decision.profile.name}`,
+            burstTp
+          );
+          tradeLocks.delete(burstKey);
+          if (trade) {
+            trade.tradeProfile = decision.profile.name;
+            trade.tradeSource  = 'burst';
+            db.updatePaperTrade(trade);
+            setTimeout(() => sendAlert(telegramAlerter, db, {
+              type: 'paper_trade_opened',
+              tokenCurrency: currency, tokenIssuer: issuer,
+              paperTrade: trade,
+              tradeProfileName: decision.profile.name,
+              tradeSource: 'burst',
+              poolXrpReserve: poolXrpReserve,
+              slippage: decision.slippage,
+              decisionSizeXRP: decision.sizeXRP,
+              message: `Burst entry: ${currency}`,
+            }, config), 0);
+          }
+        }).catch(err => { warn(`[TDE] Burst AMM price error: ${err}`); tradeLocks.delete(burstKey); });
+      });
     };
   }
 
@@ -249,6 +259,8 @@ async function main() {
       const momentumKey = `${currency}:${issuer}`;
       if (isBlocklistedToken(currency)) return;
       if (paperTrader!.hasOpenPosition(currency, issuer)) return;
+      // Belt-and-suspenders: also check tradeExecutor positions (real trades) to prevent cross-path duplicates
+      if (tradeExecutor && tradeExecutor.hasOpenPosition(currency, issuer)) return;
       if (tradeLocks.has(momentumKey)) return;
       tradeLocks.add(momentumKey);
 

@@ -128,6 +128,14 @@ export class TradeExecutor {
   }
 
   /**
+   * Check if a position is already open for this currency/issuer.
+   * Used to prevent duplicate entries across burst and momentum paths.
+   */
+  hasOpenPosition(currency: string, issuer: string): boolean {
+    return this.positions.has(`${currency}:${issuer}`);
+  }
+
+  /**
    * Open a new trade — buy tokens via AMM swap.
    *
    * Uses AMMSwap (OfferCreate with tfImmediateOrCancel) to buy
