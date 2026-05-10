@@ -120,12 +120,29 @@ export class TelegramAlerter {
     if (!html) return; // suppressed type
 
     // Cooldown guard
-    const cdKey = this.cooldownKey(payload.type, payload.tokenCurrency);
-    const cdMs  = payload.type === 'bot_log'
-      ? this.BOT_LOG_COOLDOWN_MS
-      : payload.type === 'open_positions_update'
-        ? this.SUMMARY_COOLDOWN_MS
-        : this.TRADE_COOLDOWN_MS;
+    // Trade close/partial alerts use entry timestamp in the key so TP1 + final close
+    // on the same token within 10s don't suppress each other.
+    let cdKey: string;
+    let cdMs: number;
+    if (payload.type === 'bot_log') {
+      cdKey = this.cooldownKey(payload.type);
+      cdMs  = this.BOT_LOG_COOLDOWN_MS;
+    } else if (payload.type === 'open_positions_update') {
+      cdKey = this.cooldownKey(payload.type);
+      cdMs  = this.SUMMARY_COOLDOWN_MS;
+    } else if (
+      payload.type === 'paper_trade_closed' ||
+      payload.type === 'paper_trade_partial_close'
+    ) {
+      // Include entry timestamp so TP1 partial + later full close are never
+      // treated as the same event even if they fire within 10s on the same token.
+      const ts = payload.paperTrade?.entryTimestamp ?? Date.now();
+      cdKey = `${payload.type}:${payload.tokenCurrency ?? 'global'}:${ts}`;
+      cdMs  = this.TRADE_COOLDOWN_MS;
+    } else {
+      cdKey = this.cooldownKey(payload.type, payload.tokenCurrency);
+      cdMs  = this.TRADE_COOLDOWN_MS;
+    }
 
     if (this.isOnCooldown(cdKey, cdMs)) {
       debug(`Alert cooldown: ${cdKey}`);
@@ -268,7 +285,7 @@ export class TelegramAlerter {
     return lines.join('\n');
   }
 
-  // ── Partial close (TP1) ───────────────────────────────────────────────────
+  // ── Partial close (TP1 / TP2) ──────────────────────────────────────────────
 
   private fmtTradePartial(payload: AlertPayload): string {
     const t = payload.paperTrade;
@@ -279,14 +296,27 @@ export class TelegramAlerter {
     const xrpSold  = (soldPct / 100) * t.entryAmountXRP;
     const pnl      = t.pnlXRP ?? null;
 
+    // Label partial close correctly — TP1 vs TP2 vs kill-switch partial
+    const PARTIAL_REASONS: Record<string, string> = {
+      take_profit_1:      '🎯 TP1 HIT',
+      take_profit_2:      '🎯 TP2 HIT',
+      kill_no_followthrough: '⚡ Kill: no follow-through',
+      kill_sell_flood:    '⚡ Kill: sell flood',
+      kill_liq_drop:      '⚡ Kill: liquidity dropped',
+    };
+    const exitReason = t.exitReason ?? '';
+    const reasonLabel = PARTIAL_REASONS[exitReason]
+      ?? (exitReason ? exitReason.replace(/_/g, ' ') : 'Partial close');
+
     return [
-      `🎯 <b>TP1 HIT — PARTIAL CLOSE</b>`,
+      `🔶 <b>PARTIAL CLOSE — ${reasonLabel}</b>`,
       ``,
       `<b>Token:</b>      <code>${ticker}</code>`,
       `<b>Sold:</b>       ${soldPct.toFixed(0)}% (~${fmtXRP(xrpSold)})`,
       `<b>Remaining:</b>  ${(t.remainingPosition ?? 0).toFixed(0)}% still open`,
       `<b>Exit price:</b> ${fmtPrice(t.exitPriceXRP)}`,
-      `${pnlEmoji(pnl)} <b>Partial PnL:</b> ${fmtXRP(pnl)} (${fmtPct(t.pnlPercent)})`,
+      `${pnlEmoji(pnl)} <b>P&L so far:</b> ${fmtXRP(pnl)} (${fmtPct(t.pnlPercent)})`,
+      `<b>TP1:</b> ${t.tp1Hit ? '✅ hit' : '⬜ pending'}  <b>TP2:</b> ${t.tp2Hit ? '✅ hit' : '⬜ pending'}`,
     ].join('\n');
   }
 
@@ -311,19 +341,25 @@ export class TelegramAlerter {
 
     // Human-readable exit reason
     const EXIT_REASONS: Record<string, string> = {
-      take_profit_1:        '🎯 Take Profit 1',
-      take_profit_2:        '🎯 Take Profit 2',
-      stop_loss:            '🛑 Stop loss',
-      trailing_stop:        '🔒 Trailing stop (locked gains)',
-      trailing_stop_profit: '🔒 Trailing stop (locked gains)',
-      trailing_stop_loss:   '🛑 Trailing stop (cut loss)',
-      sell_pressure_exit:   '📉 Sell pressure exit',
-      time_stop_profit:     '⏱️ Time stop (profit)',
-      time_stop_loss:       '⏱️ Time stop (loss)',
-      'burst_tp1_+15pct':   '🎯 Burst TP1',
-      burst_tp2:            '🎯 Burst TP2',
-      force_close_no_price: '☸️ Voided (no price data)',
-      duplicate_removed:    '🗑 Duplicate removed',
+      take_profit_1:           '🎯 Take Profit 1',
+      take_profit_2:           '🎯 Take Profit 2',
+      stop_loss:               '🛑 Stop loss',
+      trailing_stop:           '🔒 Trailing stop',
+      trailing_stop_profit:    '🔒 Trailing stop (profit locked)',
+      trailing_stop_loss:      '🛑 Trailing stop (loss cut)',
+      sell_pressure_exit:      '📉 Sell pressure exit',
+      dead_volume_exit:        '💀 Dead volume (no activity)',
+      time_stop_profit:        '⏱️ Time stop (profit)',
+      time_stop_loss:          '⏱️ Time stop (loss)',
+      kill_no_followthrough:   '⚡ Kill: no follow-through',
+      kill_sell_flood:         '⚡ Kill: sell flood',
+      kill_liq_drop:           '⚡ Kill: liquidity dropped',
+      'burst_tp1_+15pct':      '🎯 Burst TP1',
+      burst_tp2:               '🎯 Burst TP2',
+      force_close_no_price:    '☁️ Voided (no price data)',
+      duplicate_removed:       '🗑 Duplicate removed',
+      stale_position_cleanup:  '🧹 Stale position cleanup',
+      blocklisted_token_cleanup: '🚫 Blocklisted token',
     };
     const reason = t.exitReason
       ? (EXIT_REASONS[t.exitReason] || t.exitReason.replace(/_/g, ' '))
@@ -331,18 +367,34 @@ export class TelegramAlerter {
 
     const win = (pnlXRP ?? 0) >= 0;
 
+    // Was this a partial-then-full close? Show TP legs hit.
+    const hadPartials = t.tp1Hit || t.tp2Hit;
+    const legsLine = hadPartials
+      ? `TP1: ${t.tp1Hit ? '✅' : '⬜'}  TP2: ${t.tp2Hit ? '✅' : '⬜'}`
+      : null;
+
+    // Hold time
+    const holdMs  = t.exitTimestamp && t.entryTimestamp ? t.exitTimestamp - t.entryTimestamp : null;
+    const holdMin = holdMs != null ? Math.round(holdMs / 60000) : null;
+    const holdStr = holdMin != null
+      ? holdMin >= 60 ? `${Math.floor(holdMin / 60)}h ${holdMin % 60}m` : `${holdMin}m`
+      : null;
+
     return [
       `${win ? '✅' : '❌'} <b>TRADE CLOSED — ${win ? 'WIN' : 'LOSS'}</b>`,
       ``,
       `<b>Token:</b>      <code>${ticker}</code>`,
+      `<b>Reason:</b>     ${reason}`,
+      legsLine ? `<b>Legs:</b>       ${legsLine}` : null,
+      ``,
       `<b>Entry:</b>      ${fmtPrice(t.entryPriceXRP)}`,
       `<b>Exit:</b>       ${fmtPrice(t.exitPriceXRP)}`,
+      holdStr ? `<b>Held:</b>       ${holdStr}` : null,
       `<b>In:</b>         ${fmtXRP(t.entryAmountXRP)}`,
       `<b>Out:</b>        ${fmtXRP(valueOut)}`,
       `${win ? '✅' : '❌'} <b>P&L:</b>        ${fmtXRP(pnlXRP)} (${fmtPct(pnlPct)})`,
-      `<b>Reason:</b>     ${reason}`,
       `<b>Fees:</b>       ${fmtXRP(t.feesPaid)}`,
-    ].join('\n');
+    ].filter(Boolean).join('\n');
   }
 
   // ── Test message ──────────────────────────────────────────────────────────

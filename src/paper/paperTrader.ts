@@ -659,9 +659,14 @@ export class PaperTrader {
       }
 
       // Dead volume exit: flat price + zero activity for 10+ min = cut dead weight
+      // Guard: skip this check when called from checkAllOpenExits (orphan checker) which
+      // passes a fake snapshot with null liquidityXRP and 0 buys/sells — would fire falsely
+      // on every active position the first time an orphan check runs.
       const snapshotBuys = liveScore ? liveScore.buyCount : (snapshot.buyCount5m ?? 0);
       const snapshotSells = liveScore ? liveScore.sellCount : (snapshot.sellCount5m ?? 0);
+      const isOrphanSnapshot = snapshot.liquidityXRP === null || snapshot.liquidityXRP === undefined;
       const deadVolume = (
+        !isOrphanSnapshot &&
         ageMs > 10 * 60 * 1000 &&
         !trade.tp1Hit &&
         pnlPercent > -3 && pnlPercent < 3 &&
