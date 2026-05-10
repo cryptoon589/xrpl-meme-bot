@@ -217,13 +217,12 @@ async function main() {
           return;
         }
         const burstTp = runtimeLearning.getTpTargets('burst');
-        // Validate entry price against a live AMM fetch — protects against stale/corrupted snapshot price
-        ammPriceFetcher.getPrice(currency, issuer).then(ammPrice => {
-          const livePrice = ammPrice?.priceXRP ?? priceXRP;
-          if (livePrice > 0 && (priceXRP <= 0 || Math.abs(priceXRP - livePrice) / livePrice > 0.1)) {
-            debug(`Burst price corrected: snapshot=${priceXRP} → AMM=${livePrice}`);
-          }
-          const validatedSnapshot = { ...snapshot, priceXRP: livePrice };
+        // Use the price burstDetector already fetched — it's fresh from the ledger.
+        // The previous second ammPriceFetcher.getPrice() call here added 100-300ms
+        // of latency at the worst moment (entry), by which point the price had moved
+        // further against us. Trust the detector's price; it just came off the AMM.
+        (() => {
+          const validatedSnapshot = { ...snapshot, priceXRP: priceXRP };
           const trade = paperTrader.tryOpenBurstTrade(
             token, validatedSnapshot,
             `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${decision.profile.name}`,
@@ -246,7 +245,7 @@ async function main() {
               message: `Burst entry: ${currency}`,
             }, config), 0);
           }
-        }).catch(err => { warn(`[TDE] Burst AMM price error: ${err}`); tradeLocks.delete(burstKey); });
+        })();
       });
     };
   }

@@ -34,7 +34,7 @@ import { info, warn, debug } from '../utils/logger';
 // ─────────────────────────────────────────────
 // Tuning knobs — adjust via env or constructor
 // ─────────────────────────────────────────────
-const BURST_WINDOW_MS      = 90_000;     // rolling window to cluster buys
+const BURST_WINDOW_MS      = 60_000;     // rolling window to cluster buys (was 90s — fires earlier in the move)
 const MIN_UNIQUE_WALLETS   = 2;          // distinct buyers needed to fire (whale + 1 = valid signal)
 const MIN_BUY_VOLUME_XRP   = 30;         // lowered: catch smaller early bursts (was 50)
 const ALERT_COOLDOWN_MS    = 20 * 60_000; // 20 min per token
