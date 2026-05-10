@@ -231,12 +231,11 @@ export class WhaleTracker {
           positionsOpen?: number;
         }>;
       };
+      // Always import top traders from the operator-managed file — no staleness gate.
+      // The operator maintains this externally; missing/wrong data is their concern,
+      // not the bot’s. Removing the 24h check ensures whale data survives restarts
+      // even if the file was imported at the end of a 24h window.
       if (!data.traders?.length) return 0;
-      // Only import if file is fresh (within last 24h)
-      if (Date.now() - data.importedAt > 24 * 3600 * 1000) {
-        debug('[WhaleTracker] Stale top_traders_import.json, skipping');
-        return 0;
-      }
       let imported = 0;
       for (const t of data.traders) {
         if (t.winRatePct >= 60 && t.volumeXrp >= 1000) {
