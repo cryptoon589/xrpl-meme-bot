@@ -20,7 +20,7 @@
  * Thresholds (tuned conservatively to avoid spam):
  *   - BURST_WINDOW_MS: 90 seconds (rolling window for buy clustering)
  *   - MIN_UNIQUE_WALLETS: 3 distinct buyers in window
- *   - MIN_BUY_VOLUME_XRP: 50 XRP total in window (filters micro-dust)
+ *   - MIN_BUY_VOLUME_XRP: 25 XRP total in window (filters micro-dust)
  *   - ALERT_COOLDOWN_MS: 20 minutes per token
  *   - MIN_POOL_XRP: 500 XRP (ignore illiquid tokens)
  *   - MAX_TRACKED_TOKENS: 1000 (memory bound)

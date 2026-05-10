@@ -132,7 +132,7 @@ export class TokenScorer {
     // whaleScore 0-30 from WhaleTracker. Boost is now proportional to win-rate quality:
     // A 95% WR whale adds ~20pts; a 60% WR whale adds ~5pts. Was capped at 8 flat.
     // This makes whale co-buying a meaningful entry signal, not a minor nudge.
-    const whaleBoost = Math.min(25, Math.max(0, whaleScore) * 0.85);
+    const whaleBoost = Math.min(35, Math.max(0, whaleScore) * 1.2);
 
     // Liquidity exit safety: penalise if pool is too shallow to exit cleanly
     // NOT a reward for big pools — just a penalty for tiny ones
