@@ -147,7 +147,7 @@ export class BurstDetector {
   processTransaction(tx: any): void {
     const t    = tx.tx_json || tx.tx || tx.transaction;
     const meta = tx.meta;
-    if (!t || !meta || (tx.engine_result ?? meta.TransactionResult) !== 'tesSUCCESS') return;
+    console.log("processTransaction:", t.TransactionType, "| engine_result:", tx.engine_result); if (!t || !meta || (tx.engine_result ?? meta.TransactionResult) !== 'tesSUCCESS') return;
 
     // PRIMARY: scan metadata for XRP flowing INTO any known AMM pool account.
     // This catches OfferCreate, Payment, AMMDeposit, and any future tx types.
