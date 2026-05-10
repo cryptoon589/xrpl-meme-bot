@@ -511,31 +511,35 @@ export class PaperTrader {
           continue;
         }
 
-        // TP1/TP2: use learned targets if available, else hardcoded defaults
-        const burstTp1 = position.tp1Pct ?? 15;
-        const burstTp2 = position.tp2Pct ?? 30;
-        const trailActivation = Math.round(burstTp1 * 0.67); // trail at ~2/3 of TP1
+        // TP1/TP2: use profile-driven sell percentages, learned price targets override defaults
+        const burstProf = PROFILES[position.profileName] ?? PROFILES.BURST_SCALP;
+        const burstTp1     = position.tp1Pct ?? burstProf.tp1Pct;
+        const burstTp2     = position.tp2Pct ?? burstProf.tp2Pct;
+        const burstTp1Sell = burstProf.tp1SellPct;  // % of original to sell at TP1
+        const burstTp2Sell = burstProf.tp2SellPct;  // % of original to sell at TP2
+        const burstRunner  = burstProf.runnerPct;    // % held for trailing stop only
+        const trailActivation = burstProf.trailActivationPct;
 
-        // TP1 — sell 60% of position (bank the pump gains)
+        // TP1 — partial exit per profile
         if (!trade.tp1Hit && pnlPercent >= burstTp1 && trade.remainingPosition > 0) {
-          this.partialClose(key, currentPrice, 60, `burst_tp1_+${burstTp1}pct`, snapshot);
+          this.partialClose(key, currentPrice, burstTp1Sell, `tp1_+${burstTp1}pct`, snapshot);
           trade.tp1Hit = true;
           this.db.updatePaperTrade(trade);
         }
 
-        // TP2 — sell remaining
+        // TP2 — partial exit per profile, leaves runner (if any)
         if (!trade.tp2Hit && pnlPercent >= burstTp2 && trade.remainingPosition > 0) {
-          keysToClose.push({ key, reason: 'take_profit_2' });
-          closedTrades.push(trade);
-          continue;
-        }
-
-        // Trending hard for burst: up 50%+ in first 10 min — ride to 100%
-        const burstTrendingHard = pnlPercent >= 50 && ageMs < 10 * 60 * 1000;
-        if (trade.tp2Hit && burstTrendingHard && trade.remainingPosition > 0) {
-          keysToClose.push({ key, reason: 'take_profit_3_trending' });
-          closedTrades.push(trade);
-          continue;
+          if (burstRunner > 0) {
+            // Sell TP2 chunk, leave runner for trailing stop
+            this.partialClose(key, currentPrice, burstTp2Sell, `tp2_+${burstTp2}pct`, snapshot);
+            trade.tp2Hit = true;
+            this.db.updatePaperTrade(trade);
+          } else {
+            // No runner — close all remaining
+            keysToClose.push({ key, reason: 'take_profit_2' });
+            closedTrades.push(trade);
+            continue;
+          }
         }
 
         // Sell pressure exit for burst: demand collapsed before TP1, cut loss early
@@ -549,21 +553,22 @@ export class PaperTrader {
           pnlPercent < 0
         );
         if (burstDemandCollapsed) {
-          info(`\uD83D\uDEA8 Burst demand collapse exit for ${key}: ${burstBuys} buys / ${burstSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
+          info(`🚨 Burst demand collapse exit for ${key}: ${burstBuys} buys / ${burstSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'sell_pressure_exit' });
           closedTrades.push(trade);
           continue;
         }
 
-        // Trailing stop activates at ~2/3 of TP1, distance 5%
+        // Runner: trailing stop only (no TP3 trigger unless emergency)
         if (!trade.trailingStopActive && pnlPercent >= trailActivation) {
           trade.trailingStopActive = true;
           this.db.updatePaperTrade(trade);
         }
         if (trade.trailingStopActive && trade.remainingPosition > 0) {
-          const trailThreshold = position.highestPriceSinceEntry * 0.95;
+          const trailDist = burstProf.trailDistancePct / 100;
+          const trailThreshold = position.highestPriceSinceEntry * (1 - trailDist);
           if (currentPrice <= trailThreshold) {
-            info(`🚨 Burst trailing stop hit for ${key}`);
+            info(`🚨 Burst trailing stop hit for ${key} | remaining: ${trade.remainingPosition.toFixed(0)}%`);
             keysToClose.push({ key, reason: pnlPercent >= 0 ? 'trailing_stop_profit' : 'trailing_stop_loss' });
             closedTrades.push(trade);
           }
@@ -601,31 +606,34 @@ export class PaperTrader {
         continue;
       }
 
-      // Check Take Profit 1 — use learned target if available, else +10%
-      const scoredTp1 = position.tp1Pct ?? 10;
-      const scoredTp2 = position.tp2Pct ?? 20;
+      // Check Take Profit 1/2 — use profile-driven sell percentages, learned price targets override
+      const scoredProf   = PROFILES[position.profileName] ?? PROFILES.MOMENTUM_RUNNER;
+      const scoredTp1     = position.tp1Pct ?? scoredProf.tp1Pct;
+      const scoredTp2     = position.tp2Pct ?? scoredProf.tp2Pct;
+      const scoredTp1Sell = scoredProf.tp1SellPct;
+      const scoredTp2Sell = scoredProf.tp2SellPct;
+      const scoredRunner  = scoredProf.runnerPct;
 
+      // TP1: profile-driven partial exit
       if (!trade.tp1Hit && pnlPercent >= scoredTp1 && trade.remainingPosition > 0) {
-        this.partialClose(key, currentPrice, 40, 'take_profit_1', snapshot);
+        this.partialClose(key, currentPrice, scoredTp1Sell, 'take_profit_1', snapshot);
         trade.tp1Hit = true;
         this.db.updatePaperTrade(trade);
       }
 
-      // TP2: sell exactly 30% of ORIGINAL position — leaves 30% runner (100 - 40 - 30).
-      // partialClose now takes % of original, not % of remaining, so this is exact.
+      // TP2: profile-driven partial exit, leave runner for trailing stop
       if (!trade.tp2Hit && pnlPercent >= scoredTp2 && trade.remainingPosition > 0) {
-        this.partialClose(key, currentPrice, 30, 'take_profit_2', snapshot);
-        trade.tp2Hit = true;
-        this.db.updatePaperTrade(trade);
-      }
-
-      // Trending hard: if up 30%+ within 15 min, raise ceiling to 60% and hold remaining
-      const trendingHard = pnlPercent >= 30 && ageMs < 15 * 60 * 1000;
-      const scoredTp3 = trendingHard ? 60 : (scoredTp2 + 20);
-      if (trade.tp2Hit && pnlPercent >= scoredTp3 && trade.remainingPosition > 0) {
-        keysToClose.push({ key, reason: 'take_profit_3_trending' });
-        closedTrades.push(trade);
-        continue;
+        if (scoredRunner > 0) {
+          // Sell TP2 chunk, leave runner for trailing stop
+          this.partialClose(key, currentPrice, scoredTp2Sell, 'take_profit_2', snapshot);
+          trade.tp2Hit = true;
+          this.db.updatePaperTrade(trade);
+        } else {
+          // No runner — close all remaining
+          keysToClose.push({ key, reason: 'take_profit_2' });
+          closedTrades.push(trade);
+          continue;
+        }
       }
 
       // Momentum reversal for scored trades:

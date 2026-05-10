@@ -66,9 +66,10 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     maxSizeXRP: 5,
     scalePoolXRP: 500,
     stopLossPct: 10,
-    tp1Pct: 25,  tp1SellPct: 60,
-    tp2Pct: 50,  tp2SellPct: 30,
-    runnerPct: 10,
+    // TP1=80% of position, TP2=20% remaining, no runner — thin pools, don't hold
+    tp1Pct: 25,  tp1SellPct: 80,
+    tp2Pct: 50,  tp2SellPct: 20,
+    runnerPct: 0,
     trailActivationPct: 18,
     trailDistancePct: 8,
     timeStopMs: 30 * 60 * 1000,  // 30 min
@@ -84,8 +85,9 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     maxSizeXRP: 25,
     scalePoolXRP: 5000,
     stopLossPct: 8,
-    tp1Pct: 15,  tp1SellPct: 60,
-    tp2Pct: 30,  tp2SellPct: 30,
+    // TP1=70%, TP2=20%, 10% runner exits via trailing stop only
+    tp1Pct: 15,  tp1SellPct: 70,
+    tp2Pct: 30,  tp2SellPct: 20,
     runnerPct: 10,
     trailActivationPct: 10,
     trailDistancePct: 5,
@@ -102,9 +104,10 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     maxSizeXRP: 20,
     scalePoolXRP: 10000,
     stopLossPct: 10,
-    tp1Pct: 10,  tp1SellPct: 40,
+    // TP1=50%, TP2=30%, 20% runner exits via trailing stop only
+    tp1Pct: 10,  tp1SellPct: 50,
     tp2Pct: 20,  tp2SellPct: 30,
-    runnerPct: 30,
+    runnerPct: 20,
     trailActivationPct: 12,
     trailDistancePct: 12,
     timeStopMs: 90 * 60 * 1000,  // 90 min
@@ -120,8 +123,9 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     maxSizeXRP: 10,
     scalePoolXRP: 2000,
     stopLossPct: 8,
-    tp1Pct: 20,  tp1SellPct: 50,
-    tp2Pct: 40,  tp2SellPct: 30,
+    // TP1=40%, TP2=40%, 20% runner exits via trailing stop only
+    tp1Pct: 20,  tp1SellPct: 40,
+    tp2Pct: 40,  tp2SellPct: 40,
     runnerPct: 20,
     trailActivationPct: 15,
     trailDistancePct: 7,
