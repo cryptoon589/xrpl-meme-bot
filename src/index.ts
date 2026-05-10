@@ -339,14 +339,15 @@ async function main() {
         warn(`Startup cleanup: force-closed blocklisted position ${token}`);
       }
     }
-    // Also force-close any position open for more than 2 hours with no recent
-    // scan activity (catches tokens pruned before orphan checker was added)
-    const openPositions = paperTrader.getOpenPositionsSummary();
-    for (const pos of openPositions) {
-      const ageMs = Date.now() - (pos.entryTimestamp || 0);
-      if (ageMs > 2 * 60 * 60 * 1000) {
-        warn(`Startup cleanup: force-closing stale position ${pos.tokenCurrency} (age: ${(ageMs/3600000).toFixed(1)}h)`);
-        paperTrader.forceCloseByToken(pos.tokenCurrency, 'stale_position_cleanup');
+    // Log open positions restored from DB — do NOT force-close them.
+    // The 2h force-close here was silently wiping active positions on every restart.
+    // The orphan checker (checkAllOpenExits) handles exits with live prices each scan cycle.
+    const startupOpenPositions = paperTrader.getOpenPositionsSummary();
+    if (startupOpenPositions.length > 0) {
+      info(`Startup: ${startupOpenPositions.length} open position(s) restored from DB:`);
+      for (const pos of startupOpenPositions) {
+        const ageMs = Date.now() - (pos.entryTimestamp || 0);
+        info(`  ${pos.tokenCurrency} | age: ${(ageMs / 3600000).toFixed(1)}h | remaining: ${pos.remainingPosition}%`);
       }
     }
   }
@@ -1117,11 +1118,40 @@ function startPeriodicScan(
 
     if (!paperTrader) return;
 
-    const state         = paperTrader.getState();
-    const openPositions = paperTrader.getOpenPositionsSummary();
-    const now           = Date.now();
+    const state = paperTrader.getState();
+    const now   = Date.now();
 
-    const lines = [
+    // Cross-check in-memory vs DB — DB is the source of truth.
+    // If a position is open/partial in DB but absent from memory (e.g. after a
+    // code path mismatch), reload it so the hourly report is always accurate.
+    const dbOpenTrades = db.getOpenTrades();
+    const memPositions = paperTrader.getOpenPositionsSummary();
+    const memKeys      = new Set(memPositions.map((p: any) => `${p.tokenCurrency}:${p.tokenIssuer}`));
+    for (const t of dbOpenTrades) {
+      const k = `${t.tokenCurrency}:${t.tokenIssuer}`;
+      if (!memKeys.has(k)) {
+        warn(`Hourly: DB position ${k} missing from memory — reloading`);
+        paperTrader.hasOpenPosition(t.tokenCurrency, t.tokenIssuer); // triggers loadOpenPositionFromDB
+      }
+    }
+
+    // Re-read after potential reload
+    const openPositions = paperTrader.getOpenPositionsSummary();
+
+    // Fetch live prices for all open positions in parallel
+    const livePriceResults = await Promise.allSettled(
+      openPositions.map((pos: any) =>
+        ammPriceFetcher.getPrice(pos.tokenCurrency, pos.tokenIssuer)
+          .then((r: any) => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: r?.priceXRP ?? null }))
+          .catch(() => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: null }))
+      )
+    );
+    const priceMap = new Map<string, number | null>();
+    for (const r of livePriceResults) {
+      if (r.status === 'fulfilled') priceMap.set(r.value.key, r.value.price);
+    }
+
+    const lines: string[] = [
       `💼 <b>OPEN POSITIONS</b>`,
       `<i>${new Date().toUTCString()}</i>`,
       ``,
@@ -1135,20 +1165,33 @@ function startPeriodicScan(
     } else {
       lines.push('');
       for (const pos of openPositions) {
-        const ticker   = decodeCurrencyLocal(pos.tokenCurrency);
-        const ageMs    = now - (pos.entryTimestamp || now);
-        const ageMin   = Math.round(ageMs / 60000);
-        const livePnl  = pos.livePnlXRP;
-        const livePct  = pos.livePnlPct;
-        const pnlStr   = livePnl != null
-          ? `${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)} XRP (${livePnl >= 0 ? '+' : ''}${(livePct ?? 0).toFixed(1)}%)`
+        const ticker    = decodeCurrencyLocal(pos.tokenCurrency);
+        const ageMs     = now - (pos.entryTimestamp || now);
+        const ageStr    = ageMs >= 3600000
+          ? `${Math.floor(ageMs / 3600000)}h ${Math.round((ageMs % 3600000) / 60000)}m`
+          : `${Math.round(ageMs / 60000)}m`;
+
+        // Use fresh AMM price for P&L; fall back to in-memory best
+        const posKey    = `${pos.tokenCurrency}:${pos.tokenIssuer}`;
+        const livePrice = priceMap.get(posKey) ?? null;
+        const livePct   = livePrice != null && pos.entryPriceXRP > 0
+          ? ((livePrice - pos.entryPriceXRP) / pos.entryPriceXRP) * 100
+          : pos.livePnlPct;
+        const livePnl   = livePct != null
+          ? (livePct / 100) * pos.entryAmountXRP * ((pos.remainingPosition ?? 100) / 100)
+          : pos.livePnlXRP;
+
+        const pnlStr    = livePnl != null
+          ? `${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)} XRP (${livePct != null ? (livePct >= 0 ? '+' : '') + livePct.toFixed(1) + '%' : '?'})`
           : 'pending price';
-        const pnlIcon  = (livePnl ?? 0) >= 0 ? '🟢' : '🔴';
-        const typeIcon = pos.isBurst ? '🚀' : '📈';
+        const pnlIcon   = (livePnl ?? 0) >= 0 ? '🟢' : '🔴';
+        const typeIcon  = pos.isBurst ? '🚀' : '📈';
+        const priceTag  = livePrice != null ? ` @ ${fmtP(livePrice)}` : '';
+
         lines.push(
-          `${typeIcon} <b>${ticker}</b>`,
+          `${typeIcon} <b>${ticker}</b>${priceTag}`,
           `  Entry: ${fmtP(pos.entryPriceXRP)} | Size: ${pos.entryAmountXRP.toFixed(2)} XRP`,
-          `  Age: ${ageMin}m | ${pnlIcon} P&L: ${pnlStr}`,
+          `  Age: ${ageStr} | ${pnlIcon} P&L: ${pnlStr}`,
           `  Remaining: ${pos.remainingPosition ?? 100}% | TP1: ${pos.tp1Hit ? '✅' : '⬜'} TP2: ${pos.tp2Hit ? '✅' : '⬜'}`,
           '',
         );
