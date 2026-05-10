@@ -193,6 +193,27 @@ export class WhaleTracker {
   }
 
   /**
+   * Given a list of buyer wallet addresses, return the highest win-rate among
+   * any known whale in that list. Returns 0 if no known whales found.
+   * Used by burst/stream paths to lower entry threshold when a high-WR whale is buying.
+   */
+  getBestWhaleWinRate(buyerWallets: string[]): number {
+    let best = 0;
+    for (const addr of buyerWallets) {
+      const rec = this.registry.get(addr);
+      if (rec && (rec.winRatePct ?? 0) > best) best = rec.winRatePct ?? 0;
+    }
+    return best;
+  }
+
+  /**
+   * Returns true if any wallet in the list is a known whale with winRate >= threshold.
+   */
+  hasHighConfidenceWhale(buyerWallets: string[], minWinRate = 70): boolean {
+    return this.getBestWhaleWinRate(buyerWallets) >= minWinRate;
+  }
+
+  /**
    * Load top trader whitelist from a JSON file written by the TopTraderWebhook.
    * Safe to call repeatedly — re-imports on every bot restart and lets external
    * sources (FirstLedger) update the whale registry without a code deploy.

@@ -194,17 +194,25 @@ async function main() {
       if (tradeExecutor && tradeExecutor.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — real position open: ${burstKey}`); return; }
       tradeLocks.add(burstKey);
 
+      // Check if any known high-confidence whale is in the burst's buyer list
+      const burstBuyers = buyPressureTracker.getSnapshot(rawCurrency, issuer).buyerWallets ?? [];
+      const bestWhaleWR = whaleTracker.getBestWhaleWinRate(burstBuyers);
+      const hasWhale    = bestWhaleWR >= 70;
+      if (hasWhale) info(`[Whale] High-confidence whale in burst (WR=${bestWhaleWR}%): ${currency}`);
+
       const snapshot: any = {
         tokenCurrency: currency, tokenIssuer: issuer,
         priceXRP, liquidityXRP: poolTVL,
         poolXrpReserve,
         buyCount5m: 0, sellCount5m: 0,
+        whaleWinRate: bestWhaleWR,   // passed into TDE for threshold lowering
       };
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
 
       tradeDecisionEngine.decide({
-        currency, issuer, rawCurrency, snapshot,  // snapshot has correct poolXrpReserve
-        signalType: 'burst', signalScore: 0,
+        currency, issuer, rawCurrency, snapshot,
+        signalType: hasWhale ? 'whale_burst' : 'burst',  // whale_burst bypasses min-pool check
+        signalScore: hasWhale ? Math.round(bestWhaleWR) : 0,
         bankrollXRP: paperTrader.getState().bankrollXRP,
         openPositions: paperTrader.getOpenPositionsSummary().length,
         dailyPnL: paperTrader.getState().dailyPnL,
@@ -269,13 +277,19 @@ async function main() {
         // Decode hex currency for display — BuyPressureTracker keys use raw hex
         const displayCurrency = decodeCurrency(currency);
 
+        // Check whale presence in stream buyers
+        const streamBestWR = whaleTracker.getBestWhaleWinRate(snap.buyerWallets ?? []);
+        const streamHasWhale = streamBestWR >= 70;
+        if (streamHasWhale) info(`[Whale] High-confidence whale in stream (WR=${streamBestWR}%): ${displayCurrency}`);
+
         const streamSnapshot: any = {
           tokenCurrency: currency, tokenIssuer: issuer,
           priceXRP: ammPrice.priceXRP, liquidityXRP: ammPrice.liquidityXRP,
-          poolXrpReserve: ammPrice.poolXRP,  // XRP side of AMM only
+          poolXrpReserve: ammPrice.poolXRP,
           buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
           uniqueBuyers5m: snap.uniqueBuyers, buySellRatio: snap.buySellRatio,
           newWalletBuys: snap.newWalletBuys, buyVolumeXRP: snap.buyVolumeXRP,
+          whaleWinRate: streamBestWR,
         };
 
         // Guard: skip if price is 0 or missing
@@ -287,7 +301,8 @@ async function main() {
 
         const decision = await tradeDecisionEngine.decide({
           currency, issuer, snapshot: streamSnapshot,
-          signalType: 'stream', signalScore: 75,
+          signalType: streamHasWhale ? 'whale_stream' : 'stream',
+          signalScore: streamHasWhale ? Math.max(75, Math.round(streamBestWR)) : 75,
           bankrollXRP: paperTrader!.getState().bankrollXRP,
           openPositions: paperTrader!.getOpenPositionsSummary().length,
           dailyPnL: paperTrader!.getState().dailyPnL,

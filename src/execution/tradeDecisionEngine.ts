@@ -45,7 +45,7 @@ export interface DecisionInput {
   rawCurrency?: string;
   /** Snapshot including poolXrpReserve (XRP side of AMM, not TVL) */
   snapshot: MarketSnapshot & { poolXrpReserve?: number };
-  signalType: 'burst' | 'scored' | 'stream' | 'wakeup';
+  signalType: 'burst' | 'scored' | 'stream' | 'wakeup' | 'whale_burst' | 'whale_stream';
   signalScore: number;
   /** Current bankroll available */
   bankrollXRP: number;
@@ -105,9 +105,17 @@ export class TradeDecisionEngine {
     const poolXrpReserve = input.snapshot.poolXrpReserve
       ?? (input.snapshot.liquidityXRP ? input.snapshot.liquidityXRP / 2 : 0);
 
-    if (poolXrpReserve < profile.minPoolXrpReserve) {
+    // Whale signals get a relaxed min-pool threshold — a 90%+ WR whale buying a
+    // 300 XRP pool is more informative than a 0% WR signal on a 1000 XRP pool.
+    const isWhaleSignal = input.signalType === 'whale_burst' || input.signalType === 'whale_stream';
+    const whaleWR       = (input.snapshot as any).whaleWinRate ?? 0;
+    const effectiveMinPool = isWhaleSignal
+      ? Math.max(300, profile.minPoolXrpReserve * (whaleWR >= 85 ? 0.4 : 0.6))
+      : profile.minPoolXrpReserve;
+
+    if (poolXrpReserve < effectiveMinPool) {
       return this.reject(profile, 0, 0,
-        `Pool too shallow: ${poolXrpReserve.toFixed(0)} XRP < ${profile.minPoolXrpReserve} XRP`);
+        `Pool too shallow: ${poolXrpReserve.toFixed(0)} XRP < ${effectiveMinPool.toFixed(0)} XRP`);
     }
 
     // ── 6. Dynamic sizing ──────────────────────────────────────────────────
