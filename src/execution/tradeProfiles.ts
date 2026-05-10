@@ -59,21 +59,25 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
 
   LOW_LIQ_PROBE: {
     name: 'LOW_LIQ_PROBE',
-    minPoolXrpReserve: 100,       // as low as 100 XRP pool side
-    maxSlippage: 0.08,            // up to 8% — small size minimises impact
+    // Raised from 100 → 500 XRP — 100 XRP pools are near-certain rugs/failures.
+    // Small pools need more TP room and wider stops since they're more volatile.
+    minPoolXrpReserve: 500,
+    maxSlippage: 0.06,
     maxRoundTripLossPct: 15,
     baseSizeXRP: 2,
     maxSizeXRP: 5,
     scalePoolXRP: 500,
-    stopLossPct: 10,
-    // TP1=80% of position, TP2=20% remaining, no runner — thin pools, don't hold
+    // Widened stop: -15% (was -10%). Thin pools wick harder; tight stops get shaken out.
+    stopLossPct: 15,
+    // Kept aggressive TP1 to lock profits fast on thin pools
     tp1Pct: 25,  tp1SellPct: 80,
     tp2Pct: 50,  tp2SellPct: 20,
     runnerPct: 0,
     trailActivationPct: 18,
-    trailDistancePct: 8,
-    timeStopMs: 30 * 60 * 1000,  // 30 min
-    killSwitches: { noNewBuyMins: 8, sellVolumeMultiple: 2, liqDropPct: 25 },
+    trailDistancePct: 10,
+    timeStopMs: 45 * 60 * 1000,  // 45 min (was 30)
+    // Relaxed kill switches: thin pools have natural quiet periods
+    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 30 },
   },
 
   BURST_SCALP: {
@@ -84,15 +88,21 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     baseSizeXRP: 5,
     maxSizeXRP: 25,
     scalePoolXRP: 5000,
-    stopLossPct: 8,
-    // TP1=70%, TP2=20%, 10% runner exits via trailing stop only
-    tp1Pct: 15,  tp1SellPct: 70,
-    tp2Pct: 30,  tp2SellPct: 20,
-    runnerPct: 10,
-    trailActivationPct: 10,
-    trailDistancePct: 5,
-    timeStopMs: 45 * 60 * 1000,  // 45 min
-    killSwitches: { noNewBuyMins: 10, sellVolumeMultiple: 2, liqDropPct: 25 },
+    // Widened stop: -12% (was -8%). Meme tokens wick -10% routinely before continuing.
+    // -8% was stopping out on normal volatility, not real reversals.
+    stopLossPct: 12,
+    // TP1=60%, TP2=25%, 15% runner (was 70/20/10)
+    tp1Pct: 15,  tp1SellPct: 60,
+    tp2Pct: 30,  tp2SellPct: 25,
+    runnerPct: 15,
+    // Trail activation raised: 15% (was 10%) — avoid triggering on first retrace
+    trailActivationPct: 15,
+    trailDistancePct: 8,  // wider trail (was 5%) to survive consolidations
+    timeStopMs: 60 * 60 * 1000,  // 60 min (was 45)
+    // Kill switches relaxed:
+    // noNewBuyMins: 20 (was 10) — meme tokens go quiet 10-20min between legs
+    // sellVolumeMultiple: 4 (was 2) — AMM arb creates reflected sells; 2x fires too easily
+    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 30 },
   },
 
   MOMENTUM_RUNNER: {
@@ -103,34 +113,35 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     baseSizeXRP: 5,
     maxSizeXRP: 20,
     scalePoolXRP: 10000,
-    stopLossPct: 10,
-    // TP1=50%, TP2=30%, 20% runner exits via trailing stop only
-    tp1Pct: 10,  tp1SellPct: 50,
-    tp2Pct: 20,  tp2SellPct: 30,
-    runnerPct: 20,
-    trailActivationPct: 12,
+    // Widened stop: -12% (was -10%). Sustained movers need room to breathe.
+    stopLossPct: 12,
+    // TP1=40%, TP2=35%, 25% runner (was 50/30/20) — let winners run more
+    tp1Pct: 12,  tp1SellPct: 40,
+    tp2Pct: 25,  tp2SellPct: 35,
+    runnerPct: 25,
+    trailActivationPct: 15,
     trailDistancePct: 12,
-    timeStopMs: 90 * 60 * 1000,  // 90 min
-    killSwitches: { noNewBuyMins: 10, sellVolumeMultiple: 2, liqDropPct: 25 },
+    timeStopMs: 120 * 60 * 1000,  // 120 min (was 90) — momentum runners need time
+    killSwitches: { noNewBuyMins: 25, sellVolumeMultiple: 4, liqDropPct: 30 },
   },
 
   WAKEUP_TRADE: {
     name: 'WAKEUP_TRADE',
-    minPoolXrpReserve: 300,
+    minPoolXrpReserve: 500,  // raised from 300 — too shallow otherwise
     maxSlippage: 0.05,
     maxRoundTripLossPct: 12,
     baseSizeXRP: 3,
     maxSizeXRP: 10,
     scalePoolXRP: 2000,
-    stopLossPct: 8,
-    // TP1=40%, TP2=40%, 20% runner exits via trailing stop only
+    // Widened stop: -12% (was -8%)
+    stopLossPct: 12,
     tp1Pct: 20,  tp1SellPct: 40,
     tp2Pct: 40,  tp2SellPct: 40,
     runnerPct: 20,
-    trailActivationPct: 15,
-    trailDistancePct: 7,
-    timeStopMs: 60 * 60 * 1000,  // 60 min
-    killSwitches: { noNewBuyMins: 10, sellVolumeMultiple: 2, liqDropPct: 25 },
+    trailActivationPct: 18,
+    trailDistancePct: 10,  // wider trail (was 7%)
+    timeStopMs: 90 * 60 * 1000,  // 90 min (was 60)
+    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 30 },
   },
 };
 

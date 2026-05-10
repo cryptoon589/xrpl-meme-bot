@@ -485,8 +485,9 @@ export class PaperTrader {
           }
         }
 
-        // Stop loss: -8% (tight — pump dumps fast)
-        if (pnlPercent <= -8 && trade.remainingPosition > 0) {
+        // Stop loss: use profile stopLossPct (was hardcoded -8%, now reads from profile)
+        const burstStopPct = -(prof.stopLossPct ?? 12);
+        if (pnlPercent <= burstStopPct && trade.remainingPosition > 0) {
           keysToClose.push({ key, reason: 'stop_loss' });
           closedTrades.push(trade);
           continue;
@@ -658,23 +659,24 @@ export class PaperTrader {
         continue;
       }
 
-      // Dead volume exit: flat price + zero activity for 10+ min = cut dead weight
-      // Guard: skip this check when called from checkAllOpenExits (orphan checker) which
-      // passes a fake snapshot with null liquidityXRP and 0 buys/sells — would fire falsely
-      // on every active position the first time an orphan check runs.
+      // Dead volume exit: flat price + zero activity for 30+ min = cut dead weight
+      // Guard: skip when called from checkAllOpenExits (orphan checker) which
+      // passes a fake snapshot with null liquidityXRP and 0 buys/sells.
+      // Raised from 10 min → 30 min: XRPL meme tokens naturally go quiet for
+      // 15-25 min between legs. 10 min was closing positions in consolidation.
       const snapshotBuys = liveScore ? liveScore.buyCount : (snapshot.buyCount5m ?? 0);
       const snapshotSells = liveScore ? liveScore.sellCount : (snapshot.sellCount5m ?? 0);
       const isOrphanSnapshot = snapshot.liquidityXRP === null || snapshot.liquidityXRP === undefined;
       const deadVolume = (
         !isOrphanSnapshot &&
-        ageMs > 10 * 60 * 1000 &&
+        ageMs > 30 * 60 * 1000 &&   // 30 min (was 10 min)
         !trade.tp1Hit &&
-        pnlPercent > -3 && pnlPercent < 3 &&
+        pnlPercent > -5 && pnlPercent < 3 &&  // wider loss band: -5% (was -3%)
         snapshotBuys === 0 &&
         snapshotSells === 0
       );
       if (deadVolume) {
-        info(`💀 Dead volume exit for ${key}: flat at ${pnlPercent.toFixed(1)}% with zero activity`);
+        info(`💀 Dead volume exit for ${key}: flat at ${pnlPercent.toFixed(1)}% with zero activity for 30m`);
         keysToClose.push({ key, reason: 'dead_volume_exit' });
         closedTrades.push(trade);
         continue;
