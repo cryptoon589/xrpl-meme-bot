@@ -1266,10 +1266,14 @@ function startPeriodicScan(
       }
     } catch { /* non-critical */ }
 
-    await telegramAlerter.sendAlert({
+    const logText = logLines.join('\n');
+    info(`[BotLog] Sending bot log (${logText.length} chars, ${logLines.length} lines)`);
+    // Route through sendAlert wrapper so it's saved to DB and goes through
+    // cooldown + chunking logic (bot_log is sent as plain text, not HTML).
+    await sendAlert(telegramAlerter, db, {
       type: 'bot_log',
-      message: logLines.join('\n'),
-    });
+      message: logText,
+    }, config);
 
     // Auto-apply and hot-reload only if we have enough data
     if (recs) {
@@ -1289,8 +1293,8 @@ function startPeriodicScan(
   };
 
   setInterval(runAnalysis, 6 * 60 * 60 * 1000); // every 6 hours
-  // Also run once after 30 min (first meaningful data after startup)
-  setTimeout(runAnalysis, 30 * 60 * 1000);
+  // Also run once after 5 min (was 30 min — too long to notice if broken)
+  setTimeout(runAnalysis, 5 * 60 * 1000);
 
   // Fix 9: Reset daily P&L tracking at midnight UTC
   const scheduleMidnightReset = () => {

@@ -149,7 +149,10 @@ export class TelegramAlerter {
       return;
     }
 
-    await this.send(html);
+    // bot_log is plain text — no HTML tags, but may contain special chars that
+    // break Telegram's HTML parser (<, >, &). Send without parse_mode.
+    const isPlain = payload.type === 'bot_log';
+    await this.send(html, isPlain);
     this.markSent(cdKey);
   }
 
@@ -158,20 +161,34 @@ export class TelegramAlerter {
     await this.send(html);
   }
 
-  private async send(html: string): Promise<void> {
+  private async send(html: string, plainText = false): Promise<void> {
     if (!this.enabled || !this.bot) return;
     if (!this.isAllowed(this.chatId)) {
       warn(`Alert blocked — chatId ${this.chatId} not in whitelist`);
       return;
     }
-    try {
-      await this.bot.sendMessage(this.chatId, html, {
-        parse_mode: 'HTML',
-        disable_web_page_preview: true,
-      });
-    } catch (err: any) {
-      warn(`Telegram send failed: ${err?.message || err}`);
+    const MAX_LEN = 4000; // Telegram hard limit is 4096; keep a safe margin
+    const chunks: string[] = [];
+    let remaining = html;
+    while (remaining.length > 0) {
+      chunks.push(remaining.slice(0, MAX_LEN));
+      remaining = remaining.slice(MAX_LEN);
     }
+    for (const chunk of chunks) {
+      try {
+        await this.bot.sendMessage(this.chatId, chunk, {
+          parse_mode: plainText ? undefined : 'HTML',
+          disable_web_page_preview: true,
+        });
+      } catch (err: any) {
+        warn(`Telegram send failed: ${err?.message || err}`);
+      }
+    }
+  }
+
+  /** Send pre-formatted plain text (no HTML parsing — safe for log output). */
+  async sendPlain(text: string): Promise<void> {
+    await this.send(text, true);
   }
 
   private format(payload: AlertPayload): string | null {
