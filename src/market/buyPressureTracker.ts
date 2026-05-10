@@ -47,7 +47,7 @@ export class BuyPressureTracker {
   /** Fired when a token crosses the momentum threshold in real-time */
   public onMomentumDetected?: (currency: string, issuer: string, snapshot: BuyPressureSnapshot) => void;
 
-  private readonly WINDOW_MS = 15 * 60 * 1000; // 15-minute window — catches more activity
+  private readonly WINDOW_MS = 5 * 60 * 1000;  // 5-minute window (was 15min — too laggy for meme pumps)
   private readonly MAX_KNOWN_WALLETS = 500;      // cap per token to prevent memory leak
   private readonly MAX_TOKENS_TRACKED = 300;     // prune least-active tokens above this
 
