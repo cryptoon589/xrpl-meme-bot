@@ -63,12 +63,22 @@ export class TokenScorer {
       const raw = fs.readFileSync(RECOMMENDATIONS_PATH, 'utf8');
       const recs = JSON.parse(raw);
       if (!recs?.scoreWeights) return;
+      // Only apply learned weights if win rate is meaningful (≥30%) — below this
+      // the weights were learned from bad/noisy data and will suppress good signals.
+      const wr = recs.overallWinRate ?? 0;
+      const trades = recs.tradesAnalyzed ?? 0;
+      if (wr < 30 || trades < 30) {
+        info(`[TokenScorer] Ignoring learned weights (WR=${wr}% trades=${trades}) — below quality threshold, using defaults`);
+        this.learnedWeights = { ...DEFAULT_WEIGHTS };
+        this.weightsLoadedAt = Date.now();
+        return;
+      }
       const w: ScoreWeights = recs.scoreWeights;
       const vals = Object.values(w) as number[];
       if (vals.length < 4 || vals.some(v => typeof v !== 'number' || v < 0 || v > 100)) return;
       this.learnedWeights = w;
       this.weightsLoadedAt = Date.now();
-      info(`[TokenScorer] Learned weights loaded (${recs.tradesAnalyzed} trades, ${recs.overallWinRate}% WR)`);
+      info(`[TokenScorer] Learned weights loaded (${trades} trades, ${wr}% WR)`);
       info(`[TokenScorer] momentum=${w.volumeAccelScore} buyPressure=${w.buyPressureScore} newWallets=${w.holderGrowthScore} volSurge=${w.liquidityScore}`);
     } catch (err) {
       debug(`[TokenScorer] Could not load learned weights: ${err}`);
