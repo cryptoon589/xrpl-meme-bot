@@ -220,7 +220,7 @@ async function main() {
         blocklist: BURST_TRADE_BLOCKLIST,
       }).then(decision => {
         if (decision.outcome === 'REJECTED') {
-          debug(`[TDE] Burst rejected: ${decision.rejectReason}`);
+          info(`[TDE] Burst rejected: ${decision.rejectReason}`);
           tradeLocks.delete(burstKey);
           return;
         }
@@ -310,7 +310,7 @@ async function main() {
           blocklist: BURST_TRADE_BLOCKLIST,
         });
         if (decision.outcome === 'REJECTED') {
-          debug(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
+          info(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
           tradeLocks.delete(momentumKey);
           return;
         }
@@ -988,7 +988,7 @@ function startPeriodicScan(
                 blocklist: BURST_TRADE_BLOCKLIST,
               }).then(decision => {
                 if (decision.outcome === 'REJECTED') {
-                  debug(`[TDE] Scored rejected: ${decision.rejectReason}`);
+                  info(`[TDE] Scored rejected: ${decision.rejectReason}`);
                   tradeLocks.delete(tradeKey);
                   return;
                 }

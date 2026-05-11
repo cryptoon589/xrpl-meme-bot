@@ -765,8 +765,12 @@ export class PaperTrader {
 
     // Return proceeds to bankroll
     this.bankrollXRP += netProceeds;
-    this.dailyPnL += pnlXRP;
-    this.tradesToday++;
+    // Ghost closes (force_close_no_price) return the full entry cost — don't count
+    // them as real losses against the daily limit. The position never actually traded.
+    if (!isGhostClose) {
+      this.dailyPnL += pnlXRP;
+      this.tradesToday++;
+    }
 
     // Remove from open positions
     this.openPositions.delete(key);
