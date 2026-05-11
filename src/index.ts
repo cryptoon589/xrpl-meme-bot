@@ -152,8 +152,7 @@ async function main() {
   const BURST_TRADE_BLOCKLIST = new Set([
     // ASCII names
     'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-    // Tokens that repeatedly trigger burst signals but have no priceable AMM
-    'ARMY', 'LOVE',
+
     'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP', 'EUR',
     // Hex-encoded equivalents (40-char, right-padded with 00s)
     '524C555344000000000000000000000000000000', // RLUSD
@@ -1093,8 +1092,8 @@ function startPeriodicScan(
       // Check exits for ALL open positions — catches orphaned positions
       // (tokens that got pruned from the scan list but still have open trades)
       if (paperTrader && paperTrader.getOpenPositions().length > 0) {
-        const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer) => {
-          const p = await ammPriceFetcher.getPrice(currency, issuer);
+        const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
+          const p = await ammPriceFetcher.getPrice(currency, issuer, rawCurrency);
           return p?.priceXRP ?? null;
         });
         for (const ct of orphanClosed) {

@@ -113,6 +113,7 @@ export class Database {
       `ALTER TABLE paper_trades ADD COLUMN xrp_returned REAL DEFAULT 0`,
       `ALTER TABLE paper_trades ADD COLUMN trade_profile TEXT`,
       `ALTER TABLE paper_trades ADD COLUMN trade_source TEXT`,
+      `ALTER TABLE paper_trades ADD COLUMN raw_currency TEXT`,
       `ALTER TABLE whale_wallets ADD COLUMN win_rate_pct REAL DEFAULT 0`,
       `ALTER TABLE whale_wallets ADD COLUMN volume_xrp REAL DEFAULT 0`,
       // whale_wallets and execution_validation are created via SCHEMA (CREATE TABLE IF NOT EXISTS)
@@ -426,8 +427,8 @@ export class Database {
          exit_timestamp, exit_score, exit_reason, status, pnl_xrp,
          pnl_percent, slippage_estimate, fees_paid, tp1_hit, tp2_hit,
          trailing_stop_active, remaining_position, xrp_returned,
-         trade_profile, trade_source)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         trade_profile, trade_source, raw_currency)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       this.runWithRetry(stmt, [
         trade.tokenCurrency,
@@ -453,6 +454,7 @@ export class Database {
         trade.xrpReturned ?? 0,
         trade.tradeProfile ?? null,
         trade.tradeSource ?? null,
+        trade.rawCurrency ?? null,
       ]);
 
       // Set the ID on the trade object
@@ -631,6 +633,7 @@ export class Database {
       remainingPosition: row.remaining_position,
       tradeProfile: row.trade_profile ?? undefined,
       tradeSource: row.trade_source ?? undefined,
+      rawCurrency: row.raw_currency ?? undefined,
     };
   }
 

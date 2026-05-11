@@ -83,6 +83,8 @@ export interface PaperTrade {
   id?: number;
   tokenCurrency: string;
   tokenIssuer: string;
+  /** Raw hex currency code — required for XRPL API calls (decoded names cause 'Issue is malformed') */
+  rawCurrency?: string;
   entryPriceXRP: number;
   entryAmountXRP: number;
   entryTimestamp: number;

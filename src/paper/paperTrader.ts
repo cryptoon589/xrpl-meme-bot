@@ -148,6 +148,7 @@ export class PaperTrader {
     const trade: PaperTrade = {
       tokenCurrency: token.currency,
       tokenIssuer: token.issuer,
+      rawCurrency: token.rawCurrency,
       entryPriceXRP: entryPrice,
       entryAmountXRP: tradeSizeXRP,
       entryTimestamp: Date.now(),
@@ -309,6 +310,7 @@ export class PaperTrader {
     const trade: PaperTrade = {
       tokenCurrency: token.currency,
       tokenIssuer: token.issuer,
+      rawCurrency: token.rawCurrency,
       entryPriceXRP: entryPrice,
       entryAmountXRP: tradeSizeXRP,
       entryTimestamp: Date.now(),
@@ -1108,7 +1110,7 @@ export class PaperTrader {
    * Called every scan cycle to catch orphaned positions (tokens pruned from scan list).
    */
   async checkAllOpenExits(
-    getPrice: (currency: string, issuer: string) => Promise<number | null>
+    getPrice: (currency: string, issuer: string, rawCurrency?: string) => Promise<number | null>
   ): Promise<PaperTrade[]> {
     const allClosed: PaperTrade[] = [];
     const now = Date.now();
@@ -1117,7 +1119,8 @@ export class PaperTrader {
 
     for (const [key, position] of this.openPositions.entries()) {
       const { trade } = position;
-      const price = await getPrice(trade.tokenCurrency, trade.tokenIssuer);
+      // Always pass rawCurrency (hex) so ammPriceFetcher uses the correct API format
+      const price = await getPrice(trade.tokenCurrency, trade.tokenIssuer, trade.rawCurrency);
 
       // No price — check if position has been open too long without pricing
       if (!price || price <= 0) {
