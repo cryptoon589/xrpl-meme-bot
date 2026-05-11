@@ -81,6 +81,7 @@ export class XRPLClient {
   private static readonly RELEVANT_TX_TYPES = new Set([
     'TrustSet',
     'AMMCreate',
+    'AMMBid',
     'AMMDeposit',
     'AMMWithdraw',
     'OfferCreate',

@@ -506,7 +506,10 @@ export class Database {
 
       return rows.map(row => this.rowToPaperTrade(row));
     } catch (err) {
-      warn(`Error getting open trades: ${err}
+      warn(`Error getting open trades: ${err}`);
+      return [];
+    }
+  }
 
   getOpenPositionCount(): number {
     try {
@@ -547,7 +550,7 @@ export class Database {
     try {
       const row = this.db.prepare(`
         SELECT COUNT(*) as cnt FROM paper_trades
-        WHERE status = 'closed' AND exitTimestamp >= ?
+        WHERE status = 'closed' AND exit_timestamp >= ?
       `).get(Date.now() - sinceMs) as { cnt: number };
       return row?.cnt ?? 0;
     } catch (err) {
@@ -559,17 +562,14 @@ export class Database {
     try {
       const row = this.db.prepare(`
         SELECT COUNT(*) as cnt FROM paper_trades
-        WHERE status = 'closed' AND exitTimestamp >= ? AND pnlXRP > 0
+        WHERE status = 'closed' AND exit_timestamp >= ? AND pnl_xrp > 0
       `).get(Date.now() - sinceMs) as { cnt: number };
       return row?.cnt ?? 0;
     } catch (err) {
       return 0;
     }
   }
-`);
-      return [];
-    }
-  }
+
 
   /**
    * DB-level check: is there already an open/partial trade for this token?

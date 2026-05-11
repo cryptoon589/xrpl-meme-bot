@@ -330,7 +330,7 @@ async function main() {
           db.updatePaperTrade(trade);
           setTimeout(() => sendAlert(telegramAlerter, db, {
             type: 'paper_trade_opened',
-            tokenCurrency: currency, tokenIssuer: issuer,
+            tokenCurrency: displayCurrency, tokenIssuer: issuer,
             paperTrade: trade,
             tradeProfileName: decision.profile.name,
             tradeSource: 'stream',
@@ -1171,14 +1171,14 @@ function startPeriodicScan(
       ``,
       `<b>Bankroll:</b>  ${state.bankrollXRP.toFixed(2)} XRP`,
       `<b>Daily P&L:</b> ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP`,
-      `<b>Open:</b>      ${openPositions.length} position${openPositions.length !== 1 ? 's' : ''}`,
+      `<b>Open:</b>      ${db.getOpenPositionCount()} open | ${db.getPartialPositionCount()} partial${openPositions.length !== 1 ? 's' : ''}`,
     ];
     lines.push('');
     const closed6h = db.getClosedTradeCountSince(6*3600*1000);
     const totalClosed = db.getTotalClosedTradeCount();
     lines.push(`Closed:  ${closed6h} in last 6h / ${totalClosed} all-time`);
     const win6h = db.getWinningTradeCountSince(6*3600*1000);
-    lines.push(`Win rate: ${closed6h > 0 ? ((win6h/closed6h)*100).toFixed(1) : 'N/A'}% (last 6h)`);
+    lines.push(`Win rate: ${closed6h > 0 ? ((win6h/closed6h)*100).toFixed(1) : 'N/A'}% (6h window)`);
 
     if (openPositions.length === 0) {
       lines.push('', '<i>No open positions.</i>');
