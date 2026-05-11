@@ -52,6 +52,9 @@ let healthCheckInterval: NodeJS.Timeout | null = null;
 
 // Per-token trade lock: prevents duplicate paper/live trades from parallel batch workers
 const tradeLocks = new Set<string>();
+// Tokens force-closed for no-price \u2014 don't re-enter for 6h
+const noPriceCooldowns = new Map<string, number>();
+const NO_PRICE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 let healthServer: http.Server | null = null;
 let xrplClientRef: XRPLClient | null = null; // module-level ref for hourly timer
 
@@ -149,6 +152,8 @@ async function main() {
   const BURST_TRADE_BLOCKLIST = new Set([
     // ASCII names
     'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+    // Tokens that repeatedly trigger burst signals but have no priceable AMM
+    'ARMY', 'LOVE',
     'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP', 'EUR',
     // Hex-encoded equivalents (40-char, right-padded with 00s)
     '524C555344000000000000000000000000000000', // RLUSD
@@ -188,6 +193,12 @@ async function main() {
       const poolXrpReserve = poolTVL / 2;
       if (isBlocklistedToken(currency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
       const burstKey = `${currency}:${issuer}`;
+      // Skip tokens that were recently force-closed for no-price
+      const noPriceCooldownTs = noPriceCooldowns.get(burstKey);
+      if (noPriceCooldownTs && Date.now() - noPriceCooldownTs < NO_PRICE_COOLDOWN_MS) {
+        debug(`Burst skipped — no-price cooldown active: ${currency}`);
+        return;
+      }
       if (tradeLocks.has(burstKey)) { debug(`Burst skipped — lock held: ${burstKey}`); return; }
       if (paperTrader.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — open position: ${burstKey}`); return; }
       // Belt-and-suspenders: also check tradeExecutor positions (real trades) to prevent cross-path duplicates
@@ -1091,6 +1102,10 @@ function startPeriodicScan(
           // Suppress ghost-close alerts (no-price / force-close at entry) — just log them
           if (ct.exitReason === 'force_close_no_price') {
             info(`Ghost close (no price): ${ct.tokenCurrency} — position voided, bankroll returned`);
+            // Add to no-price cooldown — don't re-enter this token for 6h
+            const cooldownKey = `${ct.tokenCurrency}:${ct.tokenIssuer}`;
+            noPriceCooldowns.set(cooldownKey, Date.now());
+            info(`[NoPriceCooldown] ${ct.tokenCurrency} blocked for 6h after force_close_no_price`);
             continue;
           }
           setTimeout(() => sendAlert(telegramAlerter, db, {
