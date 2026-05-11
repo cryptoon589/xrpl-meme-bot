@@ -609,6 +609,10 @@ function smartPruneTokens(
   const HARD_CAP      = 300;                    // never score more than 300 tokens
   const MIN_SCORE_TO_KEEP = 40;
   const now = Date.now();
+  // If ammScanner has very few pools loaded (e.g. right after startup), skip
+  // pool-based pruning entirely — pools load lazily and we'd prune everything.
+  const ammPoolsLoaded = ammScanner.getPoolCount();
+  const skipPoolPrune = ammPoolsLoaded < 50;
 
   let kept = tokens.filter(token => {
     // Always keep tokens with open paper positions
@@ -617,8 +621,9 @@ function smartPruneTokens(
     if (now - token.lastUpdated < PRUNE_AGE_MS) return true;
 
     // Keep tokens with AMM pools AND a decent score
+    // Skip pool check if ammScanner hasn't loaded pools yet
     const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
-    if (!pool) {
+    if (!pool && !skipPoolPrune) {
       debug(`Pruning no-pool token: ${token.currency}`);
       return false;
     }
