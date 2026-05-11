@@ -506,7 +506,67 @@ export class Database {
 
       return rows.map(row => this.rowToPaperTrade(row));
     } catch (err) {
-      warn(`Error getting open trades: ${err}`);
+      warn(`Error getting open trades: ${err}
+
+  getOpenPositionCount(): number {
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM paper_trades WHERE status = 'open'
+      `).get() as { cnt: number };
+      return row?.cnt ?? 0;
+    } catch (err) {
+      warn(`[DB] getOpenPositionCount error: ${err}`);
+      return 0;
+    }
+  }
+
+  getPartialPositionCount(): number {
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM paper_trades WHERE status = 'partial'
+      `).get() as { cnt: number };
+      return row?.cnt ?? 0;
+    } catch (err) {
+      warn(`[DB] getPartialPositionCount error: ${err}`);
+      return 0;
+    }
+  }
+
+  getTotalClosedTradeCount(): number {
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM paper_trades WHERE status = 'closed'
+      `).get() as { cnt: number };
+      return row?.cnt ?? 0;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  getClosedTradeCountSince(sinceMs: number): number {
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM paper_trades
+        WHERE status = 'closed' AND exitTimestamp >= ?
+      `).get(Date.now() - sinceMs) as { cnt: number };
+      return row?.cnt ?? 0;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  getWinningTradeCountSince(sinceMs: number): number {
+    try {
+      const row = this.db.prepare(`
+        SELECT COUNT(*) as cnt FROM paper_trades
+        WHERE status = 'closed' AND exitTimestamp >= ? AND pnlXRP > 0
+      `).get(Date.now() - sinceMs) as { cnt: number };
+      return row?.cnt ?? 0;
+    } catch (err) {
+      return 0;
+    }
+  }
+`);
       return [];
     }
   }

@@ -130,6 +130,11 @@ export class TelegramAlerter {
     } else if (payload.type === 'open_positions_update') {
       cdKey = this.cooldownKey(payload.type);
       cdMs  = this.SUMMARY_COOLDOWN_MS;
+    } else if (payload.type === 'paper_trade_opened') {
+      // Unique per token+timestamp so multiple concurrent open alerts all get through
+      const ts = payload.paperTrade?.entryTimestamp ?? Date.now();
+      cdKey = `${payload.type}:${payload.tokenCurrency ?? 'global'}:${ts}`;
+      cdMs  = this.TRADE_COOLDOWN_MS;
     } else if (
       payload.type === 'paper_trade_closed' ||
       payload.type === 'paper_trade_partial_close'
