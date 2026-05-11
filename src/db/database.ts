@@ -975,6 +975,11 @@ export class Database {
     }
   }
 
+  /**
+   * Compute profile stats directly from paper_trades — never from the profile_stats
+   * accumulator table, which carries stale data across DB resets and restarts.
+   * pnl_percent is capped at ±999 to prevent single outlier trades from corrupting averages.
+   */
   getProfileStats(): Record<string, {
     trades: number;
     wins: number;
@@ -986,25 +991,39 @@ export class Database {
     netPnlXRP: number;
   }> {
     try {
-      const rows = this.db.prepare('SELECT * FROM profile_stats').all() as any[];
+      const rows = this.db.prepare(`
+        SELECT
+          trade_profile                                        AS profile,
+          COUNT(*)                                            AS trades,
+          SUM(CASE WHEN pnl_xrp > 0 THEN 1 ELSE 0 END)      AS wins,
+          SUM(CASE WHEN pnl_xrp > 0
+            THEN MIN(MAX(pnl_percent, -999), 999) ELSE 0 END) AS sum_win_pct,
+          SUM(CASE WHEN pnl_xrp <= 0
+            THEN MIN(MAX(pnl_percent, -999), 999) ELSE 0 END) AS sum_loss_pct,
+          MAX(MIN(MAX(pnl_percent, -999), 999))               AS best_pct,
+          AVG(CASE WHEN exit_timestamp IS NOT NULL
+            THEN exit_timestamp - entry_timestamp ELSE NULL END) AS avg_hold_ms,
+          SUM(COALESCE(pnl_xrp, 0))                          AS net_pnl_xrp
+        FROM paper_trades
+        WHERE status = 'closed'
+          AND trade_profile IS NOT NULL
+          AND pnl_xrp IS NOT NULL
+        GROUP BY trade_profile
+      `).all() as any[];
       const result: Record<string, any> = {};
       for (const row of rows) {
-        const p = row.profile;
-        if (!result[p]) result[p] = { trades: 0, wins: 0, totalWinPct: 0, totalLossPct: 0, bestRunPct: 0, totalHoldMs: 0, netPnlXRP: 0 };
-        const s = result[p];
-        s.trades++;
-        if (row.won) { s.wins++; s.totalWinPct += row.pnl_pct; }
-        else { s.totalLossPct += row.pnl_pct; }
-        if (row.pnl_pct > s.bestRunPct) s.bestRunPct = row.pnl_pct;
-        s.totalHoldMs += row.hold_ms;
-        s.netPnlXRP += row.pnl_xrp;
-      }
-      for (const [p, s] of Object.entries(result) as any[]) {
-        s.winRate = s.trades > 0 ? s.wins / s.trades : 0;
-        s.avgWinPct = s.wins > 0 ? s.totalWinPct / s.wins : 0;
-        s.avgLossPct = (s.trades - s.wins) > 0 ? s.totalLossPct / (s.trades - s.wins) : 0;
-        s.avgHoldMs = s.trades > 0 ? s.totalHoldMs / s.trades : 0;
-        delete s.totalWinPct; delete s.totalLossPct; delete s.totalHoldMs;
+        const wins    = row.wins   ?? 0;
+        const losses  = row.trades - wins;
+        result[row.profile] = {
+          trades:     row.trades,
+          wins,
+          winRate:    row.trades > 0 ? wins / row.trades : 0,
+          avgWinPct:  wins   > 0 ? row.sum_win_pct  / wins   : 0,
+          avgLossPct: losses > 0 ? row.sum_loss_pct / losses : 0,
+          bestRunPct: row.best_pct ?? 0,
+          avgHoldMs:  row.avg_hold_ms ?? 0,
+          netPnlXRP:  row.net_pnl_xrp ?? 0,
+        };
       }
       return result;
     } catch { return {}; }

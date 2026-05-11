@@ -1234,7 +1234,8 @@ function startPeriodicScan(
     const state = paperTrader ? paperTrader.getState() : null;
 
     // ── 6h forwardable bot log ─────────────────────────────────────
-    const w = recs?.scoreWeights;
+    // Load live weights from tokenScorer directly — never from stale recs cache
+    const w = tokenScorer.getWeights?.() ?? recs?.scoreWeights;
     const logLines: string[] = [
       `BOT LOG - ${new Date().toUTCString()}`,
       ``,
@@ -1242,22 +1243,22 @@ function startPeriodicScan(
       state ? `Bankroll: ${state.bankrollXRP.toFixed(2)} XRP | Daily P&L: ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP | Open: ${state.openPositions}` : 'N/A',
       ``,
       `TRADE HISTORY`,
-      recs
-        ? `Trades: ${recs.tradesAnalyzed} | Win rate: ${recs.overallWinRate}% | Auto-apply: ${recs.autoApplyReady ? 'YES' : 'Need ' + Math.max(0, 30 - recs.tradesAnalyzed) + ' more'}`
-        : `Collecting data (need 5+ closed trades)`,
+      (() => { const t = db.getTotalClosedTradeCount(); const w = db.getWinningTradeCountSince(999*24*3600*1000); const wr = t > 0 ? ((w/t)*100).toFixed(1) : 'N/A'; return `Trades: ${t} | Win rate: ${wr}% (all-time)`; })(),
       ``,
       ...(recs ? [
         `PARAMS`,
-        `Min score: ${recs.minScorePaperTrade} | Min liq: ${recs.minLiquidityXRP} XRP`,
-        `Burst - Stop: ${recs.burstStopLossPercent}% | TP1: +${recs.burstTp1Percent}% | TP2: +${recs.burstTp2Percent}%`,
-        `Scored - TP1: +${recs.scoredTp1Percent}% | TP2: +${recs.scoredTp2Percent}%`,
-        `Trading pause: ${recs.tradingPauseEnabled ? 'YES - worst hours: ' + recs.worstHours.map((h: number) => h + ':00').join(', ') + ' UTC' : 'NO (need 40+ trades)'}`,
+        `Min score: ${config.minScorePaperTrade} | Min liq: ${config.minLiquidityXRP ?? 500} XRP`,
+        `Burst - Stop: ${(require('./execution/tradeProfiles').PROFILES.BURST_SCALP.stopLossPct ?? '?')}% | TP1: +${(require('./execution/tradeProfiles').PROFILES.BURST_SCALP.tp1Pct ?? '?')}% | TP2: +${(require('./execution/tradeProfiles').PROFILES.BURST_SCALP.tp2Pct ?? '?')}%`,
+        `Scored - TP1: +${(require('./execution/tradeProfiles').PROFILES.MOMENTUM_RUNNER.tp1Pct ?? '?')}% | TP2: +${(require('./execution/tradeProfiles').PROFILES.MOMENTUM_RUNNER.tp2Pct ?? '?')}%`,
+        `Max open trades: ${config.maxOpenTrades} | Max daily loss: ${config.maxDailyLossXRP} XRP | Mode: ${config.mode}`,
         ``,
         `WEIGHTS`,
         `Momentum: ${w?.volumeAccelScore} | Buy pressure: ${w?.buyPressureScore} | New wallets: ${w?.holderGrowthScore} | Vol surge: ${w?.liquidityScore}`,
         ``,
         `INSIGHTS`,
-        ...recs.insights.slice(0, 8).map((i: string) => `- ${i}`),
+        ...((Date.now() - recs.generatedAt < 12 * 3600 * 1000)
+          ? recs.insights.slice(0, 8).map((i: string) => `- ${i}`)
+          : ['- Stale data — insights will refresh after next analysis run']),
         ``,
         `RUN LENGTHS`,
         `Median: +${recs.medianRunPct}% | P75: +${recs.p75RunPct}% | Burst: +${recs.burstMedianRunPct}% | Scored: +${recs.scoredMedianRunPct}%`,

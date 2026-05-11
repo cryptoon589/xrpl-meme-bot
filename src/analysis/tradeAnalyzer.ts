@@ -125,12 +125,20 @@ export class TradeAnalyzer {
     const insights: string[] = [];
 
     // ── Overall stats ──────────────────────────────────────────────
+    // Sanitize pnl_percent: cap at ±999 to prevent outliers from corrupting averages
+    // (ghost closes, duplicate entries, or DB corruption can produce absurd values)
+    const sanitizePct = (pct: number | null | undefined) => {
+      if (pct == null || !isFinite(pct)) return null;
+      return Math.max(-999, Math.min(999, pct));
+    };
     const wins     = rawTrades.filter(t => t.pnl_xrp > 0);
     const losses   = rawTrades.filter(t => t.pnl_xrp <= 0);
     const winRate  = wins.length / rawTrades.length;
-    const avgWin   = wins.length   > 0 ? wins.reduce((s, t) => s + t.pnl_percent, 0)   / wins.length   : 0;
-    const avgLoss  = losses.length > 0 ? losses.reduce((s, t) => s + t.pnl_percent, 0) / losses.length : 0;
-    const totalPnL = rawTrades.reduce((s, t) => s + t.pnl_xrp, 0);
+    const winPcts  = wins.map(t => sanitizePct(t.pnl_percent)).filter((p): p is number => p !== null);
+    const lossPcts = losses.map(t => sanitizePct(t.pnl_percent)).filter((p): p is number => p !== null);
+    const avgWin   = winPcts.length   > 0 ? winPcts.reduce((s, p) => s + p, 0)   / winPcts.length   : 0;
+    const avgLoss  = lossPcts.length  > 0 ? lossPcts.reduce((s, p) => s + p, 0)  / lossPcts.length  : 0;
+    const totalPnL = rawTrades.reduce((s, t) => s + (isFinite(t.pnl_xrp) ? t.pnl_xrp : 0), 0);
 
     insights.push(`Overall: ${rawTrades.length} trades | Win rate: ${(winRate*100).toFixed(1)}% | Avg win: +${avgWin.toFixed(1)}% | Avg loss: ${avgLoss.toFixed(1)}% | Total PnL: ${totalPnL.toFixed(2)} XRP`);
 
