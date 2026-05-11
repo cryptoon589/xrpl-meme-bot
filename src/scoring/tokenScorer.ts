@@ -78,6 +78,9 @@ export class TokenScorer {
   setWhaleTracker(tracker: WhaleTracker): void { this.whaleTracker = tracker; }
   setSocialDetector(detector: SocialDetector): void { this.socialDetector = detector; }
 
+  /** Return current active weights (learned or default). */
+  getWeights(): ScoreWeights { return { ...this.learnedWeights }; }
+
   /**
    * Score this token's current trading opportunity (0–100).
    * Higher = better entry right now for a clean profit trade.
