@@ -271,6 +271,7 @@ async function main() {
   // Stream-driven momentum entry — routes through TradeDecisionEngine
   if (paperTrader) {
     paperTrader.setBuyPressureTracker(buyPressureTracker);
+    paperTrader.setAMMPriceFetcher(ammPriceFetcher);
 
     buyPressureTracker.onMomentumDetected = (currency, issuer, snap) => {
       const momentumKey = `${currency}:${issuer}`;

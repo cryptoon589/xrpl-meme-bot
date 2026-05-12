@@ -4,7 +4,7 @@
 
 import BetterSQLite3 from 'better-sqlite3';
 import path from 'path';
-import { SCHEMA, INDEXES } from './schema';
+import { SCHEMA, INDEXES, VIEWS } from './schema';
 import {
   TrackedToken,
   AMMPool,
@@ -102,6 +102,15 @@ export class Database {
         this.execWithRetry(indexSql);
       } catch (err) {
         warn(`Error creating index: ${err}`);
+      }
+    }
+
+    // Create compatibility views (e.g. tracked_tokens → tokens)
+    for (const viewSql of VIEWS) {
+      try {
+        this.execWithRetry(viewSql);
+      } catch (err) {
+        warn(`Error creating view: ${err}`);
       }
     }
 
@@ -932,6 +941,36 @@ export class Database {
       ]);
     } catch (err) {
       warn(`Error saving missed opportunity: ${err}`);
+    }
+  }
+
+  /**
+   * Upsert a missed opportunity — inserts immediately on skip, updates when follow-up prices arrive.
+   * Uses skipped_at + currency + issuer as the natural key.
+   */
+  upsertMissedOpportunity(sig: import('../market/missedOpportunityTracker').MissedSignal): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT INTO missed_opportunities
+          (currency, issuer, skipped_at, skip_reason, price_at_skip, pool_xrp_reserve,
+           max_price_10m, max_price_30m, max_price_60m, pct_gain_10m, pct_gain_30m, pct_gain_60m)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(currency, issuer, skipped_at) DO UPDATE SET
+          max_price_10m = COALESCE(excluded.max_price_10m, max_price_10m),
+          max_price_30m = COALESCE(excluded.max_price_30m, max_price_30m),
+          max_price_60m = COALESCE(excluded.max_price_60m, max_price_60m),
+          pct_gain_10m  = COALESCE(excluded.pct_gain_10m,  pct_gain_10m),
+          pct_gain_30m  = COALESCE(excluded.pct_gain_30m,  pct_gain_30m),
+          pct_gain_60m  = COALESCE(excluded.pct_gain_60m,  pct_gain_60m)
+      `);
+      this.runWithRetry(stmt, [
+        sig.currency, sig.issuer, sig.skippedAt, sig.skipReason,
+        sig.priceAtSkip, sig.poolXrpReserve,
+        sig.maxPrice10m ?? null, sig.maxPrice30m ?? null, sig.maxPrice60m ?? null,
+        sig.pctGain10m ?? null, sig.pctGain30m ?? null, sig.pctGain60m ?? null,
+      ]);
+    } catch (err) {
+      warn(`Error upserting missed opportunity: ${err}`);
     }
   }
 

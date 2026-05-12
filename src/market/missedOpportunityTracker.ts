@@ -44,9 +44,12 @@ export class MissedOpportunityTracker {
     this.startFollowUpTimer();
   }
 
-  /** Record a skipped signal */
+  /** Record a skipped signal — persists immediately so the table is never empty */
   record(signal: Omit<MissedSignal, 'id'>): void {
-    this.pending.push({ ...signal });
+    const sig = { ...signal };
+    this.pending.push(sig);
+    // Write immediately with null gain fields; follow-up will fill them via upsert
+    this.db.upsertMissedOpportunity(sig);
     debug(`[MissedOpp] Skipped ${signal.currency}: ${signal.skipReason} @ ${signal.priceAtSkip}`);
   }
 
@@ -83,8 +86,8 @@ export class MissedOpportunityTracker {
           sig.maxPrice60m = currentPrice;
           sig.pctGain60m = ((currentPrice - sig.priceAtSkip) / sig.priceAtSkip) * 100;
 
-          // 60m data complete — persist and remove from pending
-          this.db.saveMissedOpportunity(sig);
+          // 60m data complete — upsert with final price data and remove from pending
+          this.db.upsertMissedOpportunity(sig);
           if ((sig.pctGain60m ?? 0) > 20) {
             info(`[MissedOpp] 🔍 ${sig.currency} would have gained ${sig.pctGain60m?.toFixed(1)}% (skipped: ${sig.skipReason})`);
           }

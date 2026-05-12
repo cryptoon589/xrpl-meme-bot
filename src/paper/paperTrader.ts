@@ -10,6 +10,7 @@ import { PositionSizer } from './positionSizer';
 import { info, warn, debug } from '../utils/logger';
 import { BuyPressureTracker } from '../market/buyPressureTracker';
 import { TradeProfileName, PROFILES } from '../execution/tradeProfiles';
+import { AMMPriceFetcher } from '../market/ammPriceFetcher';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -42,6 +43,7 @@ export class PaperTrader {
   private tradesToday: number = 0;
   private lastResetDate: string = '';
   private buyPressureTracker: BuyPressureTracker | null = null;
+  private ammPriceFetcher: AMMPriceFetcher | null = null;
 
   // Trading stats for Kelly Criterion
   private totalTrades: number = 0;
@@ -62,6 +64,15 @@ export class PaperTrader {
 
   setBuyPressureTracker(tracker: BuyPressureTracker): void {
     this.buyPressureTracker = tracker;
+  }
+
+  setAMMPriceFetcher(fetcher: AMMPriceFetcher): void {
+    this.ammPriceFetcher = fetcher;
+    // Register any already-loaded positions (restart recovery)
+    for (const key of this.openPositions.keys()) {
+      const [currency, issuer] = key.split(':');
+      fetcher.registerOpenPosition(currency, issuer);
+    }
   }
 
   /**
@@ -191,6 +202,8 @@ export class PaperTrader {
     });
 
     this.db.savePaperTrade(trade);
+    // Register with price fetcher so null-cache is bypassed for exit checks
+    this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
     const displayName = token.currency.length === 40
       ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
       : token.currency;
@@ -364,6 +377,8 @@ export class PaperTrader {
 
     // Save to DB
     this.db.savePaperTrade(trade);
+    // Register with price fetcher so null-cache is bypassed for exit checks
+    this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
 
     const displayName2 = token.currency.length === 40
       ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
@@ -774,8 +789,9 @@ export class PaperTrader {
       this.tradesToday++;
     }
 
-    // Remove from open positions
+    // Remove from open positions and unregister from price fetcher
     this.openPositions.delete(key);
+    this.ammPriceFetcher?.unregisterOpenPosition(trade.tokenCurrency, trade.tokenIssuer);
     this.lastCloseTime.set(key, Date.now());
     this.recordProfileStat(position, trade);
 

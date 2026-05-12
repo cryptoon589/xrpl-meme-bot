@@ -29,28 +29,48 @@ export class AMMPriceFetcher {
   private nullCache: Map<string, number> = new Map();
   private readonly CACHE_TTL_MS = 90_000;      // 90s price cache
   private readonly NULL_CACHE_TTL_MS = 300_000; // 5 min null cache — don't retry no-price tokens
+  // Open position tracking: bypass null cache for tokens with open trades
+  private openPositionKeys: Set<string> = new Set();
 
   constructor(xrplClient: XRPLClient) {
     this.xrplClient = xrplClient;
   }
 
+  /** Register an open position — bypasses null cache so exit checks always get a live price */
+  registerOpenPosition(currency: string, issuer: string): void {
+    this.openPositionKeys.add(`${currency}:${issuer}`);
+  }
+
+  /** Unregister when position closes */
+  unregisterOpenPosition(currency: string, issuer: string): void {
+    const key = `${currency}:${issuer}`;
+    this.openPositionKeys.delete(key);
+    // Also clear the null cache entry so next scan gets a fresh attempt
+    this.nullCache.delete(key);
+  }
+
   /**
    * Get the current price of a token in XRP.
    * Tries AMM first, falls back to order book.
+   * bypassNullCache: force a live fetch even if token is null-cached (used for open positions).
    */
-  async getPrice(currency: string, issuer: string, rawCurrency?: string): Promise<TokenPrice | null> {
+  async getPrice(currency: string, issuer: string, rawCurrency?: string, bypassNullCache = false): Promise<TokenPrice | null> {
     const key = `${currency}:${issuer}`;
     const now = Date.now();
+    // Open positions always bypass null cache — we need a price to manage exit
+    const isOpen = this.openPositionKeys.has(key);
+    const effectiveBypass = bypassNullCache || isOpen;
 
-    // Return cached price if fresh
+    // Return cached price if fresh (open positions still use the positive cache — 90s is fine)
     const cached = this.cache.get(key);
     if (cached && now - cached.fetchedAt < this.CACHE_TTL_MS) {
       return cached.price;
     }
 
     // Skip tokens that previously returned no price — avoid hammering the network
+    // Exception: open positions bypass the null cache so exit checks always fire
     const nullTs = this.nullCache.get(key);
-    if (nullTs && now - nullTs < this.NULL_CACHE_TTL_MS) {
+    if (!effectiveBypass && nullTs && now - nullTs < this.NULL_CACHE_TTL_MS) {
       return null;
     }
 

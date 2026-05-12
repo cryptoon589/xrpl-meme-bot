@@ -181,7 +181,8 @@ export const SCHEMA = {
       max_price_60m REAL,
       pct_gain_10m REAL,
       pct_gain_30m REAL,
-      pct_gain_60m REAL
+      pct_gain_60m REAL,
+      UNIQUE(currency, issuer, skipped_at)
     )
   `,
 
@@ -202,6 +203,14 @@ export const SCHEMA = {
     )
   `,
 };
+
+// Compatibility view: older queries used 'tracked_tokens' — the real table is 'tokens'
+// This view makes both names work without a destructive rename.
+export const VIEWS = [
+  `CREATE VIEW IF NOT EXISTS tracked_tokens AS
+   SELECT id, currency, issuer, first_seen, last_updated, raw_currency
+   FROM tokens`,
+];
 
 // Index definitions for performance
 export const INDEXES = [
