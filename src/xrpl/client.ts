@@ -14,6 +14,7 @@ export class XRPLClient {
   private isConnected = false;
   private rawTxCount = 0;   // all raw txs from WS
   private filteredTxCount = 0; // txs that passed isRelevant filter
+  private lastLedgerAt = 0;  // timestamp of last ledger_closed event
   private ledgerHandler?: (ledger: any) => void;
   private txHandler?: (tx: any) => void;
 
@@ -287,10 +288,15 @@ export class XRPLClient {
   /**
    * Check connection status
    */
-  getStatus(): { connected: boolean; url: string } {
+  recordLedger(): void {
+    this.lastLedgerAt = Date.now();
+  }
+
+  getStatus(): { connected: boolean; url: string; lastLedgerAgeMs: number } {
     return {
       connected: this.isConnected,
       url: this.wsUrl,
+      lastLedgerAgeMs: this.lastLedgerAt > 0 ? Date.now() - this.lastLedgerAt : -1,
     };
   }
 

@@ -54,7 +54,7 @@ let healthCheckInterval: NodeJS.Timeout | null = null;
 const tradeLocks = new Set<string>();
 // Tokens force-closed for no-price \u2014 don't re-enter for 6h
 const noPriceCooldowns = new Map<string, number>();
-const NO_PRICE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const NO_PRICE_COOLDOWN_MS = 30 * 60 * 1000; // 30 min — 6h was causing post-restart dormancy
 let healthServer: http.Server | null = null;
 let xrplClientRef: XRPLClient | null = null; // module-level ref for hourly timer
 
@@ -405,6 +405,8 @@ async function main() {
 
   // Subscribe to live tx stream — activeDiscovery handles token extraction
   await xrplClient.subscribeTransactions((tx) => {
+    // Stamp each incoming tx as proof the WS stream is alive
+    xrplClient.recordLedger();
     // Real-time buy pressure tracking (runs on every tx, no queue)
     buyPressureTracker.processTransaction(tx);
 
@@ -493,7 +495,7 @@ async function main() {
     missedOpportunityTracker, tradeDecisionEngine, BURST_TRADE_BLOCKLIST
   );
 
-  startHealthCheck(xrplClient);
+  startHealthCheck(xrplClient, buyPressureTracker, paperTrader);
   startHealthEndpoint(tokenDiscovery, paperTrader, xrplClient, liveValidator);
   setupGracefulShutdown(xrplClient, db);
 
@@ -981,8 +983,15 @@ function startPeriodicScan(
               });
             }
 
+            // Skip if this token was recently force-closed for no-price
+            const noPriceCooldownActive = noPriceCooldowns.has(tradeKey) &&
+              Date.now() - (noPriceCooldowns.get(tradeKey) ?? 0) < NO_PRICE_COOLDOWN_MS;
+            if (noPriceCooldownActive) {
+              debug(`[Scored] No-price cooldown active for ${token.currency} — skipping entry`);
+            }
+
             if (paperTrader && momentumEntry &&
-                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && !correlationWarning) {
+                riskFilter.isSafe(risks) && !isBlocklisted && !tradeLocks.has(tradeKey) && !correlationWarning && !noPriceCooldownActive) {
               tradeLocks.add(tradeKey);
               const entryReason = [
                 priceUp5m  ? `+${snapshot.priceChange5m?.toFixed(1)}% 5m` : null,
@@ -1358,15 +1367,34 @@ function startPeriodicScan(
 /**
  * Health check interval
  */
-function startHealthCheck(xrplClient: XRPLClient): void {
+function startHealthCheck(
+  xrplClient: XRPLClient,
+  buyPressureTracker?: import('./market/buyPressureTracker').BuyPressureTracker,
+  paperTrader?: import('./paper/paperTrader').PaperTrader | null
+): void {
+  const STALE_STREAM_MS = 90_000; // 90s with no tx = stream likely dead
   healthCheckInterval = setInterval(() => {
     const status = xrplClient.getStatus();
-    if (status.connected) {
-      info(`💓 Health: Connected to ${status.url}`);
-    } else {
-      warn('⚠️  Health: NOT connected to XRPL');
+    const txStats = xrplClient.getTxStats();
+    const streamAgeMs = status.lastLedgerAgeMs;
+
+    if (!status.connected) {
+      warn('⚠️  Health: NOT connected to XRPL — waiting for reconnect');
+      return;
     }
-  }, 300000);
+
+    // Detect silent stream death (connected flag = true but no data)
+    if (streamAgeMs > STALE_STREAM_MS && streamAgeMs !== -1) {
+      warn(`⚠️  Health: WS stream STALE — last tx ${Math.round(streamAgeMs/1000)}s ago (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
+      // Trigger reconnect by disconnecting — client auto-reconnects
+      xrplClient.getClient()?.disconnect().catch(() => {});
+      return;
+    }
+
+    const state = paperTrader?.getState();
+    const streamStatus = streamAgeMs === -1 ? 'no data yet' : `last tx ${Math.round(streamAgeMs/1000)}s ago`;
+    info(`💓 Health: connected | stream: ${streamStatus} | raw txs: ${txStats.raw} | bankroll: ${state?.bankrollXRP?.toFixed(2) ?? '?'} XRP | open: ${state?.openPositions ?? 0}`);
+  }, 60_000); // check every 60s (was 300s — too slow to catch drops)
 }
 
 /**
