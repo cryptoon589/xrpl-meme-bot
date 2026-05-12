@@ -482,24 +482,16 @@ export class PaperTrader {
 
       // ── BURST EXIT PROFILE ───────────────────────────────────────────────────
       if (isBurst) {
-        // Safety time stop: exit after 45 min ONLY if trade is clearly losing or
-        // clearly winning. Flat trades near entry get extra time — fees make
-        // closing a +0% trade an immediate loss. Let stop-loss handle the exit.
-        if (ageMs >= 45 * 60 * 1000) {
-          const isClearWin  = pnlPercent >= 5;   // worth closing for profit
-          const isClearLoss = pnlPercent <= -4;  // stop bleeding
-          if (isClearWin || isClearLoss) {
-            info(`⏱️ Burst safety time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) PnL: ${pnlPercent.toFixed(1)}%`);
-            keysToClose.push({ key, reason: pnlPercent >= 0 ? 'time_stop_profit' : 'time_stop_loss' });
-            closedTrades.push(trade);
-            continue;
-          } else if (ageMs >= 90 * 60 * 1000) {
-            // Hard cap: close any burst trade still open after 90 min regardless
-            info(`⏱️ Burst hard time cap (90m) for ${key} PnL: ${pnlPercent.toFixed(1)}%`);
-            keysToClose.push({ key, reason: pnlPercent >= 0 ? 'time_stop_profit' : 'time_stop_loss' });
-            closedTrades.push(trade);
-            continue;
-          }
+        // Profile-driven time stop.  The alert says BURST_SCALP has a
+        // 60-minute time stop, so use the profile value instead of the old
+        // hardcoded 45/90-minute split.  The final profit/loss label is
+        // assigned after fees and slippage are applied in closePosition().
+        const burstTimeStopMs = prof.timeStopMs ?? (60 * 60 * 1000);
+        if (burstTimeStopMs > 0 && ageMs >= burstTimeStopMs && trade.remainingPosition > 0) {
+          info(`⏱️ Burst time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) gross PnL: ${pnlPercent.toFixed(1)}%`);
+          keysToClose.push({ key, reason: 'time_stop' });
+          closedTrades.push(trade);
+          continue;
         }
 
         // Stop loss: use profile stopLossPct (was hardcoded -8%, now reads from profile)
@@ -734,6 +726,21 @@ export class PaperTrader {
   }
 
   /**
+   * Normalize exit labels after final accounting.  Gross price movement can be
+   * slightly positive while fees/slippage make the trade a net loser; Telegram
+   * should never report "Time stop (profit)" on a negative final P&L.
+   */
+  private normalizeExitReason(reason: string, pnlXRP: number): string {
+    if (reason === 'time_stop' || reason === 'time_stop_profit' || reason === 'time_stop_loss') {
+      return pnlXRP >= 0 ? 'time_stop_profit' : 'time_stop_loss';
+    }
+    if (reason === 'trailing_stop' || reason === 'trailing_stop_profit' || reason === 'trailing_stop_loss') {
+      return pnlXRP >= 0 ? 'trailing_stop_profit' : 'trailing_stop_loss';
+    }
+    return reason;
+  }
+
+  /**
    * Close entire position
    * FIX #25: Calculate slippage based on token quantity vs pool depth
    */
@@ -770,13 +777,13 @@ export class PaperTrader {
     trade.exitPriceXRP = exitPrice;
     trade.exitTimestamp = Date.now();
     trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
-    trade.exitReason = reason;
     trade.status = 'closed';
     // xrpReturned accumulates ALL proceeds (partial + final)
     trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
     // pnlXRP = total returned - total invested (accurate across all legs)
     trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
     trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
+    trade.exitReason = this.normalizeExitReason(reason, trade.pnlXRP);
     trade.feesPaid += fees;
     trade.remainingPosition = 0;
 
@@ -800,15 +807,17 @@ export class PaperTrader {
 
     // Update trading stats for Kelly Criterion
     this.totalTrades++;
-    if (pnlXRP > 0) {
+    const finalPnlXRP = trade.pnlXRP ?? pnlXRP;
+    const finalPnlPercent = trade.pnlPercent ?? pnlPercent;
+    if (finalPnlXRP > 0) {
       this.winningTrades++;
-      this.totalWinAmount += pnlXRP;
+      this.totalWinAmount += finalPnlXRP;
     } else {
-      this.totalLossAmount += Math.abs(pnlXRP);
+      this.totalLossAmount += Math.abs(finalPnlXRP);
     }
 
-    const action = pnlXRP >= 0 ? '✅' : '❌';
-    info(`${action} Paper trade CLOSED: ${trade.tokenCurrency} | PnL: ${pnlXRP.toFixed(4)} XRP (${pnlPercent.toFixed(2)}%) | Reason: ${reason}`);
+    const action = finalPnlXRP >= 0 ? '✅' : '❌';
+    info(`${action} Paper trade CLOSED: ${trade.tokenCurrency} | PnL: ${finalPnlXRP.toFixed(4)} XRP (${finalPnlPercent.toFixed(2)}%) | Reason: ${trade.exitReason}`);
   }
 
   /**

@@ -131,16 +131,28 @@ export class TradeAnalyzer {
       if (pct == null || !isFinite(pct)) return null;
       return Math.max(-999, Math.min(999, pct));
     };
-    const wins     = rawTrades.filter(t => t.pnl_xrp > 0);
-    const losses   = rawTrades.filter(t => t.pnl_xrp <= 0);
-    const winRate  = wins.length / rawTrades.length;
+    const sanitizePnlXRP = (t: ClosedTrade) => {
+      if (!isFinite(t.pnl_xrp)) return null;
+      // Paper entries are usually 2-25 XRP.  A single corrupted row showing
+      // millions of XRP makes the bot log unusable, so ignore economically
+      // impossible P&L outliers in summary analytics while keeping the raw DB row.
+      const maxReasonableAbs = Math.max(1000, Math.abs(t.entry_amount_xrp || 0) * 20);
+      return Math.abs(t.pnl_xrp) <= maxReasonableAbs ? t.pnl_xrp : null;
+    };
+    const analyzableTrades = rawTrades.filter(t => sanitizePnlXRP(t) !== null);
+    const wins     = analyzableTrades.filter(t => (sanitizePnlXRP(t) ?? 0) > 0);
+    const losses   = analyzableTrades.filter(t => (sanitizePnlXRP(t) ?? 0) <= 0);
+    const winRate  = analyzableTrades.length > 0 ? wins.length / analyzableTrades.length : 0;
     const winPcts  = wins.map(t => sanitizePct(t.pnl_percent)).filter((p): p is number => p !== null);
     const lossPcts = losses.map(t => sanitizePct(t.pnl_percent)).filter((p): p is number => p !== null);
     const avgWin   = winPcts.length   > 0 ? winPcts.reduce((s, p) => s + p, 0)   / winPcts.length   : 0;
     const avgLoss  = lossPcts.length  > 0 ? lossPcts.reduce((s, p) => s + p, 0)  / lossPcts.length  : 0;
-    const totalPnL = rawTrades.reduce((s, t) => s + (isFinite(t.pnl_xrp) ? t.pnl_xrp : 0), 0);
+    const totalPnL = analyzableTrades.reduce((s, t) => s + (sanitizePnlXRP(t) ?? 0), 0);
+    const outlierNote = analyzableTrades.length === rawTrades.length
+      ? ''
+      : ` | Ignored outliers: ${rawTrades.length - analyzableTrades.length}`;
 
-    insights.push(`Overall: ${rawTrades.length} trades | Win rate: ${(winRate*100).toFixed(1)}% | Avg win: +${avgWin.toFixed(1)}% | Avg loss: ${avgLoss.toFixed(1)}% | Total PnL: ${totalPnL.toFixed(2)} XRP`);
+    insights.push(`Overall: ${analyzableTrades.length} trades | Win rate: ${(winRate*100).toFixed(1)}% | Avg win: +${avgWin.toFixed(1)}% | Avg loss: ${avgLoss.toFixed(1)}% | Total PnL: ${totalPnL.toFixed(2)} XRP${outlierNote}`);
 
     // ── Burst trade analysis ───────────────────────────────────────
     let recMinLiquidity  = 500; // baseline matches .env MIN_LIQUIDITY_XRP
@@ -160,9 +172,11 @@ export class TradeAnalyzer {
       };
       for (const t of burst) {
         const bucket = this.getLiquidityBucket(t);
+        const safePnl = sanitizePnlXRP(t);
+        if (safePnl === null) continue;
         liqBuckets[bucket].total++;
-        liqBuckets[bucket].pnl += t.pnl_xrp;
-        if (t.pnl_xrp > 0) liqBuckets[bucket].wins++;
+        liqBuckets[bucket].pnl += safePnl;
+        if (safePnl > 0) liqBuckets[bucket].wins++;
       }
       let bestLiqBucket = '2k-5k';
       let bestLiqWR = 0;
@@ -184,8 +198,10 @@ export class TradeAnalyzer {
       for (const t of burst) {
         const r = t.exit_reason || 'unknown';
         if (!exitMap[r]) exitMap[r] = { count: 0, pnlSum: 0 };
+        const safePct = sanitizePct(t.pnl_percent);
+        if (safePct === null) continue;
         exitMap[r].count++;
-        exitMap[r].pnlSum += t.pnl_percent;
+        exitMap[r].pnlSum += safePct;
       }
       for (const [reason, data] of Object.entries(exitMap)) {
         insights.push(`Burst exit [${reason}]: ${data.count}× avg ${(data.pnlSum/data.count).toFixed(1)}%`);

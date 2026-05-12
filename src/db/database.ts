@@ -1052,6 +1052,7 @@ export class Database {
         WHERE status = 'closed'
           AND trade_profile IS NOT NULL
           AND pnl_xrp IS NOT NULL
+          AND ABS(COALESCE(pnl_xrp, 0)) <= MAX(1000, ABS(COALESCE(entry_amount_xrp, 0)) * 20)
         GROUP BY trade_profile
       `).all() as any[];
       const result: Record<string, any> = {};
