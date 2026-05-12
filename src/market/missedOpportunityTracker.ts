@@ -30,12 +30,28 @@ export interface MissedSignal {
   pctGain60m?: number;
 }
 
+/** Decode a hex XRPL currency code to its ASCII ticker, or return as-is */
+function decodeCurrency(currency: string): string {
+  if (currency.length !== 40) return currency;
+  try {
+    const stripped = currency.replace(/00+$/, '');
+    const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
+    return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : currency;
+  } catch { return currency; }
+}
+
 export class MissedOpportunityTracker {
   private db: Database;
   private priceFetcher: AMMPriceFetcher;
   /** In-memory queue awaiting price follow-up */
   private pending: MissedSignal[] = [];
   private timer: NodeJS.Timeout | null = null;
+  /**
+   * Cooldown map: key = "currency:issuer:skipReason", value = timestamp of last record.
+   * Prevents the same rejection reason from spamming the table on every scan cycle.
+   */
+  private cooldowns: Map<string, number> = new Map();
+  private readonly COOLDOWN_MS = 5 * 60 * 1000; // 5 min per token+reason combo
 
   constructor(db: Database, priceFetcher: AMMPriceFetcher) {
     this.db = db;
@@ -46,16 +62,38 @@ export class MissedOpportunityTracker {
 
   /** Record a skipped signal — persists immediately so the table is never empty */
   record(signal: Omit<MissedSignal, 'id'>): void {
-    const sig = { ...signal };
+    // Cooldown: don't log the same token+reason more than once per 5 minutes
+    const cooldownKey = `${signal.currency}:${signal.issuer}:${signal.skipReason}`;
+    const lastSeen = this.cooldowns.get(cooldownKey) ?? 0;
+    if (Date.now() - lastSeen < this.COOLDOWN_MS) {
+      debug(`[MissedOpp] Cooldown active for ${decodeCurrency(signal.currency)} (${signal.skipReason})`);
+      return;
+    }
+    this.cooldowns.set(cooldownKey, Date.now());
+
+    // Decode hex currency for readability
+    const sig: MissedSignal = {
+      ...signal,
+      currency: decodeCurrency(signal.currency),
+      rawCurrency: signal.rawCurrency ?? (signal.currency.length === 40 ? signal.currency : undefined),
+    };
     this.pending.push(sig);
     // Write immediately with null gain fields; follow-up will fill them via upsert
     this.db.upsertMissedOpportunity(sig);
-    debug(`[MissedOpp] Skipped ${signal.currency}: ${signal.skipReason} @ ${signal.priceAtSkip}`);
+    debug(`[MissedOpp] Skipped ${sig.currency}: ${sig.skipReason} @ ${sig.priceAtSkip}`);
   }
 
   /** Check all pending signals for price follow-up every 5 minutes */
   private startFollowUpTimer(): void {
     this.timer = setInterval(() => this.runFollowUp(), 5 * 60 * 1000);
+  }
+
+  /** Prune expired cooldown entries to keep memory bounded */
+  private pruneCooldowns(): void {
+    const cutoff = Date.now() - this.COOLDOWN_MS;
+    for (const [key, ts] of this.cooldowns.entries()) {
+      if (ts < cutoff) this.cooldowns.delete(key);
+    }
   }
 
   stop(): void {
@@ -101,5 +139,8 @@ export class MissedOpportunityTracker {
 
     // Prune signals older than 90 min that never got a price
     this.pending = this.pending.filter(s => now - s.skippedAt < 90 * 60 * 1000);
+
+    // Prune stale cooldown entries
+    this.pruneCooldowns();
   }
 }
