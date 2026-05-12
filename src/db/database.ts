@@ -105,20 +105,11 @@ export class Database {
       }
     }
 
-    // Create compatibility views (e.g. tracked_tokens → tokens)
-    for (const viewSql of VIEWS) {
-      try {
-        this.execWithRetry(viewSql);
-      } catch (err) {
-        warn(`Error creating view: ${err}`);
-      }
-    }
-
     // Migrations: add columns that may be missing from older DB files
     const migrations = [
       `ALTER TABLE market_snapshots ADD COLUMN unique_buyers_5m INTEGER DEFAULT 0`,
       `ALTER TABLE market_snapshots ADD COLUMN unique_sellers_5m INTEGER DEFAULT 0`,
-      `ALTER TABLE tracked_tokens ADD COLUMN raw_currency TEXT`,
+      `ALTER TABLE tokens ADD COLUMN raw_currency TEXT`,
       `ALTER TABLE paper_trades ADD COLUMN xrp_returned REAL DEFAULT 0`,
       `ALTER TABLE paper_trades ADD COLUMN trade_profile TEXT`,
       `ALTER TABLE paper_trades ADD COLUMN trade_source TEXT`,
@@ -133,6 +124,17 @@ export class Database {
         this.db.exec(sql);
       } catch {
         // Column already exists — ignore
+      }
+    }
+
+    // Create compatibility views AFTER migrations so all columns exist
+    // DROP first so schema changes (e.g. new columns) are picked up on restart
+    try { this.db.exec(`DROP VIEW IF EXISTS tracked_tokens`); } catch { /* ignore */ }
+    for (const viewSql of VIEWS) {
+      try {
+        this.execWithRetry(viewSql);
+      } catch (err) {
+        warn(`Error creating view: ${err}`);
       }
     }
   }
