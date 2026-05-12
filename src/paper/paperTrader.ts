@@ -51,6 +51,14 @@ export class PaperTrader {
   private totalWinAmount: number = 0;
   private totalLossAmount: number = 0;
 
+  private getPoolXrpReserve(snapshot: MarketSnapshot | null | undefined): number {
+    return snapshot?.poolXrpReserve ?? ((snapshot?.liquidityXRP ?? 0) / 2);
+  }
+
+  private snapshotTrade(trade: PaperTrade): PaperTrade {
+    return { ...trade };
+  }
+
   constructor(config: BotConfig, db: Database) {
     this.config = config;
     this.db = db;
@@ -88,10 +96,10 @@ export class PaperTrader {
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
 
-    // Require minimum liquidity for burst trades — consistent with global LP min (500 XRP)
-    const liquidity = snapshot?.liquidityXRP ?? 0;
-    if (liquidity < 500) {
-      debug(`Burst trade skipped: pool too shallow (${liquidity.toFixed(0)} XRP < 500 XRP)`);
+    // Require minimum XRP-side pool reserve, not total TVL.
+    const poolXrpReserve = this.getPoolXrpReserve(snapshot);
+    if (poolXrpReserve < 500) {
+      debug(`Burst trade skipped: pool too shallow (${poolXrpReserve.toFixed(0)} XRP < 500 XRP)`);
       return null;
     }
 
@@ -132,7 +140,7 @@ export class PaperTrader {
     // Base = minTradeXRP. Multiplier: more wallets + deeper pool = bigger position.
     // Cap at 25 XRP — bursts are unscored, keep risk bounded.
     const uniqueWallets = (snapshot as any).uniqueBuyers5m ?? 0;
-    const tvl = snapshot.liquidityXRP ?? 0;
+    const tvl = snapshot.liquidityXRP ?? (poolXrpReserve * 2);
     const velocityMultiplier = uniqueWallets >= 8 ? 3.0
       : uniqueWallets >= 5 ? 2.0
       : uniqueWallets >= 3 ? 1.5
@@ -194,9 +202,9 @@ export class PaperTrader {
       priceHistory: [entryPrice],
       openedAt: Date.now(),
       tradeProfile: 'burst',
-      profileName: tvl < 500 ? 'LOW_LIQ_PROBE' : 'BURST_SCALP',
+      profileName: poolXrpReserve < 500 ? 'LOW_LIQ_PROBE' : 'BURST_SCALP',
       lastBuySeenAt: Date.now(),
-      liquidityAtEntry: snapshot?.poolXrpReserve ?? tvl / 2,
+      liquidityAtEntry: poolXrpReserve,
       tp1Pct: tpTargets?.tp1,
       tp2Pct: tpTargets?.tp2,
     });
@@ -207,7 +215,7 @@ export class PaperTrader {
     const displayName = token.currency.length === 40
       ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
       : token.currency;
-    info(`🚀 BURST paper trade OPENED: ${displayName} (profile: ${(this.openPositions.get(key) as any)?.profileName ?? '?'}) @ ${entryPrice.toFixed(8)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, pool: ${liquidity.toFixed(0)} XRP`);
+    info(`🚀 BURST paper trade OPENED: ${displayName} (profile: ${(this.openPositions.get(key) as any)?.profileName ?? '?'}) @ ${entryPrice.toFixed(8)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, pool: ${poolXrpReserve.toFixed(0)} XRP`);
     return trade;
   }
 
@@ -354,6 +362,8 @@ export class PaperTrader {
       : '';
     debug(`Position sizing: ${sizeRecommendation.method} | Size: ${tradeSizeXRP.toFixed(2)} XRP${clampNote} | ${sizeRecommendation.reasoning}`);
 
+    const poolXrpReserve = this.getPoolXrpReserve(snapshot);
+
     // Track position
     this.openPositions.set(key, {
       trade,
@@ -367,10 +377,9 @@ export class PaperTrader {
       // Timestamp used to enforce minimum hold time before exits are checked
       openedAt: Date.now(),
       tradeProfile: 'scored',
-      profileName: (snapshot?.poolXrpReserve ?? snapshot?.liquidityXRP ?? 0) / 2 >= 2000
-        ? 'MOMENTUM_RUNNER' : 'BURST_SCALP',
+      profileName: poolXrpReserve >= 2000 ? 'MOMENTUM_RUNNER' : 'BURST_SCALP',
       lastBuySeenAt: Date.now(),
-      liquidityAtEntry: snapshot?.poolXrpReserve ?? (snapshot?.liquidityXRP ?? 0) / 2,
+      liquidityAtEntry: poolXrpReserve,
       tp1Pct: tpTargets?.tp1,
       tp2Pct: tpTargets?.tp2,
     });
@@ -394,11 +403,12 @@ export class PaperTrader {
    * close events when multiple tokens are scanned in the same cycle.
    */
   checkExits(snapshot: MarketSnapshot | null): PaperTrade[] {
-    const closedTrades: PaperTrade[] = [];
+    const tradeEvents: PaperTrade[] = [];
+    const closingTrades: PaperTrade[] = [];
     const keysToClose: { key: string; reason: string }[] = [];
 
     if (!snapshot || !snapshot.priceXRP || snapshot.priceXRP <= 0) {
-      return closedTrades;
+      return tradeEvents;
     }
 
     const currentPrice = snapshot.priceXRP;
@@ -450,7 +460,7 @@ export class PaperTrader {
       ) {
         info(`⚡ Kill switch 1 (no follow-through) for ${key}: ${(msSinceLastBuy/60000).toFixed(1)}m no buys`);
         keysToClose.push({ key, reason: 'kill_no_followthrough' });
-        closedTrades.push(trade);
+        closingTrades.push(trade);
         continue;
       }
 
@@ -462,7 +472,7 @@ export class PaperTrader {
         if (sellBuyRatio >= ks.sellVolumeMultiple && liveSnap.sellVolumeXRP > 10) {
           info(`⚡ Kill switch 2 (sell flood) for ${key}: sell/buy ratio ${sellBuyRatio.toFixed(1)}x`);
           keysToClose.push({ key, reason: 'kill_sell_flood' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
           continue;
         }
       }
@@ -476,7 +486,7 @@ export class PaperTrader {
       ) {
         info(`⚡ Kill switch 3 (liq drop) for ${key}: ${position.liquidityAtEntry.toFixed(0)} → ${currentPool.toFixed(0)} XRP`);
         keysToClose.push({ key, reason: 'kill_liq_drop' });
-        closedTrades.push(trade);
+        closingTrades.push(trade);
         continue;
       }
 
@@ -490,7 +500,7 @@ export class PaperTrader {
         if (burstTimeStopMs > 0 && ageMs >= burstTimeStopMs && trade.remainingPosition > 0) {
           info(`⏱️ Burst time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) gross PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'time_stop' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
           continue;
         }
 
@@ -498,7 +508,7 @@ export class PaperTrader {
         const burstStopPct = -(prof.stopLossPct ?? 12);
         if (pnlPercent <= burstStopPct && trade.remainingPosition > 0) {
           keysToClose.push({ key, reason: 'stop_loss' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
           continue;
         }
 
@@ -517,7 +527,7 @@ export class PaperTrader {
         if (isMomentumDead) {
           info(`🚨 Burst momentum reversal for ${key}: ${buyCount} buys / ${sellCount} sells | PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'sell_pressure_exit' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
           continue;
         }
 
@@ -535,6 +545,7 @@ export class PaperTrader {
           this.partialClose(key, currentPrice, burstTp1Sell, `tp1_+${burstTp1}pct`, snapshot);
           trade.tp1Hit = true;
           this.db.updatePaperTrade(trade);
+          tradeEvents.push(this.snapshotTrade(trade));
         }
 
         // TP2 — partial exit per profile, leaves runner (if any)
@@ -544,10 +555,11 @@ export class PaperTrader {
             this.partialClose(key, currentPrice, burstTp2Sell, `tp2_+${burstTp2}pct`, snapshot);
             trade.tp2Hit = true;
             this.db.updatePaperTrade(trade);
+            tradeEvents.push(this.snapshotTrade(trade));
           } else {
             // No runner — close all remaining
             keysToClose.push({ key, reason: 'take_profit_2' });
-            closedTrades.push(trade);
+            closingTrades.push(trade);
             continue;
           }
         }
@@ -565,7 +577,7 @@ export class PaperTrader {
         if (burstDemandCollapsed) {
           info(`🚨 Burst demand collapse exit for ${key}: ${burstBuys} buys / ${burstSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'sell_pressure_exit' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
           continue;
         }
 
@@ -580,7 +592,7 @@ export class PaperTrader {
           if (currentPrice <= trailThreshold) {
             info(`🚨 Burst trailing stop hit for ${key} | remaining: ${trade.remainingPosition.toFixed(0)}%`);
             keysToClose.push({ key, reason: pnlPercent >= 0 ? 'trailing_stop_profit' : 'trailing_stop_loss' });
-            closedTrades.push(trade);
+            closingTrades.push(trade);
           }
         }
         continue; // skip scored exit logic below
@@ -605,14 +617,14 @@ export class PaperTrader {
       // Check stop loss (dynamic based on volatility)
       if (pnlPercent <= effectiveStopLoss && trade.remainingPosition > 0) {
         keysToClose.push({ key, reason: 'stop_loss' });
-        closedTrades.push(trade);
+        closingTrades.push(trade);
         continue;
       }
 
       // Time stop for scored trades: exit after 90 min if no meaningful gain
       if (ageMs >= 90 * 60 * 1000 && pnlPercent < 5 && trade.remainingPosition > 0) {
         keysToClose.push({ key, reason: 'time_stop_loss' });
-        closedTrades.push(trade);
+        closingTrades.push(trade);
         continue;
       }
 
@@ -629,6 +641,7 @@ export class PaperTrader {
         this.partialClose(key, currentPrice, scoredTp1Sell, 'take_profit_1', snapshot);
         trade.tp1Hit = true;
         this.db.updatePaperTrade(trade);
+        tradeEvents.push(this.snapshotTrade(trade));
       }
 
       // TP2: profile-driven partial exit, leave runner for trailing stop
@@ -638,10 +651,11 @@ export class PaperTrader {
           this.partialClose(key, currentPrice, scoredTp2Sell, 'take_profit_2', snapshot);
           trade.tp2Hit = true;
           this.db.updatePaperTrade(trade);
+          tradeEvents.push(this.snapshotTrade(trade));
         } else {
           // No runner — close all remaining
           keysToClose.push({ key, reason: 'take_profit_2' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
           continue;
         }
       }
@@ -664,7 +678,7 @@ export class PaperTrader {
       if (demandCollapsed) {
         info(`🚨 Scored demand collapse exit for ${key}: ${scoredBuys} buys / ${scoredSells} sells | PnL: ${pnlPercent.toFixed(1)}%`);
         keysToClose.push({ key, reason: 'sell_pressure_exit' });
-        closedTrades.push(trade);
+        closingTrades.push(trade);
         continue;
       }
 
@@ -687,7 +701,7 @@ export class PaperTrader {
       if (deadVolume) {
         info(`💀 Dead volume exit for ${key}: flat at ${pnlPercent.toFixed(1)}% with zero activity for 30m`);
         keysToClose.push({ key, reason: 'dead_volume_exit' });
-        closedTrades.push(trade);
+        closingTrades.push(trade);
         continue;
       }
 
@@ -706,23 +720,25 @@ export class PaperTrader {
         const trailThreshold = position.highestPriceSinceEntry * (1 - trailingDistance);
         if (currentPrice <= trailThreshold) {
           keysToClose.push({ key, reason: pnlPercent >= 0 ? 'trailing_stop_profit' : 'trailing_stop_loss' });
-          closedTrades.push(trade);
+          closingTrades.push(trade);
         }
       }
     }
 
     // Second pass: properly close positions (sets exit price, PnL, fees) then remove
     // Must happen after the iteration loop to avoid mutating the Map mid-loop
-    const finalClosed: PaperTrade[] = [];
     for (const { key, reason } of keysToClose) {
-      this.closePosition(key, currentPrice, reason, snapshot);
-      // closePosition already deleted from openPositions and updated the trade object
-      // retrieve the updated trade from the original closedTrades reference
-      const ref = closedTrades.find(t => `${t.tokenCurrency}:${t.tokenIssuer}` === key);
-      if (ref) finalClosed.push(ref);
+      const closed = this.closePosition(key, currentPrice, reason, snapshot);
+      if (closed) {
+        tradeEvents.push(this.snapshotTrade(closed));
+      } else {
+        // Fallback to the pre-close reference if the position disappeared unexpectedly.
+        const ref = closingTrades.find(t => `${t.tokenCurrency}:${t.tokenIssuer}` === key);
+        if (ref) tradeEvents.push(this.snapshotTrade(ref));
+      }
     }
 
-    return finalClosed;
+    return tradeEvents;
   }
 
   /**
@@ -749,9 +765,9 @@ export class PaperTrader {
     exitPrice: number,
     reason: string,
     snapshot: MarketSnapshot | null
-  ): void {
+  ): PaperTrade | null {
     const position = this.openPositions.get(key);
-    if (!position) return;
+    if (!position) return null;
 
     const trade = position.trade;
     const tokensToSell = position.tokensHeld * (trade.remainingPosition / 100);
@@ -818,6 +834,7 @@ export class PaperTrader {
 
     const action = finalPnlXRP >= 0 ? '✅' : '❌';
     info(`${action} Paper trade CLOSED: ${trade.tokenCurrency} | PnL: ${finalPnlXRP.toFixed(4)} XRP (${finalPnlPercent.toFixed(2)}%) | Reason: ${trade.exitReason}`);
+    return trade;
   }
 
   /**
@@ -872,15 +889,22 @@ export class PaperTrader {
     // Cumulative PnL = total returned - total invested
     trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
     trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
+    trade.lastPartialExitPriceXRP = exitPrice;
+    trade.lastPartialReason = reason;
+    trade.lastPartialSoldPercent = actualPct;
+    trade.lastPartialPnlXRP = parseFloat(legPnlXRP.toFixed(6));
+    trade.lastPartialPnlPercent = parseFloat((costBasisSold > 0 ? (legPnlXRP / costBasisSold) * 100 : 0).toFixed(2));
+    trade.lastPartialXrpReturned = parseFloat(netProceeds.toFixed(6));
 
     // If fully closed, mark as closed
     if (trade.remainingPosition <= 0) {
       trade.exitPriceXRP = exitPrice;
       trade.exitTimestamp = Date.now();
       trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
-      trade.exitReason = reason;
+      trade.exitReason = this.normalizeExitReason(reason, trade.pnlXRP ?? 0);
       trade.status = 'closed';
       this.openPositions.delete(key);
+      this.ammPriceFetcher?.unregisterOpenPosition(trade.tokenCurrency, trade.tokenIssuer);
       this.lastCloseTime.set(key, Date.now());
       this.recordProfileStat(position, trade);
     } else {

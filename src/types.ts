@@ -97,6 +97,13 @@ export interface PaperTrade {
   status: 'open' | 'closed' | 'partial';
   pnlXRP: number | null;
   pnlPercent: number | null;
+  /** Most recent partial-close leg details, used for accurate Telegram TP alerts. */
+  lastPartialExitPriceXRP?: number | null;
+  lastPartialReason?: string | null;
+  lastPartialSoldPercent?: number | null;
+  lastPartialPnlXRP?: number | null;
+  lastPartialPnlPercent?: number | null;
+  lastPartialXrpReturned?: number | null;
   slippageEstimate: number;
   feesPaid: number;
   xrpReturned: number;  // cumulative XRP returned (partial + final closes)

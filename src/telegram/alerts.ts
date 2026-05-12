@@ -32,6 +32,13 @@ function decodeCurrency(raw: string): string {
 }
 
 // Format XRP price — never show more precision than meaningful
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function fmtPrice(xrp: number | null | undefined): string {
   if (xrp == null || isNaN(xrp)) return 'N/A';
   if (xrp >= 1)       return xrp.toFixed(4) + ' XRP';
@@ -142,7 +149,9 @@ export class TelegramAlerter {
       // Include entry timestamp so TP1 partial + later full close are never
       // treated as the same event even if they fire within 10s on the same token.
       const ts = payload.paperTrade?.entryTimestamp ?? Date.now();
-      cdKey = `${payload.type}:${payload.tokenCurrency ?? 'global'}:${ts}`;
+      const eventReason = payload.paperTrade?.lastPartialReason ?? payload.paperTrade?.exitReason ?? 'event';
+      const remaining = payload.paperTrade?.remainingPosition ?? 'na';
+      cdKey = `${payload.type}:${payload.tokenCurrency ?? 'global'}:${ts}:${eventReason}:${remaining}`;
       cdMs  = this.TRADE_COOLDOWN_MS;
     } else {
       cdKey = this.cooldownKey(payload.type, payload.tokenCurrency);
@@ -157,8 +166,8 @@ export class TelegramAlerter {
     // bot_log is plain text — no HTML tags, but may contain special chars that
     // break Telegram's HTML parser (<, >, &). Send without parse_mode.
     const isPlain = payload.type === 'bot_log';
-    await this.send(html, isPlain);
-    this.markSent(cdKey);
+    const sent = await this.send(html, isPlain);
+    if (sent) this.markSent(cdKey);
   }
 
   /** Send pre-formatted HTML (used internally and by TradeExecutor). */
@@ -166,19 +175,46 @@ export class TelegramAlerter {
     await this.send(html);
   }
 
-  private async send(html: string, plainText = false): Promise<void> {
-    if (!this.enabled || !this.bot) return;
+  private splitMessage(message: string, maxLen: number, plainText: boolean): string[] {
+    if (plainText) {
+      const chunks: string[] = [];
+      let remaining = message;
+      while (remaining.length > 0) {
+        chunks.push(remaining.slice(0, maxLen));
+        remaining = remaining.slice(maxLen);
+      }
+      return chunks;
+    }
+
+    const chunks: string[] = [];
+    let current = '';
+    for (const line of message.split('\n')) {
+      const candidate = current ? `${current}\n${line}` : line;
+      if (candidate.length <= maxLen) {
+        current = candidate;
+        continue;
+      }
+      if (current) chunks.push(current);
+      if (line.length <= maxLen) {
+        current = line;
+      } else {
+        for (let i = 0; i < line.length; i += maxLen) chunks.push(line.slice(i, i + maxLen));
+        current = '';
+      }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+  }
+
+  private async send(html: string, plainText = false): Promise<boolean> {
+    if (!this.enabled || !this.bot) return false;
     if (!this.isAllowed(this.chatId)) {
       warn(`Alert blocked — chatId ${this.chatId} not in whitelist`);
-      return;
+      return false;
     }
     const MAX_LEN = 4000; // Telegram hard limit is 4096; keep a safe margin
-    const chunks: string[] = [];
-    let remaining = html;
-    while (remaining.length > 0) {
-      chunks.push(remaining.slice(0, MAX_LEN));
-      remaining = remaining.slice(MAX_LEN);
-    }
+    const chunks = this.splitMessage(html, MAX_LEN, plainText);
+    let allSent = true;
     for (const chunk of chunks) {
       try {
         await this.bot.sendMessage(this.chatId, chunk, {
@@ -186,9 +222,11 @@ export class TelegramAlerter {
           disable_web_page_preview: true,
         });
       } catch (err: any) {
+        allSent = false;
         warn(`Telegram send failed: ${err?.message || err}`);
       }
     }
+    return allSent;
   }
 
   /** Send pre-formatted plain text (no HTML parsing — safe for log output). */
@@ -240,6 +278,7 @@ export class TelegramAlerter {
     if (!t) return '';
 
     const ticker  = decodeCurrency(t.tokenCurrency);
+    const safeTicker = escapeHtml(ticker);
 
     // Profile (new) vs legacy source (fallback)
     const profileName = payload.tradeProfileName ?? t.tradeProfile ?? null;
@@ -259,6 +298,8 @@ export class TelegramAlerter {
     };
     const profileEmoji = PROFILE_EMOJI[profileName ?? ''] ?? '📊';
     const sourceEmoji  = SOURCE_EMOJI[source] ?? '🔔';
+    const safeProfileName = escapeHtml(profileName ?? '—');
+    const safeSource = escapeHtml(source);
 
     // Grab profile thresholds if available
     let tp1Line = '', tp2Line = '', slLine = '', trailLine = '', timeLine = '';
@@ -282,24 +323,29 @@ export class TelegramAlerter {
     // Score display
     const scoreStr = source === 'burst' ? 'burst signal'
       : t.entryScore ? `score ${t.entryScore}/100` : '—';
+    const reasonStr = (t.entryReason ?? '')
+      .replace(/\[BURST\]\s*|\[SCORED\]\s*|\[STREAM\]\s*/g, '')
+      .split('|')
+      .slice(0, 3)
+      .join(' | ');
 
     // Issuer link
-    const link = `https://firstledger.net/token/${t.tokenIssuer}/${t.tokenCurrency}`;
+    const link = `https://firstledger.net/token/${encodeURIComponent(t.tokenIssuer)}/${encodeURIComponent(t.tokenCurrency)}`;
 
     const lines = [
       `${profileEmoji} <b>TRADE OPENED</b>`,
       ``,
-      `<b>Profile:</b> <code>${profileName ?? '—'}</code>  ${sourceEmoji} Source: ${source}`,
-      `<b>Token:</b>   <code>${ticker}</code>`,
+      `<b>Profile:</b> <code>${safeProfileName}</code>  ${sourceEmoji} Source: ${safeSource}`,
+      `<b>Token:</b>   <code>${safeTicker}</code>`,
       `<b>Entry:</b>   ${fmtPrice(t.entryPriceXRP)}`,
       `<b>Size:</b>    ${fmtXRP(t.entryAmountXRP)}`,
       poolXrp != null ? `<b>Pool XRP:</b> ${poolXrp.toFixed(0)} XRP reserve` : null,
-      `<b>Signal:</b>  ${scoreStr}`,
+      `<b>Signal:</b>  ${escapeHtml(scoreStr)}`,
       `<b>Slip:</b>    ${slipPct}%`,
       tp1Line   ? `<b>TPs:</b>    ${tp1Line}` : null,
       slLine    ? `<b>Risk:</b>   ${slLine}` : null,
       timeLine  ? `<b>Time:</b>   ${timeLine}` : null,
-      `<b>Reason:</b>  ${(t.entryReason ?? '').replace(/\[BURST\]\s*|\[SCORED\]\s*|\[STREAM\]\s*/g, '').split('|').slice(0, 3).join(' | ')}`,
+      `<b>Reason:</b>  ${escapeHtml(reasonStr)}`,
       ``,
       `<a href="${link}">FirstLedger ↗</a>`,
     ].filter(Boolean) as string[];
@@ -314,9 +360,12 @@ export class TelegramAlerter {
     if (!t) return '';
 
     const ticker   = decodeCurrency(t.tokenCurrency);
-    const soldPct  = 100 - (t.remainingPosition ?? 100);
-    const xrpSold  = (soldPct / 100) * t.entryAmountXRP;
-    const pnl      = t.pnlXRP ?? null;
+    const safeTicker = escapeHtml(ticker);
+    const soldPct  = t.lastPartialSoldPercent ?? (100 - (t.remainingPosition ?? 100));
+    const xrpSold  = t.lastPartialXrpReturned ?? ((soldPct / 100) * t.entryAmountXRP);
+    const pnl      = t.lastPartialPnlXRP ?? t.pnlXRP ?? null;
+    const pnlPct   = t.lastPartialPnlPercent ?? t.pnlPercent;
+    const exitPrice = t.lastPartialExitPriceXRP ?? t.exitPriceXRP;
 
     // Label partial close correctly — TP1 vs TP2 vs kill-switch partial
     const PARTIAL_REASONS: Record<string, string> = {
@@ -326,18 +375,21 @@ export class TelegramAlerter {
       kill_sell_flood:    '⚡ Kill: sell flood',
       kill_liq_drop:      '⚡ Kill: liquidity dropped',
     };
-    const exitReason = t.exitReason ?? '';
+    const exitReason = t.lastPartialReason ?? t.exitReason ?? '';
     const reasonLabel = PARTIAL_REASONS[exitReason]
-      ?? (exitReason ? exitReason.replace(/_/g, ' ') : 'Partial close');
+      ?? (exitReason.startsWith('tp1_+') ? `🎯 TP1 HIT (${exitReason.replace('tp1_', '+')})`
+        : exitReason.startsWith('tp2_+') ? `🎯 TP2 HIT (${exitReason.replace('tp2_', '+')})`
+          : exitReason ? exitReason.replace(/_/g, ' ') : 'Partial close');
+    const safeReasonLabel = escapeHtml(reasonLabel);
 
     return [
-      `🔶 <b>PARTIAL CLOSE — ${reasonLabel}</b>`,
+      `🔶 <b>PARTIAL CLOSE — ${safeReasonLabel}</b>`,
       ``,
-      `<b>Token:</b>      <code>${ticker}</code>`,
+      `<b>Token:</b>      <code>${safeTicker}</code>`,
       `<b>Sold:</b>       ${soldPct.toFixed(0)}% (~${fmtXRP(xrpSold)})`,
       `<b>Remaining:</b>  ${(t.remainingPosition ?? 0).toFixed(0)}% still open`,
-      `<b>Exit price:</b> ${fmtPrice(t.exitPriceXRP)}`,
-      `${pnlEmoji(pnl)} <b>P&L so far:</b> ${fmtXRP(pnl)} (${fmtPct(t.pnlPercent)})`,
+      `<b>Exit price:</b> ${fmtPrice(exitPrice)}`,
+      `${pnlEmoji(pnl)} <b>Leg P&L:</b> ${fmtXRP(pnl)} (${fmtPct(pnlPct)})`,
       `<b>TP1:</b> ${t.tp1Hit ? '✅ hit' : '⬜ pending'}  <b>TP2:</b> ${t.tp2Hit ? '✅ hit' : '⬜ pending'}`,
     ].join('\n');
   }
@@ -349,6 +401,7 @@ export class TelegramAlerter {
     if (!t) return '';
 
     const ticker = decodeCurrency(t.tokenCurrency);
+    const safeTicker = escapeHtml(ticker);
 
     // Use cumulative xrpReturned (includes all partial + final proceeds)
     const returned = (t.xrpReturned != null && t.xrpReturned > 0) ? t.xrpReturned : null;
@@ -386,6 +439,7 @@ export class TelegramAlerter {
     const reason = t.exitReason
       ? (EXIT_REASONS[t.exitReason] || t.exitReason.replace(/_/g, ' '))
       : 'Unknown';
+    const safeReason = escapeHtml(reason);
 
     const win = (pnlXRP ?? 0) >= 0;
 
@@ -405,8 +459,8 @@ export class TelegramAlerter {
     return [
       `${win ? '✅' : '❌'} <b>TRADE CLOSED — ${win ? 'WIN' : 'LOSS'}</b>`,
       ``,
-      `<b>Token:</b>      <code>${ticker}</code>`,
-      `<b>Reason:</b>     ${reason}`,
+      `<b>Token:</b>      <code>${safeTicker}</code>`,
+      `<b>Reason:</b>     ${safeReason}`,
       legsLine ? `<b>Legs:</b>       ${legsLine}` : null,
       ``,
       `<b>Entry:</b>      ${fmtPrice(t.entryPriceXRP)}`,
