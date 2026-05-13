@@ -41,6 +41,7 @@ const MOVE_THRESHOLDS = [10, 25, 50, 100];
 function emptyCounters(): Record<string, number> {
   return {
     xrplTxReceived: 0,
+    xrplRelevantTxReceived: 0,
     offerCreateTx: 0,
     paymentTx: 0,
     ammTx: 0,
@@ -72,8 +73,12 @@ export class DiagnosticsService {
   private seen = new Map<string, SeenToken>();
   private missedMovers: MissedMoverExample[] = [];
 
-  recordTx(tx: any): void {
+  recordRawTx(): void {
     this.counters.xrplTxReceived++;
+  }
+
+  recordTx(tx: any): void {
+    this.counters.xrplRelevantTxReceived++;
     const t = tx?.tx_json || tx?.tx || tx?.transaction || tx;
     const txType = t?.TransactionType;
     if (txType === 'OfferCreate') this.counters.offerCreateTx++;
@@ -89,7 +94,9 @@ export class DiagnosticsService {
     const debugMode = (process.env.LOG_LEVEL || '').toLowerCase() === 'debug';
     if (!debugMode && this.detailLogCount >= DETAIL_CAP) return;
     this.detailLogCount++;
-    debug(`[DiagToken] ${diag.source} ${diag.token}:${diag.issuer} reason=${diag.reason} pool=${diag.poolXrpReserve ?? 'n/a'} vol=${diag.buyVolumeXRP ?? 'n/a'} buyers=${diag.uniqueBuyers ?? 'n/a'}`);
+    const line = `[DiagToken] ${diag.source} ${diag.token}:${diag.issuer} reason=${diag.reason} pool=${diag.poolXrpReserve ?? 'n/a'} vol=${diag.buyVolumeXRP ?? 'n/a'} buyers=${diag.uniqueBuyers ?? 'n/a'}`;
+    if (debugMode) debug(line);
+    else info(line);
   }
 
   recordSignal(signal: Omit<SeenToken, 'firstSeenAt' | 'openedTrade' | 'thresholdsHit'>): void {
@@ -180,6 +187,13 @@ export class DiagnosticsService {
     }
   }
 
+  private escapeHtml(value: unknown): string {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
+
   formatHourlySummary(): string {
     const elapsedMin = Math.max(1, Math.round((Date.now() - this.windowStartedAt) / 60000));
     const topReasons = [...this.tdeRejectReasons.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5);
@@ -190,7 +204,7 @@ export class DiagnosticsService {
 
     const lines = [
       `🧭 <b>DIAGNOSTICS (${elapsedMin}m)</b>`,
-      `<b>XRPL:</b> tx ${this.counters.xrplTxReceived} | OfferCreate ${this.counters.offerCreateTx} | Payment ${this.counters.paymentTx} | AMM ${this.counters.ammTx}`,
+      `<b>XRPL:</b> raw ${this.counters.xrplTxReceived} | relevant ${this.counters.xrplRelevantTxReceived} | OfferCreate ${this.counters.offerCreateTx} | Payment ${this.counters.paymentTx} | AMM ${this.counters.ammTx}`,
       `<b>Queue:</b> dropped ${this.counters.queueDroppedTx} | reconnects ${this.counters.reconnects}`,
       `<b>Discovery:</b> AMM pools ${this.counters.ammPoolsDiscovered}`,
       `<b>Burst:</b> seen ${this.counters.burstCandidatesSeen} | no AMM ${this.counters.burstRejectedNoAmm} | pool small ${this.counters.burstRejectedPoolTooSmall} | cooldown ${this.counters.burstRejectedCooldown} | approved ${this.counters.burstApproved} | opened ${this.counters.burstTradesOpened}`,
@@ -200,7 +214,7 @@ export class DiagnosticsService {
     ];
     if (topMovers.length === 0) lines.push('none');
     for (const m of topMovers) {
-      lines.push(`• ${m.token} +${m.movePct.toFixed(1)}% (${m.source}) reject=${m.lastRejectReason || 'n/a'} pool=${m.poolXrpReserve?.toFixed?.(0) ?? 'n/a'} XRP vol=${m.buyVolumeXRP?.toFixed?.(0) ?? 'n/a'} buyers=${m.uniqueBuyers ?? 'n/a'}`);
+      lines.push(`• ${this.escapeHtml(m.token)} +${m.movePct.toFixed(1)}% (${m.source}) reject=${this.escapeHtml(m.lastRejectReason || 'n/a')} pool=${m.poolXrpReserve?.toFixed?.(0) ?? 'n/a'} XRP vol=${m.buyVolumeXRP?.toFixed?.(0) ?? 'n/a'} buyers=${m.uniqueBuyers ?? 'n/a'}`);
     }
     return lines.join('\n');
   }
