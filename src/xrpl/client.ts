@@ -4,6 +4,7 @@
 
 import { Client, LedgerStream } from 'xrpl';
 import { info, error, warn, debug } from '../utils/logger';
+import { diagnostics } from '../diagnostics/diagnostics';
 
 export class XRPLClient {
   private client: Client | null = null;
@@ -134,9 +135,11 @@ export class XRPLClient {
 
       this.client.on('transaction', (tx) => {
         this.rawTxCount++; // count every raw tx before filtering
+        diagnostics.recordRawTx();
         // Drop irrelevant transactions before they reach the queue
         if (this.txHandler && XRPLClient.isRelevant(tx)) {
           this.filteredTxCount++;
+          diagnostics.recordTx(tx);
           this.txHandler(tx);
         }
       });
