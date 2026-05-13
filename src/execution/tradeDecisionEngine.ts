@@ -25,6 +25,7 @@ import {
   calcProfileSize,
   estimateRoundTripLossPct,
 } from './tradeProfiles';
+import { diagnostics } from '../diagnostics/diagnostics';
 
 export type DecisionOutcome = 'APPROVED' | 'REJECTED' | 'DRY_RUN';
 
@@ -73,40 +74,42 @@ export class TradeDecisionEngine {
 
   async decide(input: DecisionInput): Promise<DecisionResult> {
     const profile = this.selectProfile(input);
+    const reject = (sizeXRP: number, slippage: number, reason: string): DecisionResult =>
+      this.reject(input.signalType, profile, sizeXRP, slippage, reason);
 
     // ── 1. Blocklist checks ────────────────────────────────────────────────
     const decodedCurrency = this.decodeCurrency(input.rawCurrency || input.currency);
     if (input.blocklist.has(input.currency) || input.blocklist.has(decodedCurrency)) {
-      return this.reject(profile, 0, 0, `Token blocklisted: ${input.currency}`);
+      return reject(0, 0, `Token blocklisted: ${input.currency}`);
     }
 
     // ── 2. Duplicate trade guard ───────────────────────────────────────────
     const posKey = `${input.currency}:${input.issuer}`;
     if (input.openPositionKeys.has(posKey)) {
-      return this.reject(profile, 0, 0, `Already have open position: ${posKey}`);
+      return reject(0, 0, `Already have open position: ${posKey}`);
     }
 
     // ── 3. Open position cap ───────────────────────────────────────────────
     if (input.openPositions >= this.config.maxOpenTrades) {
-      return this.reject(profile, 0, 0, `Max open trades (${this.config.maxOpenTrades}) reached`);
+      return reject(0, 0, `Max open trades (${this.config.maxOpenTrades}) reached`);
     }
 
     // ── 4. Daily loss limit ────────────────────────────────────────────────
     if (input.dailyPnL <= -this.config.maxDailyLossXRP) {
-      return this.reject(profile, 0, 0, `Daily loss limit hit (${input.dailyPnL.toFixed(2)} XRP)`);
+      return reject(0, 0, `Daily loss limit hit (${input.dailyPnL.toFixed(2)} XRP)`);
     }
 
     // ── 5. Price / liquidity sanity ────────────────────────────────────────
     const priceXRP = input.snapshot.priceXRP;
     if (!priceXRP || priceXRP <= 0) {
-      return this.reject(profile, 0, 0, 'No valid price');
+      return reject(0, 0, 'No valid price');
     }
     // Reject tokens with suspiciously round/extreme prices that indicate a
     // misconfigured or USDC-denominated pool — these cause force_close_no_price.
     // A real meme token at exactly 0.00000000 XRP is a dead pool.
     const priceStr = priceXRP.toFixed(8);
     if (priceStr === '0.00000000') {
-      return this.reject(profile, 0, 0, 'Zero-price token (dead/misconfigured pool)');
+      return reject(0, 0, 'Zero-price token (dead/misconfigured pool)');
     }
 
     const poolXrpReserve = input.snapshot.poolXrpReserve
@@ -121,7 +124,7 @@ export class TradeDecisionEngine {
       : profile.minPoolXrpReserve;
 
     if (poolXrpReserve < effectiveMinPool) {
-      return this.reject(profile, 0, 0,
+      return reject(0, 0,
         `Pool too shallow: ${poolXrpReserve.toFixed(0)} XRP < ${effectiveMinPool.toFixed(0)} XRP`);
     }
 
@@ -129,26 +132,26 @@ export class TradeDecisionEngine {
     const sizeXRP = calcProfileSize(profile, poolXrpReserve, input.bankrollXRP);
 
     if (sizeXRP < this.config.minTradeXRP) {
-      return this.reject(profile, sizeXRP, 0,
+      return reject(sizeXRP, 0,
         `Size too small: ${sizeXRP.toFixed(2)} XRP < minTradeXRP ${this.config.minTradeXRP}`);
     }
 
     if (input.bankrollXRP < sizeXRP) {
-      return this.reject(profile, sizeXRP, 0,
+      return reject(sizeXRP, 0,
         `Insufficient bankroll: ${input.bankrollXRP.toFixed(2)} XRP < ${sizeXRP.toFixed(2)} XRP`);
     }
 
     // ── 7. Slippage check (uses poolXrpReserve, not TVL) ──────────────────
     const slippage = sizeXRP / (poolXrpReserve + sizeXRP); // CPMM formula
     if (slippage > profile.maxSlippage) {
-      return this.reject(profile, sizeXRP, slippage,
+      return reject(sizeXRP, slippage,
         `Slippage too high: ${(slippage * 100).toFixed(2)}% > ${(profile.maxSlippage * 100).toFixed(1)}%`);
     }
 
     // ── 8. Round-trip loss check ───────────────────────────────────────────
     const roundTripLossPct = estimateRoundTripLossPct(slippage);
     if (roundTripLossPct > profile.maxRoundTripLossPct) {
-      return this.reject(profile, sizeXRP, slippage,
+      return reject(sizeXRP, slippage,
         `Round-trip loss too high: ${roundTripLossPct.toFixed(2)}% > ${profile.maxRoundTripLossPct}%`);
     }
 
@@ -165,7 +168,7 @@ export class TradeDecisionEngine {
     // ── 10. LIVE preflight ─────────────────────────────────────────────────
     const liveChecks = await this.runLivePreflight(input, sizeXRP, slippage);
     if (!liveChecks.ok) {
-      return this.reject(profile, sizeXRP, slippage, `Live preflight failed: ${liveChecks.reason}`);
+      return reject(sizeXRP, slippage, `Live preflight failed: ${liveChecks.reason}`);
     }
 
     info(`[TDE] APPROVED LIVE: ${posKey} profile=${profile.name} size=${sizeXRP.toFixed(2)} slip=${(slippage*100).toFixed(2)}%`);
@@ -387,12 +390,14 @@ export class TradeDecisionEngine {
   // ── Helpers ────────────────────────────────────────────────────────────────
 
   private reject(
+    signalType: DecisionInput['signalType'] | undefined,
     profile: TradeProfile,
     sizeXRP: number,
     slippage: number,
     reason: string
   ): DecisionResult {
     debug(`[TDE] REJECTED: ${reason}`);
+    diagnostics.recordTdeReject(reason, signalType);
     return { outcome: 'REJECTED', profile, sizeXRP, slippage, roundTripLossPct: 0, rejectReason: reason };
   }
 
