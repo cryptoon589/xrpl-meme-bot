@@ -189,7 +189,9 @@ export class BuyPressureTracker {
       const lastFire = this.momentumCooldown.get(key) ?? 0;
       if (Date.now() - lastFire > 5 * 60 * 1000) { // 5 min cooldown per token
         const snap = this.getSnapshot(currency, issuer);
-        if (snap.uniqueBuyers >= 3 && snap.buySellRatio >= 0.70 && snap.buyVolumeXRP >= 100) {
+        // Lowered: 100 XRP fired too late (move already over). 40 XRP catches early legs.
+        // uniqueBuyers 3→2: 2 distinct wallets is sufficient signal for meme pumps.
+        if (snap.uniqueBuyers >= 2 && snap.buySellRatio >= 0.65 && snap.buyVolumeXRP >= 40) {
           this.momentumCooldown.set(key, Date.now());
           this.onMomentumDetected(currency, issuer, snap);
         }

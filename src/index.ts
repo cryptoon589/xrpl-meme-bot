@@ -44,6 +44,7 @@ import { RuntimeLearning } from './analysis/runtimeLearning';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
 import { MissedOpportunityTracker } from './market/missedOpportunityTracker';
+import { diagnostics } from './diagnostics/diagnostics';
 
 // Global state
 let isRunning = false;
@@ -188,6 +189,8 @@ async function main() {
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
     burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP) => {
+      diagnostics.increment('burstCandidatesSeen');
+      diagnostics.recordSignal({ token: decodeCurrency(rawCurrency || currency), issuer, source: 'burst', reason: 'burst_detected', priceAtSignal: priceXRP, poolXrpReserve: poolTVL / 2, rawCurrency });
       // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
       const poolXrpReserve = poolTVL / 2;
       if (isBlocklistedToken(currency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
@@ -196,6 +199,7 @@ async function main() {
       const noPriceCooldownTs = noPriceCooldowns.get(burstKey);
       if (noPriceCooldownTs && Date.now() - noPriceCooldownTs < NO_PRICE_COOLDOWN_MS) {
         debug(`Burst skipped — no-price cooldown active: ${currency}`);
+        diagnostics.increment('burstRejectedCooldown');
         return;
       }
       if (tradeLocks.has(burstKey)) { debug(`Burst skipped — lock held: ${burstKey}`); return; }
@@ -231,9 +235,12 @@ async function main() {
       }).then(decision => {
         if (decision.outcome === 'REJECTED') {
           info(`[TDE] Burst rejected: ${decision.rejectReason}`);
+          diagnostics.recordTdeReject(decision.rejectReason, 'burst');
+          if (decision.rejectReason?.includes('shallow')) diagnostics.increment('burstRejectedPoolTooSmall');
           tradeLocks.delete(burstKey);
           return;
         }
+        diagnostics.increment('burstApproved');
         const burstTp = runtimeLearning.getTpTargets('burst');
         // Use the price burstDetector already fetched — it's fresh from the ledger.
         // The previous second ammPriceFetcher.getPrice() call here added 100-300ms
@@ -251,6 +258,7 @@ async function main() {
             trade.tradeProfile = decision.profile.name;
             trade.tradeSource  = 'burst';
             db.updatePaperTrade(trade);
+            diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'burst');
             setTimeout(() => sendAlert(telegramAlerter, db, {
               type: 'paper_trade_opened',
               tokenCurrency: currency, tokenIssuer: issuer,
@@ -274,19 +282,27 @@ async function main() {
     paperTrader.setAMMPriceFetcher(ammPriceFetcher);
 
     buyPressureTracker.onMomentumDetected = (currency, issuer, snap) => {
-      const momentumKey = `${currency}:${issuer}`;
+      // Decode hex currency immediately — all downstream keys use decoded form
+      const displayCurrency = decodeCurrency(currency);
+      const momentumKey = `${displayCurrency}:${issuer}`;
       if (isBlocklistedToken(currency)) return;
-      if (paperTrader!.hasOpenPosition(currency, issuer)) return;
+      // noPriceCooldown check (was missing from stream path — burst+scored had it)
+      const npStreamTs = noPriceCooldowns.get(momentumKey);
+      if (npStreamTs && Date.now() - npStreamTs < NO_PRICE_COOLDOWN_MS) {
+        debug(`Stream skipped — no-price cooldown: ${displayCurrency}`);
+        return;
+      }
+      // Use decoded key for position checks to match how tryOpenTrade stores positions
+      if (paperTrader!.hasOpenPosition(displayCurrency, issuer)) return;
       // Belt-and-suspenders: also check tradeExecutor positions (real trades) to prevent cross-path duplicates
-      if (tradeExecutor && tradeExecutor.hasOpenPosition(currency, issuer)) return;
+      if (tradeExecutor && tradeExecutor.hasOpenPosition(displayCurrency, issuer)) return;
       if (tradeLocks.has(momentumKey)) return;
       tradeLocks.add(momentumKey);
 
+      diagnostics.increment('streamMomentumCandidatesSeen');
+      diagnostics.recordSignal({ token: displayCurrency, issuer, source: 'stream', reason: 'momentum_detected', priceAtSignal: snap.buyVolumeXRP, poolXrpReserve: null, buyVolumeXRP: snap.buyVolumeXRP, uniqueBuyers: snap.uniqueBuyers });
       ammPriceFetcher.getPrice(currency, issuer).then(async ammPrice => {
         if (!ammPrice?.priceXRP) { tradeLocks.delete(momentumKey); return; }
-
-        // Decode hex currency for display — BuyPressureTracker keys use raw hex
-        const displayCurrency = decodeCurrency(currency);
 
         // Check whale presence in stream buyers
         const streamBestWR = whaleTracker.getBestWhaleWinRate(snap.buyerWallets ?? []);
@@ -322,9 +338,11 @@ async function main() {
         });
         if (decision.outcome === 'REJECTED') {
           info(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
+          diagnostics.recordTdeReject(decision.rejectReason, 'stream');
           tradeLocks.delete(momentumKey);
           return;
         }
+        diagnostics.increment('streamApproved');
 
         // Use decoded name for token.currency so DB and logs show human-readable name
         const token = { currency: displayCurrency, issuer, rawCurrency: currency, lastUpdated: Date.now() } as any;
@@ -339,6 +357,7 @@ async function main() {
           trade.tradeProfile = decision.profile.name;
           trade.tradeSource  = 'stream';
           db.updatePaperTrade(trade);
+          diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'stream');
           setTimeout(() => sendAlert(telegramAlerter, db, {
             type: 'paper_trade_opened',
             tokenCurrency: displayCurrency, tokenIssuer: issuer,
@@ -964,12 +983,22 @@ function startPeriodicScan(
             const newMoneyIn   = pressure.newWalletBuys >= 1;            // fresh wallets entering
             const liquidOk     = (snapshot.liquidityXRP ?? 0) >= config.minLiquidityXRP;
 
+            // For tokens with no price history yet (< 2 scans), priceChange5m/15m will be null/0.
+            // Fall back to live buy pressure signals so new tokens aren't blocked by missing history.
+            const hasNoPriceHistory = snapshot.priceChange5m == null && snapshot.priceChange15m == null;
+            // Volume-only entry: strong live pressure with no history = likely a new token pumping
+            const volumeOnlyEntry   = hasNoPriceHistory
+              && pressure.buyVolumeXRP >= 60
+              && pressure.buySellRatio >= 0.65
+              && pressure.uniqueBuyers >= 2
+              && liquidOk;
+
             // Need at least 2 of the 4 momentum signals + buys dominating + liquidity ok
             const momentumSignals = [priceUp5m, priceUp15m, volumeSpike, newMoneyIn].filter(Boolean).length;
-            const momentumEntry = momentumSignals >= 2 && buyDominated && liquidOk;
+            const momentumEntry = (momentumSignals >= 2 && buyDominated && liquidOk) || volumeOnlyEntry;
 
             // Track near-miss signals for missed opportunity analysis
-            if (!momentumEntry && momentumSignals >= 1 && snapshot.priceXRP && snapshot.liquidityXRP) {
+            if (!momentumEntry && (momentumSignals >= 1 || hasNoPriceHistory) && snapshot.priceXRP && snapshot.liquidityXRP) {
               missedOpportunityTracker.record({
                 currency: token.currency,
                 issuer: token.issuer,
@@ -1014,6 +1043,7 @@ function startPeriodicScan(
               }).then(decision => {
                 if (decision.outcome === 'REJECTED') {
                   info(`[TDE] Scored rejected: ${decision.rejectReason}`);
+                  diagnostics.recordTdeReject(decision.rejectReason, 'scored');
                   tradeLocks.delete(tradeKey);
                   return;
                 }
@@ -1028,6 +1058,7 @@ function startPeriodicScan(
                   trade.tradeProfile = decision.profile.name;
                   trade.tradeSource  = 'scored';
                   db.updatePaperTrade(trade);
+                  diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'scored');
                   setTimeout(() => sendAlert(telegramAlerter, db, {
                     type: 'paper_trade_opened',
                     tokenCurrency: token.currency, tokenIssuer: token.issuer,
@@ -1251,6 +1282,19 @@ function startPeriodicScan(
       type: 'open_positions_update',
       message: lines.join('\n'),
     });
+
+    // ── Diagnostics report ──────────────────────────────────────────────
+    try {
+      await diagnostics.refreshMissedMovers(async (token) => {
+        const p = await ammPriceFetcher.getPrice(
+          token.rawCurrency || token.token, token.issuer, token.rawCurrency
+        ).catch(() => null);
+        return p?.priceXRP ?? null;
+      });
+    } catch { /* non-critical */ }
+    const diagMsg = diagnostics.formatHourlySummary();
+    diagnostics.resetHourly();
+    sendAlert(telegramAlerter, db, { type: 'open_positions_update', message: diagMsg }, config);
   }, 3600000);
   // ── Trade analysis cron: runs every 6h ────────────────────────────
   const tradeAnalyzer = new TradeAnalyzer(db);
