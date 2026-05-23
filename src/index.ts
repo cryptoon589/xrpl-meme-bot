@@ -1430,8 +1430,8 @@ function startHealthCheck(
     // Detect silent stream death (connected flag = true but no data)
     if (streamAgeMs > STALE_STREAM_MS && streamAgeMs !== -1) {
       warn(`⚠️  Health: WS stream STALE — last tx ${Math.round(streamAgeMs/1000)}s ago (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
-      // Trigger reconnect by disconnecting — client auto-reconnects
-      xrplClient.getClient()?.disconnect().catch(() => {});
+      // Use forceReconnect() which properly tears down state and re-subscribes
+      xrplClient.forceReconnect().catch((e: any) => warn(`forceReconnect error: ${e}`));
       return;
     }
 

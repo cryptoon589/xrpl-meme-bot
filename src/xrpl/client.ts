@@ -39,6 +39,13 @@ export class XRPLClient {
       this.reconnectAttempts = 0;
       info('Connected to XRPL successfully');
 
+      // Wire disconnect event — this is what drives auto-reconnect.
+      // Must be registered on EVERY new Client instance (re-registered on each reconnect).
+      this.client.on('disconnected', (code: number) => {
+        warn(`XRPL WebSocket disconnected (code ${code}) — triggering reconnect`);
+        this.handleDisconnect();
+      });
+
       // Get server info
       const serverInfo = await this.client.request({ command: 'server_info' });
       const completeLedgers = serverInfo.result.info.complete_ledgers;
@@ -322,6 +329,30 @@ export class XRPLClient {
       } catch (err) {
         error(`Error during disconnect: ${err}`);
       }
+    }
+  }
+
+  /**
+   * Force a full reconnect cycle (used by health-check stale-stream recovery).
+   * Tears down the current client so the 'disconnected' event fires and
+   * handleDisconnect() can do its backoff+resubscribe loop.
+   */
+  async forceReconnect(): Promise<void> {
+    warn('forceReconnect() called — tearing down current connection');
+    this.isConnected = false;
+    if (this.client) {
+      try { await this.client.disconnect(); } catch { /* ignore */ }
+      this.client = null;
+    }
+    // Kick off a fresh connect attempt immediately (no backoff on manual trigger)
+    try {
+      await this.connect();
+      info('forceReconnect: reconnected successfully');
+      if (this.ledgerHandler) await this.subscribeLedger(this.ledgerHandler);
+      if (this.txHandler)     await this.subscribeTransactions(this.txHandler);
+    } catch (err) {
+      error(`forceReconnect: initial attempt failed (${err}), backoff loop will continue`);
+      this.handleDisconnect();
     }
   }
 
