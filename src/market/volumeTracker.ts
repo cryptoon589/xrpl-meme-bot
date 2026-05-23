@@ -23,7 +23,7 @@ export class VolumeTracker {
    * Process a transaction and update volume stats
    */
   processTransaction(tx: any): void {
-    const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+    const txType = (tx.tx_json || tx.tx || tx.transaction)?.TransactionType;
     if (!txType) return;
 
     if (txType === 'Payment') {

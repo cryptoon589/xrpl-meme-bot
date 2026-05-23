@@ -34,7 +34,7 @@ export class AMMScanner {
    */
   async processTransaction(tx: any): Promise<{ type: string; pool?: AMMPool } | null> {
     try {
-      const txType = tx.tx?.TransactionType || tx.transaction?.TransactionType;
+      const txType = (tx.tx_json || tx.tx || tx.transaction)?.TransactionType;
       if (!txType) return null;
 
       switch (txType) {
