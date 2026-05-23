@@ -189,7 +189,7 @@ export class Database {
             WHERE timestamp > ?
           )
           AND currency NOT IN (
-            SELECT DISTINCT token_currency FROM trades
+            SELECT DISTINCT token_currency FROM paper_trades
             WHERE status = 'open'
           )
       `).run(cutoff, cutoff) as any;

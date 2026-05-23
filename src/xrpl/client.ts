@@ -13,6 +13,7 @@ export class XRPLClient {
   private maxReconnectAttempts = Infinity; // never give up — PM2 handles fatal crashes
   private reconnectDelay = 5000; // 5 seconds base, doubles each attempt up to 60s
   private isConnected = false;
+  private isReconnecting = false; // guard: prevent overlapping reconnect attempts
   private rawTxCount = 0;   // all raw txs from WS
   private filteredTxCount = 0; // txs that passed isRelevant filter
   private lastLedgerAt = 0;  // timestamp of last ledger_closed event
@@ -46,10 +47,14 @@ export class XRPLClient {
         this.handleDisconnect();
       });
 
-      // Get server info
-      const serverInfo = await this.client.request({ command: 'server_info' });
-      const completeLedgers = serverInfo.result.info.complete_ledgers;
-      info(`XRPL Server: ${typeof completeLedgers === 'string' ? completeLedgers : JSON.stringify(completeLedgers)} ledgers`);
+      // Get server info — informational only, never crash on failure
+      try {
+        const serverInfo = await this.client.request({ command: 'server_info' });
+        const completeLedgers = serverInfo.result.info.complete_ledgers;
+        info(`XRPL Server: ${typeof completeLedgers === 'string' ? completeLedgers : JSON.stringify(completeLedgers)} ledgers`);
+      } catch (siErr) {
+        warn(`server_info failed (non-fatal): ${siErr}`);
+      }
 
       return this.client;
     } catch (err) {
@@ -340,6 +345,7 @@ export class XRPLClient {
   async forceReconnect(): Promise<void> {
     warn('forceReconnect() called — tearing down current connection');
     this.isConnected = false;
+    this.isReconnecting = false; // reset so handleDisconnect can take over if needed
     if (this.client) {
       try { await this.client.disconnect(); } catch { /* ignore */ }
       this.client = null;
@@ -361,6 +367,12 @@ export class XRPLClient {
    * FIX #10: Added exponential backoff with jitter and max delay cap
    */
   private async handleDisconnect(): Promise<void> {
+    // Guard: if already reconnecting, don't stack another attempt
+    if (this.isReconnecting) {
+      debug('handleDisconnect called but reconnect already in progress — ignoring');
+      return;
+    }
+    this.isReconnecting = true;
     this.isConnected = false;
     warn('XRPL connection lost');
 
@@ -378,6 +390,7 @@ export class XRPLClient {
         await this.connect();
         info('Reconnected successfully');
         this.reconnectAttempts = 0;
+        this.isReconnecting = false; // clear guard on success
 
         // Re-subscribe if handlers exist
         if (this.ledgerHandler) {
@@ -388,6 +401,7 @@ export class XRPLClient {
         }
       } catch (err) {
         error(`Reconnection attempt ${this.reconnectAttempts} failed: ${err}`);
+        this.isReconnecting = false; // clear guard so next attempt can proceed
         this.handleDisconnect(); // keep retrying
       }
     }, delay);
