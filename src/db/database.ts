@@ -119,6 +119,30 @@ export class Database {
       // whale_wallets and execution_validation are created via SCHEMA (CREATE TABLE IF NOT EXISTS)
       // so no ALTER TABLE needed; these are no-op guards for idempotency
     ];
+
+    // FIX #26: Clean up historical trades where xrp_returned=0 but pnl_xrp is wildly wrong.
+    // These are pre-migration artifacts from before the xrp_returned column existed.
+    // Any closed trade with xrp_returned=0 that isn't already force_close_no_price
+    // had its PnL calculated from stale/zero entry price data — reclassify as ghost.
+    const dataFixMigrations = [
+      `UPDATE paper_trades
+       SET exit_reason = 'force_close_no_price',
+           pnl_xrp = -entry_amount_xrp,
+           pnl_percent = -100.0
+       WHERE status = 'closed'
+         AND (xrp_returned IS NULL OR xrp_returned = 0)
+         AND exit_reason != 'force_close_no_price'`,
+    ];
+    for (const sql of dataFixMigrations) {
+      try {
+        const result = this.db.prepare(sql).run();
+        if (result.changes > 0) {
+          info(`FIX #26 data migration: reclassified ${result.changes} zero-return trade(s) as force_close_no_price`);
+        }
+      } catch (err) {
+        warn(`FIX #26 data migration error: ${err}`);
+      }
+    }
     for (const sql of migrations) {
       try {
         this.db.exec(sql);

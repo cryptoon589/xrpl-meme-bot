@@ -773,7 +773,8 @@ export class PaperTrader {
     const tokensToSell = position.tokensHeld * (trade.remainingPosition / 100);
 
     // force_close_no_price: no real trade occurred — return entry cost, zero fees/slippage
-    const isGhostClose = reason === 'force_close_no_price';
+    // FIX #26: Also treat zero-price exits as ghosts to prevent fantasy PnL calculations
+    const isGhostClose = reason === 'force_close_no_price' || exitPrice <= 0;
 
     // FIX #25: Estimate slippage based on trade value relative to liquidity
     const tradeValueXRP = tokensToSell * exitPrice;
@@ -799,7 +800,9 @@ export class PaperTrader {
     // pnlXRP = total returned - total invested (accurate across all legs)
     trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
     trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
-    trade.exitReason = this.normalizeExitReason(reason, trade.pnlXRP);
+    // FIX #26: If this was promoted to a ghost close due to zero price, override reason
+    const effectiveReason = isGhostClose && reason !== 'force_close_no_price' ? 'force_close_no_price' : reason;
+    trade.exitReason = this.normalizeExitReason(effectiveReason, trade.pnlXRP);
     trade.feesPaid += fees;
     trade.remainingPosition = 0;
 
