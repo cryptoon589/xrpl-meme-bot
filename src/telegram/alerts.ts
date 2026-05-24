@@ -292,6 +292,7 @@ export class TelegramAlerter {
       BURST_SCALP:     '🚀',
       MOMENTUM_RUNNER: '📈',
       WAKEUP_TRADE:    '⏰',
+      NEW_LAUNCH:      '🆕',
     };
     const SOURCE_EMOJI: Record<string, string> = {
       burst: '💥', scored: '🎯', stream: '⚡', wakeup: '⏰',
