@@ -827,14 +827,23 @@ export class PaperTrader {
     const tokensToSell = position.tokensHeld * (trade.remainingPosition / 100);
 
     // force_close_no_price: no real trade occurred — return entry cost, zero fees/slippage
-    // FIX #26: Also treat zero-price exits as ghosts to prevent fantasy PnL calculations
-    const isGhostClose = reason === 'force_close_no_price' || exitPrice <= 0;
+    // FIX #26: Also treat zero-price exits as ghosts to prevent fantasy PnL calculations.
+    // FIX #29: BUT if partial proceeds already exist (TP1 hit), don't ghost-close —
+    // the position has real money. Zero exit price here means AMM temporarily unavailable;
+    // use entry price as fallback so PnL reflects only the partial proceeds already banked.
+    const hasPartialProceeds = (trade.xrpReturned ?? 0) > 0;
+    const isGhostClose = (reason === 'force_close_no_price' || exitPrice <= 0) && !hasPartialProceeds;
+
+    // FIX #29: If exit price is zero/invalid but partial proceeds exist, use entry price
+    // as fallback for the remaining runner. This gives a conservative 0% on the runner
+    // rather than wiping the real TP1 proceeds already banked.
+    const safeExitPrice = (exitPrice <= 0 && hasPartialProceeds) ? trade.entryPriceXRP : exitPrice;
 
     // FIX #25: Estimate slippage based on trade value relative to liquidity
-    const tradeValueXRP = tokensToSell * exitPrice;
+    const tradeValueXRP = tokensToSell * safeExitPrice;
     const slippage = isGhostClose ? 0 : this.estimateSlippage(tradeValueXRP, snapshot);
 
-    const effectiveExitPrice = exitPrice * (1 - slippage);
+    const effectiveExitPrice = safeExitPrice * (1 - slippage);
     const proceeds = tokensToSell * effectiveExitPrice;
     const fees = isGhostClose ? 0 : proceeds * 0.003;
     const netProceeds = proceeds - fees;
@@ -845,7 +854,7 @@ export class PaperTrader {
     const pnlPercent = entryCostForPosition > 0 ? (pnlXRP / entryCostForPosition) * 100 : 0;
 
     // Update trade
-    trade.exitPriceXRP = exitPrice;
+    trade.exitPriceXRP = safeExitPrice > 0 ? safeExitPrice : exitPrice;
     trade.exitTimestamp = Date.now();
     trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
     trade.status = 'closed';
@@ -1233,8 +1242,17 @@ export class PaperTrader {
         const ageMs = now - (position.openedAt || trade.entryTimestamp || 0);
         if (ageMs < WARMUP_GRACE_MS) continue; // give AMM cache time to warm
         if (ageMs > UNPRICEABLE_TIMEOUT_MS) {
+          // FIX #29: Never ghost-close a position that already has partial proceeds.
+          // If TP1 was hit (xrpReturned > 0), the position has real money locked in.
+          // Ghost-closing it wipes those proceeds and shows a fake loss.
+          // Instead: keep waiting for a price — these positions self-resolve via
+          // the trailing stop once the AMM price comes back.
+          const hasPartialProceeds = (trade.xrpReturned ?? 0) > 0 || trade.tp1Hit;
+          if (hasPartialProceeds) {
+            debug(`[FIX #29] Skipping force_close_no_price for ${trade.tokenCurrency} — TP1 already hit, has partial proceeds. Waiting for price.`);
+            continue;
+          }
           warn(`Force-closing unpriceable position: ${trade.tokenCurrency} (no price for ${(ageMs/60000).toFixed(0)}m)`);
-          // Close at entry price (0% PnL) — best we can do with no price data
           this.closePosition(key, trade.entryPriceXRP, 'force_close_no_price', null);
           allClosed.push(trade);
         }
