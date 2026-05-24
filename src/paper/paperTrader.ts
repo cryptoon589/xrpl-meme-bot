@@ -286,6 +286,24 @@ export class PaperTrader {
       return null;
     }
 
+    // FIX #27: Freshness gate for scored/stream entries.
+    // scored and stream signals operate on tokens already in the DB — by the time
+    // scoring triggers an entry, the move may be minutes or hours old.
+    // Only enter if the buy pressure tracker shows recent activity (< 30 min).
+    // Burst entries bypass this gate — they fire directly from live tx stream.
+    const entrySource = (snapshot as any)?.tradeSource ?? entryReason;
+    const isStreamOrScored = entrySource === 'stream' || entrySource === 'scored'
+      || entryReason?.includes('stream') || entryReason?.includes('scored');
+    if (isStreamOrScored && this.buyPressureTracker) {
+      const freshSnap = this.buyPressureTracker.getSnapshot(token.currency, token.issuer);
+      const lastActivityMs = freshSnap.lastActivityMs;
+      const FRESHNESS_GATE_MS = 30 * 60 * 1000; // 30 min
+      if (lastActivityMs > FRESHNESS_GATE_MS) {
+        debug(`[FreshnessGate] Skipping ${token.currency} scored/stream entry — last buy activity ${(lastActivityMs/60000).toFixed(1)}min ago (stale)`);
+        return null;
+      }
+    }
+
     // Calculate dynamic position size
     const winRate = this.totalTrades > 0 ? this.winningTrades / this.totalTrades : 0.5;
     const avgWin = this.winningTrades > 0 ? this.totalWinAmount / this.winningTrades : 5;
@@ -377,7 +395,9 @@ export class PaperTrader {
       // Timestamp used to enforce minimum hold time before exits are checked
       openedAt: Date.now(),
       tradeProfile: 'scored',
-      profileName: poolXrpReserve >= 2000 ? 'MOMENTUM_RUNNER' : 'BURST_SCALP',
+      // FIX #27: scored/stream entries always use BURST_SCALP regardless of pool size.
+      // MOMENTUM_RUNNER had 0% WR because it only received late src=stream entries.
+      profileName: 'BURST_SCALP',
       lastBuySeenAt: Date.now(),
       liquidityAtEntry: poolXrpReserve,
       tp1Pct: tpTargets?.tp1,
@@ -443,12 +463,20 @@ export class PaperTrader {
       const prof = PROFILES[position.profileName] ?? PROFILES.BURST_SCALP;
       const ks = prof.killSwitches;
 
-      // Update lastBuySeenAt if there are recent buys
+      // FIX #27: Update lastBuySeenAt using lastActivityMs instead of buyCount.
+      // buyCount reflects only the 5-min window — burst buys that triggered entry
+      // fall out of that window within 5min, making the kill switch think there's
+      // been no buying since entry. lastActivityMs is the time since ANY buy/sell
+      // was recorded, which persists across window boundaries.
       const liveSnap = this.buyPressureTracker?.getSnapshot(
         snapshot.tokenCurrency, snapshot.tokenIssuer
       );
-      if (liveSnap && liveSnap.buyCount > 0) {
-        position.lastBuySeenAt = Date.now();
+      if (liveSnap) {
+        // Any buy activity in the last 3 minutes counts as fresh buying
+        const recentBuyActivity = liveSnap.buyCount > 0 || liveSnap.lastActivityMs < 3 * 60 * 1000;
+        if (recentBuyActivity) {
+          position.lastBuySeenAt = Date.now();
+        }
       }
 
       // Kill 1: no new buy within N min AND price below entry

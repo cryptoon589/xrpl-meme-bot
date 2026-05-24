@@ -196,9 +196,13 @@ export class TradeDecisionEngine {
       return PROFILES.WAKEUP_TRADE;
     }
 
-    // scored / stream
+    // FIX #27: scored / stream signals are late-entry by definition — the scoring
+    // pipeline and stream source both operate on tokens already in the DB, meaning
+    // price has often already moved before entry. Routing these to MOMENTUM_RUNNER
+    // (which requires large pools) was causing 0% WR — every single MOMENTUM_RUNNER
+    // trade in history was src=stream and lost. Use BURST_SCALP instead, which has
+    // tighter time stops and faster kill switches suited for late-entry positions.
     if (pool < 500) return PROFILES.LOW_LIQ_PROBE;
-    if (pool >= 2000) return PROFILES.MOMENTUM_RUNNER;
     return PROFILES.BURST_SCALP;
   }
 
