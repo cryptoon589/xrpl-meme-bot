@@ -17,11 +17,9 @@ DB_PATH = os.environ.get('DB_PATH', '/root/xrpl-meme-bot/data/meme_bot.db')
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
-def send_telegram(text: str):
+def send_telegram(text: str) -> bool:
     if not BOT_TOKEN or not CHAT_ID:
-        print("No Telegram credentials — printing to stdout only")
-        print(text)
-        return
+        return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
         'chat_id': CHAT_ID,
@@ -31,8 +29,10 @@ def send_telegram(text: str):
     try:
         req = urllib.request.Request(url, data=data, method='POST')
         urllib.request.urlopen(req, timeout=10)
+        return True
     except Exception as e:
         print(f"Telegram send failed: {e}")
+        return False
 
 def main():
     conn = sqlite3.connect(DB_PATH)
@@ -101,9 +101,9 @@ def main():
         GROUP BY trade_profile ORDER BY SUM(pnl_xrp) DESC""", (now_ts - week_ms,))
     profiles = c.fetchall()
 
-    # --- Bankroll (estimate from net pnl + starting bankroll) ---
+    # --- Bankroll (real trades only, excl ghost closes) ---
     c.execute("""SELECT ROUND(SUM(pnl_xrp),2) FROM paper_trades
-        WHERE status='closed'""")
+        WHERE status='closed' AND exit_reason != 'force_close_no_price'""")
     all_pnl = c.fetchone()[0] or 0
     # Starting bankroll was 100 XRP
     bankroll_est = 100 + all_pnl
@@ -159,8 +159,10 @@ Trades: {total_t} | WR: {total_wr}% | Net: {'+' if (total_net or 0)>=0 else ''}{
 <b>Live Readiness: {readiness}</b>
 {check_lines}"""
 
-    send_telegram(msg)
-    print(msg)
+    sent = send_telegram(msg)
+    if not sent:
+        print("[No Telegram credentials — stdout only]")
+        print(msg)
 
 if __name__ == '__main__':
     main()
