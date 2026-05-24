@@ -2,7 +2,7 @@
  * XRPL WebSocket client with auto-reconnect
  */
 
-import { Client, LedgerStream } from 'xrpl';
+import { Client } from 'xrpl';
 import { info, error, warn, debug } from '../utils/logger';
 import { diagnostics } from '../diagnostics/diagnostics';
 
@@ -10,13 +10,13 @@ export class XRPLClient {
   private client: Client | null = null;
   private wsUrl: string;
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = Infinity; // never give up — PM2 handles fatal crashes
-  private reconnectDelay = 5000; // 5 seconds base, doubles each attempt up to 60s
+  private reconnectDelay = 5000; // 5 seconds base, doubles up to 60s
   private isConnected = false;
-  private isReconnecting = false; // guard: prevent overlapping reconnect attempts
-  private rawTxCount = 0;   // all raw txs from WS
-  private filteredTxCount = 0; // txs that passed isRelevant filter
-  private lastLedgerAt = 0;  // timestamp of last ledger_closed event
+  private isReconnecting = false; // single-entry guard
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private rawTxCount = 0;
+  private filteredTxCount = 0;
+  private lastLedgerAt = 0;
   private ledgerHandler?: (ledger: any) => void;
   private txHandler?: (tx: any) => void;
 
@@ -24,288 +24,204 @@ export class XRPLClient {
     this.wsUrl = wsUrl;
   }
 
+  /**
+   * Destroy the current client instance completely — removes all listeners
+   * so stale 'disconnected' events can't fire after we've moved on.
+   */
+  private destroyClient(): void {
+    if (this.client) {
+      try { this.client.removeAllListeners(); } catch { /* ignore */ }
+      try { this.client.disconnect().catch(() => {}); } catch { /* ignore */ }
+      this.client = null;
+    }
+    this.isConnected = false;
+  }
 
   /**
-   * Connect to XRPL WebSocket
+   * Connect to XRPL WebSocket and register disconnect handler.
+   * Does NOT subscribe to streams — caller does that after connect().
    */
   async connect(): Promise<Client> {
-    try {
-      info(`Connecting to XRPL: ${this.wsUrl}`);
-      this.client = new Client(this.wsUrl, {
-        timeout: 20000,          // 20s request timeout
-        connectionTimeout: 10000, // 10s to establish WS
-      });
-      await this.client.connect();
-      this.isConnected = true;
-      this.reconnectAttempts = 0;
-      info('Connected to XRPL successfully');
+    // Destroy any stale client before creating a new one
+    this.destroyClient();
 
-      // Wire disconnect event — this is what drives auto-reconnect.
-      // Must be registered on EVERY new Client instance (re-registered on each reconnect).
-      this.client.on('disconnected', (code: number) => {
-        warn(`XRPL WebSocket disconnected (code ${code}) — triggering reconnect`);
-        this.handleDisconnect();
-      });
+    info(`Connecting to XRPL: ${this.wsUrl}`);
+    this.client = new Client(this.wsUrl, {
+      timeout: 20000,
+      connectionTimeout: 10000,
+    });
 
-      // Get server info — informational only, never crash on failure
-      try {
-        const serverInfo = await this.client.request({ command: 'server_info' });
-        const completeLedgers = serverInfo.result.info.complete_ledgers;
-        info(`XRPL Server: ${typeof completeLedgers === 'string' ? completeLedgers : JSON.stringify(completeLedgers)} ledgers`);
-      } catch (siErr) {
-        warn(`server_info failed (non-fatal): ${siErr}`);
+    await this.client.connect();
+    this.isConnected = true;
+    this.reconnectAttempts = 0;
+    info('Connected to XRPL successfully');
+
+    // Register disconnect handler on this specific client instance.
+    // Wrapped in a closure that checks we're still the active client —
+    // prevents stale instances from triggering reconnects after destroy.
+    const thisClient = this.client;
+    thisClient.on('disconnected', (code: number) => {
+      if (this.client !== thisClient) {
+        debug(`Stale client disconnected (code ${code}) — ignoring`);
+        return;
       }
+      warn(`XRPL WebSocket disconnected (code ${code})`);
+      this.isConnected = false;
+      this.scheduleReconnect();
+    });
 
-      return this.client;
-    } catch (err) {
-      error(`Failed to connect to XRPL: ${err}`);
-      throw err;
+    // Server info — informational only
+    try {
+      const serverInfo = await this.client.request({ command: 'server_info' });
+      const completeLedgers = serverInfo.result.info.complete_ledgers;
+      info(`XRPL Server: ${typeof completeLedgers === 'string' ? completeLedgers : JSON.stringify(completeLedgers)} ledgers`);
+    } catch (siErr) {
+      warn(`server_info failed (non-fatal): ${siErr}`);
     }
+
+    return this.client;
   }
 
   /**
-   * Subscribe to ledger stream for new ledger events
+   * Schedule a single reconnect attempt with exponential backoff.
+   * Uses a timer ref so duplicate calls are no-ops.
+   */
+  private scheduleReconnect(): void {
+    if (this.isReconnecting) {
+      debug('Reconnect already scheduled — ignoring duplicate');
+      return;
+    }
+    this.isReconnecting = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+
+    this.reconnectAttempts++;
+    const backoff = Math.min(this.reconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 10)), 60000);
+    const jitter  = backoff * 0.2 * (Math.random() - 0.5) * 2;
+    const delay   = Math.max(1000, backoff + jitter); // minimum 1s
+
+    warn(`XRPL reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`);
+
+    this.reconnectTimer = setTimeout(async () => {
+      this.reconnectTimer = null;
+      this.isReconnecting = false; // clear before attempt so failures can reschedule
+
+      try {
+        await this.connect();
+        info('Reconnected to XRPL successfully');
+        this.reconnectAttempts = 0;
+
+        // Small settle delay before subscribing to avoid NotConnectedError race
+        await new Promise(r => setTimeout(r, 500));
+
+        if (this.ledgerHandler) await this.subscribeLedger(this.ledgerHandler).catch(e => warn(`Re-subscribe ledger failed: ${e}`));
+        if (this.txHandler)     await this.subscribeTransactions(this.txHandler).catch(e => warn(`Re-subscribe tx failed: ${e}`));
+      } catch (err) {
+        error(`Reconnect attempt ${this.reconnectAttempts} failed: ${err}`);
+        this.scheduleReconnect();
+      }
+    }, delay);
+  }
+
+  /**
+   * Subscribe to ledger stream
    */
   async subscribeLedger(handler: (ledger: any) => void): Promise<void> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
+    if (!this.client || !this.isConnected) throw new Error('XRPL client not connected');
     this.ledgerHandler = handler;
-
-    try {
-      await this.client.request({
-        command: 'subscribe',
-        streams: ['ledger'],
-      });
-      info('Subscribed to ledger stream');
-
-      this.client.on('ledgerClosed', (ledger) => {
-        if (this.ledgerHandler) {
-          this.ledgerHandler(ledger);
-        }
-      });
-    } catch (err) {
-      error(`Failed to subscribe to ledger stream: ${err}`);
-      throw err;
-    }
+    await this.client.request({ command: 'subscribe', streams: ['ledger'] });
+    info('Subscribed to ledger stream');
+    this.client.on('ledgerClosed', (ledger) => { if (this.ledgerHandler) this.ledgerHandler(ledger); });
   }
 
-  // Transaction types relevant to meme token activity - filter at intake
+  // Transaction types relevant to meme token activity
   private static readonly RELEVANT_TX_TYPES = new Set([
-    'TrustSet',
-    'AMMCreate',
-    'AMMBid',
-    'AMMDeposit',
-    'AMMWithdraw',
-    'OfferCreate',
-    'Payment',
+    'TrustSet', 'AMMCreate', 'AMMBid', 'AMMDeposit', 'AMMWithdraw', 'OfferCreate', 'Payment',
   ]);
 
-  /**
-   * Returns true if this transaction is worth processing.
-   * Drops XRP-only payments, NFT activity, AccountSet, and all other spam
-   * at the WebSocket event level — before the handler or queue is touched.
-   */
   private static isRelevant(tx: any): boolean {
     const transaction = tx.tx_json ?? tx.transaction ?? tx.tx;
     if (!transaction) return false;
-
     const txType: string = transaction.TransactionType;
     if (!XRPLClient.RELEVANT_TX_TYPES.has(txType)) return false;
-
-    // Payment: only pass issued-token payments (Amount is an object, currency != 'XRP')
     if (txType === 'Payment') {
       const amount = transaction.Amount;
-      if (typeof amount === 'string') return false;       // XRP drops — skip
+      if (typeof amount === 'string') return false;
       if (!amount || amount.currency === 'XRP') return false;
-      return true;
     }
-
-    // TrustSet, AMMCreate, AMMDeposit, AMMWithdraw, OfferCreate — always relevant
     return true;
   }
 
   /**
-   * Subscribe to transactions stream.
-   * Filter runs at intake (WebSocket event handler) — handler is only called
-   * for relevant tx types, keeping the queue lean.
+   * Subscribe to transactions stream
    */
   async subscribeTransactions(handler: (tx: any) => void): Promise<void> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
+    if (!this.client || !this.isConnected) throw new Error('XRPL client not connected');
     this.txHandler = handler;
-
-    try {
-      await this.client.request({
-        command: 'subscribe',
-        streams: ['transactions'],
-      });
-      info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
-
-      this.client.on('transaction', (tx) => {
-        this.rawTxCount++; // count every raw tx before filtering
-        diagnostics.recordRawTx();
-        // Drop irrelevant transactions before they reach the queue
-        if (this.txHandler && XRPLClient.isRelevant(tx)) {
-          this.filteredTxCount++;
-          diagnostics.recordTx(tx);
-          this.txHandler(tx);
-        }
-      });
-    } catch (err) {
-      error(`Failed to subscribe to transactions: ${err}`);
-      throw err;
-    }
-  }
-
-  /**
-   * Get account info
-   */
-  async getAccountInfo(account: string): Promise<any> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
-    try {
-      const response = await this.client.request({
-        command: 'account_info',
-        account,
-        ledger_index: 'validated',
-      });
-      return response.result;
-    } catch (err) {
-      debug(`Account info failed for ${account}: ${err}`);
-      return null;
-    }
-  }
-
-  /**
-   * Get account lines (trustlines)
-   */
-  async getAccountLines(account: string): Promise<any[]> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
-    try {
-      const response = await this.client.request({
-        command: 'account_lines',
-        account,
-        ledger_index: 'validated',
-      });
-      return response.result.lines || [];
-    } catch (err) {
-      debug(`Account lines failed for ${account}: ${err}`);
-      return [];
-    }
-  }
-
-  /**
-   * Get account lines with pagination marker
-   */
-  async getAccountLinesWithMarker(account: string, marker?: string): Promise<any> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
-    try {
-      const request: any = {
-        command: 'account_lines',
-        account,
-        ledger_index: 'validated',
-        limit: 400,
-      };
-
-      if (marker) {
-        request.marker = marker;
+    await this.client.request({ command: 'subscribe', streams: ['transactions'] });
+    info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
+    this.client.on('transaction', (tx) => {
+      this.rawTxCount++;
+      diagnostics.recordRawTx();
+      if (this.txHandler && XRPLClient.isRelevant(tx)) {
+        this.filteredTxCount++;
+        diagnostics.recordTx(tx);
+        this.txHandler(tx);
       }
+    });
+  }
 
+  async getAccountInfo(account: string): Promise<any> {
+    if (!this.client || !this.isConnected) return null;
+    try {
+      const response = await this.client.request({ command: 'account_info', account, ledger_index: 'validated' });
+      return response.result;
+    } catch (err) { debug(`Account info failed for ${account}: ${err}`); return null; }
+  }
+
+  async getAccountLines(account: string): Promise<any[]> {
+    if (!this.client || !this.isConnected) return [];
+    try {
+      const response = await this.client.request({ command: 'account_lines', account, ledger_index: 'validated' });
+      return response.result.lines || [];
+    } catch (err) { debug(`Account lines failed for ${account}: ${err}`); return []; }
+  }
+
+  async getAccountLinesWithMarker(account: string, marker?: string): Promise<any> {
+    if (!this.client || !this.isConnected) return { lines: [], marker: undefined };
+    try {
+      const request: any = { command: 'account_lines', account, ledger_index: 'validated', limit: 400 };
+      if (marker) request.marker = marker;
       const response: any = await this.client.request(request);
       const result = response.result || {};
-      return {
-        lines: result.lines || [],
-        marker: result.marker,
-      };
-    } catch (err) {
-      debug(`Account lines with marker failed for ${account}: ${err}`);
-      return { lines: [], marker: undefined };
-    }
+      return { lines: result.lines || [], marker: result.marker };
+    } catch (err) { debug(`Account lines with marker failed for ${account}: ${err}`); return { lines: [], marker: undefined }; }
   }
 
-  /**
-   * Get AMM info for a token pair
-   */
   async getAMMInfo(asset1: any, asset2: any): Promise<any> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
+    if (!this.client || !this.isConnected) return null;
     try {
-      const response = await this.client.request({
-        command: 'amm_info',
-        asset: asset1,
-        asset2: asset2,
-        ledger_index: 'validated',
-      });
+      const response = await this.client.request({ command: 'amm_info', asset: asset1, asset2: asset2, ledger_index: 'validated' });
       return response.result.amm || null;
-    } catch (err) {
-      debug(`AMM info failed: ${err}`);
-      return null;
-    }
+    } catch (err) { debug(`AMM info failed: ${err}`); return null; }
   }
 
-  /**
-   * Get book offers (order book depth)
-   */
   async getBookOffers(takerGets: any, takerPays: any, limit: number = 20): Promise<any> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
+    if (!this.client || !this.isConnected) return null;
     try {
-      const response = await this.client.request({
-        command: 'book_offers',
-        taker_gets: takerGets,
-        taker_pays: takerPays,
-        ledger_index: 'validated',
-        limit,
-      });
+      const response = await this.client.request({ command: 'book_offers', taker_gets: takerGets, taker_pays: takerPays, ledger_index: 'validated', limit });
       return response.result;
-    } catch (err) {
-      debug(`Book offers failed: ${err}`);
-      return null;
-    }
+    } catch (err) { debug(`Book offers failed: ${err}`); return null; }
   }
 
-  /**
-   * Get transaction by hash
-   */
   async getTransaction(hash: string): Promise<any> {
-    if (!this.client || !this.isConnected) {
-      throw new Error('XRPL client not connected');
-    }
-
+    if (!this.client || !this.isConnected) return null;
     try {
-      const response = await this.client.request({
-        command: 'tx',
-        transaction: hash,
-      });
+      const response = await this.client.request({ command: 'tx', transaction: hash });
       return response.result;
-    } catch (err) {
-      debug(`Transaction lookup failed for ${hash}: ${err}`);
-      return null;
-    }
+    } catch (err) { debug(`Transaction lookup failed for ${hash}: ${err}`); return null; }
   }
 
-  /**
-   * Check connection status
-   */
-  recordLedger(): void {
-    this.lastLedgerAt = Date.now();
-  }
+  recordLedger(): void { this.lastLedgerAt = Date.now(); }
 
   getStatus(): { connected: boolean; url: string; lastLedgerAgeMs: number } {
     return {
@@ -315,102 +231,27 @@ export class XRPLClient {
     };
   }
 
-  /**
-   * Get tx processing stats
-   */
   getTxStats(): { raw: number; filtered: number } {
     return { raw: this.rawTxCount, filtered: this.filteredTxCount };
   }
 
-  /**
-   * Disconnect gracefully
-   */
   async disconnect(): Promise<void> {
-    if (this.client && this.isConnected) {
-      try {
-        await this.client.disconnect();
-        this.isConnected = false;
-        info('Disconnected from XRPL');
-      } catch (err) {
-        error(`Error during disconnect: ${err}`);
-      }
-    }
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.isReconnecting = false;
+    this.destroyClient();
+    info('Disconnected from XRPL');
   }
 
   /**
-   * Force a full reconnect cycle (used by health-check stale-stream recovery).
-   * Tears down the current client so the 'disconnected' event fires and
-   * handleDisconnect() can do its backoff+resubscribe loop.
+   * Force a full reconnect — used by health-check stale-stream detection.
    */
   async forceReconnect(): Promise<void> {
-    warn('forceReconnect() called — tearing down current connection');
-    this.isConnected = false;
-    this.isReconnecting = false; // reset so handleDisconnect can take over if needed
-    if (this.client) {
-      try { await this.client.disconnect(); } catch { /* ignore */ }
-      this.client = null;
-    }
-    // Kick off a fresh connect attempt immediately (no backoff on manual trigger)
-    try {
-      await this.connect();
-      info('forceReconnect: reconnected successfully');
-      if (this.ledgerHandler) await this.subscribeLedger(this.ledgerHandler);
-      if (this.txHandler)     await this.subscribeTransactions(this.txHandler);
-    } catch (err) {
-      error(`forceReconnect: initial attempt failed (${err}), backoff loop will continue`);
-      this.handleDisconnect();
-    }
+    warn('forceReconnect() called');
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.isReconnecting = false; // reset so scheduleReconnect can run
+    this.destroyClient();
+    this.scheduleReconnect();
   }
 
-  /**
-   * Handle reconnection
-   * FIX #10: Added exponential backoff with jitter and max delay cap
-   */
-  private async handleDisconnect(): Promise<void> {
-    // Guard: if already reconnecting, don't stack another attempt
-    if (this.isReconnecting) {
-      debug('handleDisconnect called but reconnect already in progress — ignoring');
-      return;
-    }
-    this.isReconnecting = true;
-    this.isConnected = false;
-    warn('XRPL connection lost');
-
-    this.reconnectAttempts++;
-
-    // Exponential backoff: 5s, 10s, 20s, 40s, capped at 60s then stays flat
-    const backoff = Math.min(this.reconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 10)), 60000);
-    const jitter  = backoff * 0.2 * (Math.random() - 0.5) * 2;
-    const delay   = backoff + jitter;
-
-    warn(`Reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`);
-
-    setTimeout(async () => {
-      try {
-        await this.connect();
-        info('Reconnected successfully');
-        this.reconnectAttempts = 0;
-        this.isReconnecting = false; // clear guard on success
-
-        // Re-subscribe if handlers exist
-        if (this.ledgerHandler) {
-          await this.subscribeLedger(this.ledgerHandler);
-        }
-        if (this.txHandler) {
-          await this.subscribeTransactions(this.txHandler);
-        }
-      } catch (err) {
-        error(`Reconnection attempt ${this.reconnectAttempts} failed: ${err}`);
-        this.isReconnecting = false; // clear guard so next attempt can proceed
-        this.handleDisconnect(); // keep retrying
-      }
-    }, delay);
-  }
-
-  /**
-   * Get the underlying client (for advanced usage)
-   */
-  getClient(): Client | null {
-    return this.client;
-  }
+  getClient(): Client | null { return this.client; }
 }
