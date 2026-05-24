@@ -56,10 +56,6 @@ const tradeLocks = new Set<string>();
 // Tokens force-closed for no-price \u2014 don't re-enter for 6h
 const noPriceCooldowns = new Map<string, number>();
 const NO_PRICE_COOLDOWN_MS = 30 * 60 * 1000; // 30 min — 6h was causing post-restart dormancy
-// FIX #31b: Auto-blocklist tokens with 3+ ghost closes (persistent un-priceable AMMs)
-const ghostCloseCount = new Map<string, number>();
-const GHOST_BLOCKLIST_THRESHOLD = 3;
-const runtimeGhostBlocklist = new Set<string>();
 let healthServer: http.Server | null = null;
 let xrplClientRef: XRPLClient | null = null; // module-level ref for hourly timer
 
@@ -232,17 +228,8 @@ async function main() {
       const hasWhale    = bestWhaleWR >= 70;
       if (hasWhale) info(`[Whale] High-confidence whale in burst (WR=${bestWhaleWR}%): ${currency}`);
 
-      // FIX #31c: time-of-day gate — skip dead hours (0% WR from historical data)
-      // Dead: 06-11h, 13-15h, 17h, 21h UTC. Whale signals bypass (high-conviction).
-      const nowHourUtc = new Date().getUTCHours();
-      const DEAD_HOURS_SET = new Set([6,7,8,9,10,11,13,14,15,17,21]);
-      if (DEAD_HOURS_SET.has(nowHourUtc) && !hasWhale && !isNewLaunch) {
-        debug(`[TimeGate] Burst skipped — dead hour ${nowHourUtc}h UTC (0% WR window)`);
-        tradeLocks.delete(burstKey);
-        return;
-      }
 
-      const snapshot: any = {
+            const snapshot: any = {
         tokenCurrency: currency, tokenIssuer: issuer,
         priceXRP, liquidityXRP: poolTVL,
         poolXrpReserve,
@@ -1183,15 +1170,7 @@ function startPeriodicScan(
             const cooldownKey = `${ct.tokenCurrency}:${ct.tokenIssuer}`;
             noPriceCooldowns.set(cooldownKey, Date.now());
             info(`[NoPriceCooldown] ${ct.tokenCurrency} blocked for 6h after force_close_no_price`);
-            // FIX #31b: auto-blocklist after 3+ ghost closes — token has un-priceable AMM
-            const ghostKey = ct.tokenCurrency;
-            const ghostCount = (ghostCloseCount.get(ghostKey) ?? 0) + 1;
-            ghostCloseCount.set(ghostKey, ghostCount);
-            if (ghostCount >= GHOST_BLOCKLIST_THRESHOLD && !runtimeGhostBlocklist.has(ghostKey)) {
-              runtimeGhostBlocklist.add(ghostKey);
-              BURST_TRADE_BLOCKLIST.add(ghostKey);
-              warn(`[AutoBlocklist] ${ghostKey} blocked after ${ghostCount} ghost closes (un-priceable AMM)`);
-            }
+
             continue;
           }
           setTimeout(() => sendAlert(telegramAlerter, db, {
