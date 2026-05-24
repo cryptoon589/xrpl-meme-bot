@@ -188,7 +188,7 @@ async function main() {
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
-    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP) => {
+    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP, tokenAgeMs, baselinePrice) => {
       diagnostics.increment('burstCandidatesSeen');
       diagnostics.recordSignal({ token: decodeCurrency(rawCurrency || currency), issuer, source: 'burst', reason: 'burst_detected', priceAtSignal: priceXRP, poolXrpReserve: poolTVL / 2, rawCurrency });
       // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
@@ -206,7 +206,21 @@ async function main() {
       if (paperTrader.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — open position: ${burstKey}`); return; }
       // Belt-and-suspenders: also check tradeExecutor positions (real trades) to prevent cross-path duplicates
       if (tradeExecutor && tradeExecutor.hasOpenPosition(currency, issuer)) { debug(`Burst skipped — real position open: ${burstKey}`); return; }
+
+      // FIX #28: Pump check — skip if price already 3× above baseline (late FOMO entry).
+      // baselinePrice is null on the FIRST burst (no comparison possible yet).
+      // On subsequent bursts, if price has already 3×’d from first detection, skip.
+      if (baselinePrice !== null && priceXRP > baselinePrice * 3) {
+        info(`[PumpCheck] Skipping ${currency} — price ${priceXRP.toFixed(8)} already ${(priceXRP/baselinePrice).toFixed(1)}x from baseline ${baselinePrice.toFixed(8)}`);
+        diagnostics.increment('burstRejectedPumped');
+        return;
+      }
+
       tradeLocks.add(burstKey);
+
+      // FIX #28: New launch detection — token < 1h old gets NEW_LAUNCH profile
+      const isNewLaunch = tokenAgeMs < 60 * 60 * 1000;
+      if (isNewLaunch) info(`[NewLaunch] ${currency} is ${(tokenAgeMs/60000).toFixed(1)}min old — using NEW_LAUNCH profile`);
 
       // Check if any known high-confidence whale is in the burst's buyer list
       const burstBuyers = buyPressureTracker.getSnapshot(rawCurrency, issuer).buyerWallets ?? [];
@@ -220,12 +234,17 @@ async function main() {
         poolXrpReserve,
         buyCount5m: 0, sellCount5m: 0,
         whaleWinRate: bestWhaleWR,   // passed into TDE for threshold lowering
+        isNewLaunch,                 // hint for TDE profile selection
+        tokenAgeMs,
       };
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
 
+      // Select signal type: new launch > whale > burst
+      const signalType = isNewLaunch ? 'burst' : (hasWhale ? 'whale_burst' : 'burst');
+
       tradeDecisionEngine.decide({
         currency, issuer, rawCurrency, snapshot,
-        signalType: hasWhale ? 'whale_burst' : 'burst',  // whale_burst bypasses min-pool check
+        signalType,
         signalScore: hasWhale ? Math.round(bestWhaleWR) : 0,
         bankrollXRP: paperTrader.getState().bankrollXRP,
         openPositions: paperTrader.getOpenPositionsSummary().length,
@@ -247,28 +266,32 @@ async function main() {
         // of latency at the worst moment (entry), by which point the price had moved
         // further against us. Trust the detector's price; it just came off the AMM.
         (() => {
+          // FIX #28: override profile to NEW_LAUNCH for fresh tokens
+          const effectiveProfile = isNewLaunch ? 'NEW_LAUNCH' : decision.profile.name;
           const validatedSnapshot = { ...snapshot, priceXRP: priceXRP };
           const trade = paperTrader.tryOpenBurstTrade(
             token, validatedSnapshot,
-            `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${decision.profile.name}`,
+            `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${effectiveProfile}`,
             burstTp
           );
           tradeLocks.delete(burstKey);
           if (trade) {
-            trade.tradeProfile = decision.profile.name;
+            trade.tradeProfile = effectiveProfile;
             trade.tradeSource  = 'burst';
             db.updatePaperTrade(trade);
+            // FIX #28: sync profileName on in-memory position for correct exit logic
+            paperTrader.setPositionProfile(currency, issuer, effectiveProfile as any);
             diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'burst');
             setTimeout(() => sendAlert(telegramAlerter, db, {
               type: 'paper_trade_opened',
               tokenCurrency: currency, tokenIssuer: issuer,
               paperTrade: trade,
-              tradeProfileName: decision.profile.name,
+              tradeProfileName: effectiveProfile,
               tradeSource: 'burst',
               poolXrpReserve: poolXrpReserve,
               slippage: decision.slippage,
               decisionSizeXRP: decision.sizeXRP,
-              message: `Burst entry: ${currency}`,
+              message: isNewLaunch ? `🆕 New launch entry: ${currency}` : `Burst entry: ${currency}`,
             }, config), 0);
           }
         })();

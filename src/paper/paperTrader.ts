@@ -55,6 +55,16 @@ export class PaperTrader {
     return snapshot?.poolXrpReserve ?? ((snapshot?.liquidityXRP ?? 0) / 2);
   }
 
+  /** FIX #28: Return the pnlXRP of the most recently closed trade for a token key, or null if none. */
+  private getLastClosedPnl(key: string): number | null {
+    try {
+      const [currency, issuer] = key.split(':');
+      const trades = this.db.getRecentClosedTrades(currency, issuer, 1);
+      if (trades.length > 0 && trades[0].pnlXRP !== null) return trades[0].pnlXRP;
+    } catch { /* ignore */ }
+    return null;
+  }
+
   private snapshotTrade(trade: PaperTrade): PaperTrade {
     return { ...trade };
   }
@@ -138,7 +148,6 @@ export class PaperTrader {
 
     // Dynamic burst sizing: scale by buy velocity (unique wallets) and pool depth
     // Base = minTradeXRP. Multiplier: more wallets + deeper pool = bigger position.
-    // Cap at 25 XRP — bursts are unscored, keep risk bounded.
     const uniqueWallets = (snapshot as any).uniqueBuyers5m ?? 0;
     const tvl = snapshot.liquidityXRP ?? (poolXrpReserve * 2);
     const velocityMultiplier = uniqueWallets >= 8 ? 3.0
@@ -149,9 +158,19 @@ export class PaperTrader {
       : tvl >= 50_000 ? 1.25
       : tvl >= 10_000 ? 1.0
       : 0.75; // shallow pool = smaller size
+
+    // FIX #28: Conviction re-entry — if a previous trade on this token was profitable,
+    // size up by 1.5×. Confirmed mover = higher conviction = bigger bet.
+    const prevPnl = this.getLastClosedPnl(key);
+    const reentryMultiplier = prevPnl !== null && prevPnl > 0 ? 1.5 : 1.0;
+    if (reentryMultiplier > 1) info(`[ConvictionReentry] ${key} previous trade was +${prevPnl!.toFixed(2)} XRP — sizing up 1.5×`);
+
+    // NEW_LAUNCH: use profile max size cap (10 XRP) not the burst 25 XRP cap
+    const isNewLaunch = (snapshot as any).isNewLaunch === true;
+    const hardCap = isNewLaunch ? 10 : 25;
     const tradeSizeXRP = Math.min(
-      this.config.minTradeXRP * velocityMultiplier * liquidityMultiplier,
-      25 // hard cap
+      this.config.minTradeXRP * velocityMultiplier * liquidityMultiplier * reentryMultiplier,
+      hardCap
     );
     if (this.bankrollXRP < tradeSizeXRP) {
       warn(`Insufficient bankroll for burst trade`);
@@ -202,6 +221,8 @@ export class PaperTrader {
       priceHistory: [entryPrice],
       openedAt: Date.now(),
       tradeProfile: 'burst',
+      // FIX #28: new launches use NEW_LAUNCH profile (set after open via tradeProfile field)
+      // Default here; overridden by index.ts after open via trade.tradeProfile assignment
       profileName: poolXrpReserve < 500 ? 'LOW_LIQ_PROBE' : 'BURST_SCALP',
       lastBuySeenAt: Date.now(),
       liquidityAtEntry: poolXrpReserve,
@@ -520,12 +541,15 @@ export class PaperTrader {
 
       // ── BURST EXIT PROFILE ───────────────────────────────────────────────────
       if (isBurst) {
-        // Profile-driven time stop.  The alert says BURST_SCALP has a
-        // 60-minute time stop, so use the profile value instead of the old
-        // hardcoded 45/90-minute split.  The final profit/loss label is
-        // assigned after fees and slippage are applied in closePosition().
+        // Profile-driven time stop.
+        // FIX #28: If TP1 was already hit, disable time stop entirely — let the
+        // trailing stop manage the runner. The 42 time_stop_profit exits at avg -0.8%
+        // were killing trades that had confirmed momentum (TP1 hit) but hadn't
+        // yet reached their full potential. Once TP1 hits we're playing with
+        // house money on the runner — never cut it with a timer.
         const burstTimeStopMs = prof.timeStopMs ?? (60 * 60 * 1000);
-        if (burstTimeStopMs > 0 && ageMs >= burstTimeStopMs && trade.remainingPosition > 0) {
+        const timeStopDisabled = trade.tp1Hit && (prof.disableTimeStopAfterTp1 ?? true);
+        if (!timeStopDisabled && burstTimeStopMs > 0 && ageMs >= burstTimeStopMs && trade.remainingPosition > 0) {
           info(`⏱️ Burst time stop hit for ${key} (${(ageMs/60000).toFixed(1)}m) gross PnL: ${pnlPercent.toFixed(1)}%`);
           keysToClose.push({ key, reason: 'time_stop' });
           closingTrades.push(trade);
@@ -649,8 +673,10 @@ export class PaperTrader {
         continue;
       }
 
-      // Time stop for scored trades: exit after 90 min if no meaningful gain
-      if (ageMs >= 90 * 60 * 1000 && pnlPercent < 5 && trade.remainingPosition > 0) {
+      // Time stop for scored trades: exit after 90 min if no meaningful gain.
+      // FIX #28: skip time stop if TP1 already hit — let trailing stop manage runner.
+      const scoredTimeStopDisabled = trade.tp1Hit && (prof.disableTimeStopAfterTp1 ?? true);
+      if (!scoredTimeStopDisabled && ageMs >= 90 * 60 * 1000 && pnlPercent < 5 && trade.remainingPosition > 0) {
         keysToClose.push({ key, reason: 'time_stop_loss' });
         closingTrades.push(trade);
         continue;
@@ -1325,6 +1351,19 @@ export class PaperTrader {
   hasOpenPosition(currency: string, issuer: string): boolean {
     const key = `${currency}:${issuer}`;
     return this.openPositions.has(key);
+  }
+
+  /**
+   * FIX #28: Sync profileName on open position after index.ts assigns tradeProfile.
+   * Called immediately after tryOpenBurstTrade when profile override is needed.
+   */
+  setPositionProfile(currency: string, issuer: string, profileName: TradeProfileName): void {
+    const key = `${currency}:${issuer}`;
+    const pos = this.openPositions.get(key);
+    if (pos) {
+      pos.profileName = profileName;
+      debug(`[Profile] ${currency} position profileName set to ${profileName}`);
+    }
   }
 
   /**

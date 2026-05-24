@@ -15,7 +15,8 @@ export type TradeProfileName =
   | 'LOW_LIQ_PROBE'
   | 'BURST_SCALP'
   | 'MOMENTUM_RUNNER'
-  | 'WAKEUP_TRADE';
+  | 'WAKEUP_TRADE'
+  | 'NEW_LAUNCH';
 
 export interface TradeProfile {
   name: TradeProfileName;
@@ -47,6 +48,8 @@ export interface TradeProfile {
   trailDistancePct: number;
   /** Hard time stop in ms; 0 = disabled */
   timeStopMs: number;
+  /** If true, time stop is disabled once TP1 is hit — let trailing stop manage runner */
+  disableTimeStopAfterTp1: boolean;
   /** Kill switches (follow-through guard) */
   killSwitches: {
     noNewBuyMins: number;        // close if no new buy within N mins AND price < entry
@@ -76,8 +79,9 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     trailActivationPct: 18,
     trailDistancePct: 10,
     timeStopMs: 45 * 60 * 1000,  // 45 min (was 30)
+    disableTimeStopAfterTp1: true,
     // Relaxed kill switches: thin pools have natural quiet periods
-    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 30 },
+    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 15 },
   },
 
   BURST_SCALP: {
@@ -99,10 +103,11 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     trailActivationPct: 15,
     trailDistancePct: 8,  // wider trail (was 5%) to survive consolidations
     timeStopMs: 60 * 60 * 1000,  // 60 min (was 45)
+    disableTimeStopAfterTp1: true,
     // Kill switches relaxed:
     // noNewBuyMins: 20 (was 10) — meme tokens go quiet 10-20min between legs
     // sellVolumeMultiple: 4 (was 2) — AMM arb creates reflected sells; 2x fires too easily
-    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 30 },
+    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 15 },
   },
 
   MOMENTUM_RUNNER: {
@@ -122,7 +127,8 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     trailActivationPct: 15,
     trailDistancePct: 12,
     timeStopMs: 120 * 60 * 1000,  // 120 min (was 90) — momentum runners need time
-    killSwitches: { noNewBuyMins: 25, sellVolumeMultiple: 4, liqDropPct: 30 },
+    disableTimeStopAfterTp1: true,
+    killSwitches: { noNewBuyMins: 25, sellVolumeMultiple: 4, liqDropPct: 15 },
   },
 
   WAKEUP_TRADE: {
@@ -141,7 +147,31 @@ export const PROFILES: Record<TradeProfileName, TradeProfile> = {
     trailActivationPct: 18,
     trailDistancePct: 10,  // wider trail (was 7%)
     timeStopMs: 90 * 60 * 1000,  // 90 min (was 60)
-    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 30 },
+    disableTimeStopAfterTp1: true,
+    killSwitches: { noNewBuyMins: 20, sellVolumeMultiple: 4, liqDropPct: 15 },
+  },
+
+  // NEW_LAUNCH: tokens < 1h old bursting for the first time.
+  // Highest risk, highest reward. Smaller size, wide stop to survive initial
+  // volatility, aggressive trailing stop to catch the moonbag.
+  // Time stop disabled after TP1 — new launches can 100x in an hour.
+  NEW_LAUNCH: {
+    name: 'NEW_LAUNCH',
+    minPoolXrpReserve: 300,      // lower bar — new launches start small
+    maxSlippage: 0.08,           // allow more slippage on thin new pools
+    maxRoundTripLossPct: 18,
+    baseSizeXRP: 3,              // small size — high risk
+    maxSizeXRP: 10,              // cap low — unproven token
+    scalePoolXRP: 1000,
+    stopLossPct: 20,             // wide stop — new launches wick hard before mooning
+    tp1Pct: 30,   tp1SellPct: 50,  // sell half at +30%, leave half for runner
+    tp2Pct: 80,   tp2SellPct: 25,  // sell another quarter at +80%
+    runnerPct: 25,                  // 25% runner for trailing stop (the moonbag)
+    trailActivationPct: 50,         // activate trail at +50%
+    trailDistancePct: 15,           // 15% trail — wide enough for volatile new tokens
+    timeStopMs: 45 * 60 * 1000,    // 45 min if nothing happens
+    disableTimeStopAfterTp1: true,  // if it hits TP1, let it run forever
+    killSwitches: { noNewBuyMins: 15, sellVolumeMultiple: 3, liqDropPct: 15 },
   },
 };
 

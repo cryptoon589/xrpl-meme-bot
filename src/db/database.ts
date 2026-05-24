@@ -535,6 +535,21 @@ export class Database {
     }
   }
 
+  /** FIX #28: Get the N most recently closed trades for a specific token (for conviction re-entry sizing) */
+  getRecentClosedTrades(currency: string, issuer: string, limit: number = 1): PaperTrade[] {
+    try {
+      const rows = this.db.prepare(`
+        SELECT * FROM paper_trades
+        WHERE token_currency = ? AND token_issuer = ? AND status = 'closed'
+        ORDER BY exit_timestamp DESC LIMIT ?
+      `).all(currency, issuer, limit) as any[];
+      return rows.map(row => this.rowToPaperTrade(row));
+    } catch (err) {
+      warn(`Error getting recent closed trades: ${err}`);
+      return [];
+    }
+  }
+
   getOpenTrades(): PaperTrade[] {
     try {
       const rows = this.db.prepare(`

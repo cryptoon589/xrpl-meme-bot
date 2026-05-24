@@ -94,7 +94,15 @@ export class BurstDetector {
   private alerter: TelegramAlerter;
   private db: Database;
   /** Optional callback fired after a confirmed burst — used to open burst paper trades */
-  public onBurst?: (currency: string, issuer: string, rawCurrency: string, poolXRP: number, priceXRP: number) => void;
+  public onBurst?: (
+    currency: string,
+    issuer: string,
+    rawCurrency: string,
+    poolXRP: number,
+    priceXRP: number,
+    tokenAgeMs: number,    // ms since token was first seen by the detector
+    baselinePrice: number | null  // price at FIRST burst alert (null if this IS the first)
+  ) => void;
 
   constructor(xrplClient: XRPLClient, alerter: TelegramAlerter, db: Database) {
     this.xrplClient = xrplClient;
@@ -426,9 +434,20 @@ export class BurstDetector {
       });
 
       // Fire callback so index.ts can open a burst paper trade
-      // Pass TVL so the paper trader's liquidity threshold check is correct
+      // Pass TVL, token age, and baseline price so index.ts can use NEW_LAUNCH profile
+      // and pump check.
       if (this.onBurst && poolXRP && priceXRP) {
-        this.onBurst(state.displayName, state.issuer, state.rawCurrency, poolXRP * 2, priceXRP);
+        const tokenAgeMs = Date.now() - (state.firstSeenAt ?? Date.now());
+        // baselinePrice is the price at the FIRST burst alert.
+        // Set it now if this is the first alert for this token.
+        const isFirstBurst = state.baselinePrice === null;
+        if (isFirstBurst) state.baselinePrice = priceXRP;
+        this.onBurst(
+          state.displayName, state.issuer, state.rawCurrency,
+          poolXRP * 2, priceXRP,
+          tokenAgeMs,
+          isFirstBurst ? null : state.baselinePrice  // null = this IS the first burst
+        );
       }
 
     } catch (err) {
