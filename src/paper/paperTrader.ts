@@ -1232,7 +1232,14 @@ export class PaperTrader {
   ): Promise<PaperTrade[]> {
     const allClosed: PaperTrade[] = [];
     const now = Date.now();
-    const UNPRICEABLE_TIMEOUT_MS = 30 * 60 * 1000; // force-close after 30 min with no price
+    // FIX #32: Extended unpriceable timeout.
+    // 30min was too aggressive — XRPL AMMs can be temporarily unavailable during
+    // high load, validator gaps, or low-liquidity windows. A dormant meme token
+    // can go quiet for hours then explode. We want to HOLD the position and catch
+    // the move when price returns, not ghost-close and miss it.
+    // Strategy: wait up to 2h for any position. If TP1 already hit, wait indefinitely
+    // (FIX #29 — post-TP1 positions always wait for trailing stop).
+    const UNPRICEABLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2h (was 30min)
     const WARMUP_GRACE_MS = 5 * 60 * 1000; // never force-close within 5 min of opening
 
     for (const [key, position] of this.openPositions.entries()) {
@@ -1244,20 +1251,22 @@ export class PaperTrader {
       if (!price || price <= 0) {
         const ageMs = now - (position.openedAt || trade.entryTimestamp || 0);
         if (ageMs < WARMUP_GRACE_MS) continue; // give AMM cache time to warm
+
+        // FIX #29: Never ghost-close a position that already has partial proceeds.
+        const hasPartialProceeds = (trade.xrpReturned ?? 0) > 0 || trade.tp1Hit;
+        if (hasPartialProceeds) {
+          debug(`[NoPrice] ${trade.tokenCurrency} TP1 hit — waiting indefinitely for price to return`);
+          continue;
+        }
+
         if (ageMs > UNPRICEABLE_TIMEOUT_MS) {
-          // FIX #29: Never ghost-close a position that already has partial proceeds.
-          // If TP1 was hit (xrpReturned > 0), the position has real money locked in.
-          // Ghost-closing it wipes those proceeds and shows a fake loss.
-          // Instead: keep waiting for a price — these positions self-resolve via
-          // the trailing stop once the AMM price comes back.
-          const hasPartialProceeds = (trade.xrpReturned ?? 0) > 0 || trade.tp1Hit;
-          if (hasPartialProceeds) {
-            debug(`[FIX #29] Skipping force_close_no_price for ${trade.tokenCurrency} — TP1 already hit, has partial proceeds. Waiting for price.`);
-            continue;
-          }
-          warn(`Force-closing unpriceable position: ${trade.tokenCurrency} (no price for ${(ageMs/60000).toFixed(0)}m)`);
+          // Only force-close after 2h with zero price AND no partial proceeds.
+          // Log clearly so operator can see which tokens have broken AMMs.
+          warn(`[NoPrice] Force-closing ${trade.tokenCurrency} — no AMM price for ${(ageMs/60000).toFixed(0)}min. Possible broken/drained AMM.`);
           this.closePosition(key, trade.entryPriceXRP, 'force_close_no_price', null);
           allClosed.push(trade);
+        } else {
+          debug(`[NoPrice] ${trade.tokenCurrency} waiting for price (${(ageMs/60000).toFixed(0)}min / ${(UNPRICEABLE_TIMEOUT_MS/60000).toFixed(0)}min timeout)`);
         }
         continue;
       }

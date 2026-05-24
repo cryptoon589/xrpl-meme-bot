@@ -77,11 +77,26 @@ export class AMMPriceFetcher {
     // Use rawCurrency (hex) for API calls — decoded name causes "Issue is malformed"
     const apiCurrency = rawCurrency || currency;
 
-    // Try AMM pool first
+    // Try AMM pool first (primary)
     const ammPrice = await this.fetchFromAMM(apiCurrency, issuer);
     if (ammPrice) {
       this.cache.set(key, { price: ammPrice, fetchedAt: now });
       return ammPrice;
+    }
+
+    // FIX #32: If rawCurrency was a decoded name (short ASCII), also try the hex form.
+    // Some tokens have their AMM indexed under the hex-padded key, not the ASCII key.
+    // This catches cases where currency='ARMY' but AMM registered as hex equivalent.
+    if (apiCurrency === currency && currency.length <= 20) {
+      // currency might be ASCII — try hex-padded version
+      const hexPadded = Buffer.from(currency).toString('hex').toUpperCase().padEnd(40, '0');
+      if (hexPadded !== apiCurrency) {
+        const ammPrice2 = await this.fetchFromAMM(hexPadded, issuer);
+        if (ammPrice2) {
+          this.cache.set(key, { price: ammPrice2, fetchedAt: now });
+          return ammPrice2;
+        }
+      }
     }
 
     // Fall back to order book
@@ -92,7 +107,10 @@ export class AMMPriceFetcher {
     }
 
     // Cache the null result so we don't retry for 5 minutes
-    this.nullCache.set(key, now);
+    // FIX #32: For open positions, use a shorter null cache (30s not 5min)
+    // so we retry more aggressively when a position needs an exit price.
+    const nullTtl = isOpen ? 30_000 : this.NULL_CACHE_TTL_MS;
+    this.nullCache.set(key, now - (this.NULL_CACHE_TTL_MS - nullTtl));
     return null;
   }
 
