@@ -484,17 +484,20 @@ export class PaperTrader {
       const prof = PROFILES[position.profileName] ?? PROFILES.BURST_SCALP;
       const ks = prof.killSwitches;
 
-      // FIX #27: Update lastBuySeenAt using lastActivityMs instead of buyCount.
-      // buyCount reflects only the 5-min window — burst buys that triggered entry
-      // fall out of that window within 5min, making the kill switch think there's
-      // been no buying since entry. lastActivityMs is the time since ANY buy/sell
-      // was recorded, which persists across window boundaries.
-      const liveSnap = this.buyPressureTracker?.getSnapshot(
-        snapshot.tokenCurrency, snapshot.tokenIssuer
-      );
+      // FIX #27/#31: Update lastBuySeenAt using lastActivityMs.
+      // IMPORTANT: buyPressureTracker keys by rawCurrency (hex), not display name.
+      // snapshot.tokenCurrency may be decoded ASCII (e.g. 'ASTEROID') while the
+      // tracker stored events under the hex key. Always try rawCurrency first.
+      const rawCurr = trade.rawCurrency || snapshot.tokenCurrency;
+      const liveSnap = this.buyPressureTracker
+        ? (this.buyPressureTracker.getSnapshot(rawCurr, snapshot.tokenIssuer).buyCount > 0 ||
+           this.buyPressureTracker.getSnapshot(rawCurr, snapshot.tokenIssuer).lastActivityMs < Infinity
+             ? this.buyPressureTracker.getSnapshot(rawCurr, snapshot.tokenIssuer)
+             : this.buyPressureTracker.getSnapshot(snapshot.tokenCurrency, snapshot.tokenIssuer))
+        : null;
       if (liveSnap) {
-        // Any buy activity in the last 3 minutes counts as fresh buying
-        const recentBuyActivity = liveSnap.buyCount > 0 || liveSnap.lastActivityMs < 3 * 60 * 1000;
+        // Any buy activity in the last 5 minutes counts as fresh buying
+        const recentBuyActivity = liveSnap.buyCount > 0 || liveSnap.lastActivityMs < 5 * 60 * 1000;
         if (recentBuyActivity) {
           position.lastBuySeenAt = Date.now();
         }
