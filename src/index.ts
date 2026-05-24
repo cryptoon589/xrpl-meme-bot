@@ -1545,21 +1545,45 @@ function sleep(ms: number): Promise<void> {
 // out of event emitters. Log and continue; the reconnect handler will recover.
 process.on('unhandledRejection', (reason: any) => {
   const msg = reason?.message || String(reason);
-  // DisconnectedError is expected during WS drops — reconnect handles it
-  if (msg.includes('DisconnectedError') || msg.includes('websocket was closed') || msg.includes('threshold exceeded')) {
-    warn(`WS disconnect (handled): ${msg}`);
+  const isXrplTransient = (
+    msg.includes('DisconnectedError') ||
+    msg.includes('websocket was closed') ||
+    msg.includes('threshold exceeded') ||
+    msg.includes('NotConnectedError') ||
+    msg.includes('TimeoutError') ||
+    msg.includes('Connection reset') ||
+    msg.includes('ECONNRESET')
+  );
+  if (isXrplTransient) {
+    warn(`XRPL transient rejection (handled): ${msg}`);
   } else {
     error(`Unhandled rejection: ${msg}`);
   }
 });
 
+// Track recent exits to prevent rapid crash loops
+let lastExitAttempt = 0;
 process.on('uncaughtException', (err: Error) => {
   const msg = err?.message || String(err);
-  if (msg.includes('DisconnectedError') || msg.includes('websocket was closed') || msg.includes('threshold exceeded')) {
-    warn(`WS disconnect (uncaught, handled): ${msg}`);
+  const isXrplTransient = (
+    msg.includes('DisconnectedError') ||
+    msg.includes('websocket was closed') ||
+    msg.includes('threshold exceeded') ||
+    msg.includes('NotConnectedError') ||
+    msg.includes('TimeoutError') ||
+    msg.includes('Connection reset') ||
+    msg.includes('ECONNRESET')
+  );
+  if (isXrplTransient) {
+    warn(`XRPL transient error (handled, no exit): ${msg}`);
   } else {
     error(`Uncaught exception: ${msg}`);
-    process.exit(1); // only exit on truly unexpected errors
+    // Rate-limit exits: don\'t crash-loop faster than 30s
+    const now = Date.now();
+    if (now - lastExitAttempt > 30000) {
+      lastExitAttempt = now;
+      process.exit(1); // only exit on truly unexpected errors
+    }
   }
 });
 
