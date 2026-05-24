@@ -115,9 +115,24 @@ export class TradeDecisionEngine {
     const poolXrpReserve = input.snapshot.poolXrpReserve
       ?? (input.snapshot.liquidityXRP ? input.snapshot.liquidityXRP / 2 : 0);
 
+    // FIX #30: Data-driven pool size cap for burst entries.
+    // Historical analysis (156 real trades):
+    //   <2k XRP pool:  17% WR, +94.67 XRP ✓
+    //   2k-5k XRP:      7% WR, -12.44 XRP ✗
+    //   5k-20k XRP:     0% WR, -14.11 XRP ✗
+    //   >20k XRP:       2% WR,  -5.34 XRP ✗
+    // Every burst trade on a pool >2000 XRP reserve is net negative.
+    // Whale signals bypass pool cap — a 90%+ WR whale on a large pool is valid.
+    const isBurstSignal = input.signalType === 'burst' || input.signalType === 'whale_burst';
+    const isWhaleSignal = input.signalType === 'whale_burst' || input.signalType === 'whale_stream';
+    const MAX_BURST_POOL_XRP = 2000; // XRP reserve (one side), not TVL
+    if (isBurstSignal && !isWhaleSignal && poolXrpReserve > MAX_BURST_POOL_XRP) {
+      return reject(0, 0,
+        `Pool too large for burst: ${poolXrpReserve.toFixed(0)} XRP > ${MAX_BURST_POOL_XRP} XRP max (large pools 0-7% WR)`);
+    }
+
     // Whale signals get a relaxed min-pool threshold — a 90%+ WR whale buying a
     // 300 XRP pool is more informative than a 0% WR signal on a 1000 XRP pool.
-    const isWhaleSignal = input.signalType === 'whale_burst' || input.signalType === 'whale_stream';
     const whaleWR       = (input.snapshot as any).whaleWinRate ?? 0;
     const effectiveMinPool = isWhaleSignal
       ? Math.max(300, profile.minPoolXrpReserve * (whaleWR >= 85 ? 0.4 : 0.6))
@@ -189,6 +204,8 @@ export class TradeDecisionEngine {
       ?? (input.snapshot.liquidityXRP ? input.snapshot.liquidityXRP / 2 : 0);
 
     if (input.signalType === 'burst') {
+      // New launches get their own profile regardless of pool size
+      if ((input.snapshot as any).isNewLaunch) return PROFILES.NEW_LAUNCH;
       return pool < 500 ? PROFILES.LOW_LIQ_PROBE : PROFILES.BURST_SCALP;
     }
 
