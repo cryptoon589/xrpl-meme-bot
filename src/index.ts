@@ -257,6 +257,15 @@ async function main() {
           info(`[TDE] Burst rejected: ${decision.rejectReason}`);
           diagnostics.recordTdeReject(decision.rejectReason, 'burst');
           if (decision.rejectReason?.includes('shallow')) diagnostics.increment('burstRejectedPoolTooSmall');
+          // FIX #33: shadow backtest — track what this rejected signal does next
+          if (priceXRP > 0) {
+            db.recordShadowTrade({
+              currency, issuer, rawCurrency: token.rawCurrency,
+              signalType: 'burst', rejectReason: decision.rejectReason ?? 'unknown',
+              priceAtSignal: priceXRP, poolXrpReserve,
+              signalScore: 0, skippedAt: Date.now(),
+            });
+          }
           tradeLocks.delete(burstKey);
           return;
         }
@@ -270,10 +279,12 @@ async function main() {
           // FIX #28: override profile to NEW_LAUNCH for fresh tokens
           const effectiveProfile = isNewLaunch ? 'NEW_LAUNCH' : decision.profile.name;
           const validatedSnapshot = { ...snapshot, priceXRP: priceXRP };
+          // FIX #33: pass TDE-calculated sizeXRP so alert size == actual size
           const trade = paperTrader.tryOpenBurstTrade(
             token, validatedSnapshot,
             `[BURST] pool: ${poolXrpReserve.toFixed(0)} XRP reserve | profile: ${effectiveProfile}`,
-            burstTp
+            burstTp,
+            decision.sizeXRP
           );
           tradeLocks.delete(burstKey);
           if (trade) {
@@ -1321,6 +1332,15 @@ function startPeriodicScan(
     diagnostics.resetHourly();
     sendAlert(telegramAlerter, db, { type: 'open_positions_update', message: diagMsg }, config);
   }, 3600000);
+
+  // FIX #33: shadow backtest resolver — runs every hour, resolves shadow trades >4h old
+  setInterval(() => {
+    db.resolveShadowTrades(async (currency, issuer, rawCurrency) => {
+      return ammPriceFetcher.getPrice(currency, issuer, rawCurrency ?? undefined)
+        .then(p => p?.priceXRP ?? null);
+    });
+  }, 60 * 60 * 1000);
+
   // ── Trade analysis cron: runs every 6h ────────────────────────────
   const tradeAnalyzer = new TradeAnalyzer(db);
 

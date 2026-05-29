@@ -16,13 +16,16 @@ export function loadConfig(): BotConfig {
   if (!['WATCH', 'PAPER', 'AUTO', 'LIVE'].includes(rawMode)) {
     error(`Invalid MODE: ${rawMode}. Defaulting to WATCH`);
   }
-  const mode = rawMode === 'AUTO' ? 'WATCH' : rawMode as 'WATCH' | 'PAPER' | 'AUTO';
+  // FIX #33: properly cast LIVE mode instead of silently dropping it.
+  // Previous code cast rawMode as 'WATCH'|'PAPER'|'AUTO' which excluded LIVE —
+  // if someone set MODE=LIVE it would compile but mode would be typed wrong.
+  const mode = rawMode === 'AUTO' ? 'WATCH' : rawMode as 'WATCH' | 'PAPER' | 'AUTO' | 'LIVE';
 
   const config: BotConfig = {
     xrplWsUrl: process.env.XRPL_WS_URL || 'wss://rpc.xrplclaw.com/ws',
     telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
     telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
-    mode: mode === 'AUTO' ? 'WATCH' : mode,
+    mode: mode,
     minLiquidityXRP: parseInt(process.env.MIN_LIQUIDITY_XRP || '500', 10),
     minScoreAlert: parseInt(process.env.MIN_SCORE_ALERT || '55', 10),
     minScorePaperTrade: parseInt(process.env.MIN_SCORE_PAPER_TRADE || '55', 10),

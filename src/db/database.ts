@@ -15,7 +15,7 @@ import {
   DailySummary,
   AlertPayload,
 } from '../types';
-import { info, warn } from '../utils/logger';
+import { info, warn, debug } from '../utils/logger';
 
 export class Database {
   private db: BetterSQLite3.Database;
@@ -168,14 +168,19 @@ export class Database {
   saveToken(token: TrackedToken): void {
     try {
       const now = Date.now();
-      // Always touch last_updated so tokens don't starve due to stale timestamps.
-      // INSERT OR REPLACE deletes and re-inserts, which would lose the original first_seen;
-      // use UPDATE then INSERT only if the token is genuinely new.
-      const updateStmt = this.db.prepare(`UPDATE tokens SET last_updated = ? WHERE currency = ? AND issuer = ?`);
-      const updateResult = this.runWithRetry(updateStmt, [now, token.currency, token.issuer]);
+      // FIX #33: Always persist raw_currency alongside currency/issuer.
+      // getPrice() needs the hex-padded raw currency for AMM API calls — without it
+      // it falls back to ASCII name which causes "Issue is malformed" errors.
+      // COALESCE: don't overwrite an existing raw_currency with null if caller doesn't have it.
+      const updateStmt = this.db.prepare(
+        `UPDATE tokens SET last_updated = ?, raw_currency = COALESCE(?, raw_currency) WHERE currency = ? AND issuer = ?`
+      );
+      const updateResult = this.runWithRetry(updateStmt, [now, token.rawCurrency ?? null, token.currency, token.issuer]);
       if (updateResult.changes === 0) {
-        const insertStmt = this.db.prepare(`INSERT INTO tokens (currency, issuer, first_seen, last_updated) VALUES (?, ?, ?, ?)`);
-        this.runWithRetry(insertStmt, [token.currency, token.issuer, token.firstSeen, now]);
+        const insertStmt = this.db.prepare(
+          `INSERT INTO tokens (currency, issuer, first_seen, last_updated, raw_currency) VALUES (?, ?, ?, ?, ?)`
+        );
+        this.runWithRetry(insertStmt, [token.currency, token.issuer, token.firstSeen, now, token.rawCurrency ?? null]);
       }
     } catch (err) {
       warn(`Error saving token: ${err}`);
@@ -190,6 +195,7 @@ export class Database {
         issuer: row.issuer,
         firstSeen: row.first_seen,
         lastUpdated: row.last_updated,
+        rawCurrency: row.raw_currency ?? undefined,
       }));
     } catch (err) {
       warn(`Error getting tracked tokens: ${err}`);
@@ -961,9 +967,121 @@ export class Database {
     try {
       this.db.exec(SCHEMA.missedOpportunities);
       this.db.exec(SCHEMA.profileStats);
+      this.db.exec(SCHEMA.shadowTrades);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_missed_opp_currency ON missed_opportunities(currency, issuer)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_stats_profile ON profile_stats(profile, closed_at)`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_currency ON shadow_trades(currency, issuer, skipped_at)`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_unresolved ON shadow_trades(resolved_at, skipped_at)`);
     } catch { /* already exists */ }
+  }
+
+  // ==================== SHADOW BACKTEST ====================
+
+  recordShadowTrade(data: {
+    currency: string; issuer: string; rawCurrency?: string;
+    signalType: string; rejectReason: string;
+    priceAtSignal: number; poolXrpReserve?: number; signalScore?: number;
+    skippedAt: number;
+  }): void {
+    try {
+      const stmt = this.db.prepare(`
+        INSERT OR IGNORE INTO shadow_trades
+          (currency, issuer, raw_currency, signal_type, reject_reason,
+           price_at_signal, pool_xrp_reserve, signal_score, skipped_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      this.runWithRetry(stmt, [
+        data.currency, data.issuer, data.rawCurrency ?? null,
+        data.signalType, data.rejectReason,
+        data.priceAtSignal, data.poolXrpReserve ?? null, data.signalScore ?? null,
+        data.skippedAt,
+      ]);
+    } catch (err) {
+      warn(`[ShadowTrade] record error: ${err}`);
+    }
+  }
+
+  resolveShadowTrades(
+    getPrice: (currency: string, issuer: string, rawCurrency?: string | null) => Promise<number | null>
+  ): void {
+    // Resolve shadow trades that are old enough but not yet resolved.
+    // 15m, 1h, 4h windows — only resolve once all windows have elapsed.
+    const now = Date.now();
+    const RESOLVE_AFTER_MS = 4 * 60 * 60 * 1000; // resolve after 4h
+    try {
+      const rows = this.db.prepare(`
+        SELECT * FROM shadow_trades
+        WHERE resolved_at IS NULL AND skipped_at < ?
+        ORDER BY skipped_at ASC LIMIT 20
+      `).all(now - RESOLVE_AFTER_MS) as any[];
+
+      if (rows.length === 0) return;
+
+      for (const row of rows) {
+        // Best effort: use current price as proxy for "what it is now"
+        // Real resolution needs price history — use missed_opportunities max_price fields if available
+        const missedRow = this.db.prepare(`
+          SELECT max_price_10m, max_price_30m, max_price_60m
+          FROM missed_opportunities
+          WHERE currency = ? AND issuer = ? AND ABS(skipped_at - ?) < 5*60*1000
+          LIMIT 1
+        `).get(row.currency, row.issuer, row.skipped_at) as any;
+
+        const base = row.price_at_signal;
+        const pct = (p: number | null) => p && base > 0 ? ((p - base) / base) * 100 : null;
+
+        const max15m = missedRow?.max_price_10m ?? null; // closest available
+        const max1h  = missedRow?.max_price_30m ?? null;
+        const max4h  = missedRow?.max_price_60m ?? null;
+
+        this.db.prepare(`
+          UPDATE shadow_trades SET
+            max_price_15m = ?, max_price_1h = ?, max_price_4h = ?,
+            pct_gain_15m = ?, pct_gain_1h = ?, pct_gain_4h = ?,
+            resolved_at = ?
+          WHERE id = ?
+        `).run(
+          max15m, max1h, max4h,
+          pct(max15m), pct(max1h), pct(max4h),
+          now, row.id
+        );
+      }
+
+      if (rows.length > 0) {
+        debug(`[ShadowBacktest] Resolved ${rows.length} shadow trades`);
+      }
+    } catch (err) {
+      warn(`[ShadowBacktest] resolve error: ${err}`);
+    }
+  }
+
+  getShadowStats(): Record<string, { count: number; avgGain1h: number; avgGain4h: number; missedWinners: number }> {
+    try {
+      const rows = this.db.prepare(`
+        SELECT reject_reason,
+          COUNT(*) as cnt,
+          ROUND(AVG(pct_gain_1h), 1) as avg_1h,
+          ROUND(AVG(pct_gain_4h), 1) as avg_4h,
+          SUM(CASE WHEN pct_gain_1h > 50 THEN 1 ELSE 0 END) as winners_1h
+        FROM shadow_trades
+        WHERE resolved_at IS NOT NULL
+        GROUP BY reject_reason
+        ORDER BY cnt DESC
+      `).all() as any[];
+
+      const result: Record<string, any> = {};
+      for (const r of rows) {
+        result[r.reject_reason] = {
+          count: r.cnt,
+          avgGain1h: r.avg_1h ?? 0,
+          avgGain4h: r.avg_4h ?? 0,
+          missedWinners: r.winners_1h ?? 0,
+        };
+      }
+      return result;
+    } catch {
+      return {};
+    }
   }
 
   saveMissedOpportunity(sig: import('../market/missedOpportunityTracker').MissedSignal): void {

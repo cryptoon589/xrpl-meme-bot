@@ -102,7 +102,9 @@ export class PaperTrader {
     token: TrackedToken,
     snapshot: MarketSnapshot | null,
     entryReason: string,
-    tpTargets?: { tp1: number; tp2: number }
+    tpTargets?: { tp1: number; tp2: number },
+    /** FIX #33: TDE-calculated size. When provided, overrides internal velocity sizing. */
+    tdeSizeXRP?: number
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
 
@@ -165,13 +167,16 @@ export class PaperTrader {
     const reentryMultiplier = prevPnl !== null && prevPnl > 0 ? 1.5 : 1.0;
     if (reentryMultiplier > 1) info(`[ConvictionReentry] ${key} previous trade was +${prevPnl!.toFixed(2)} XRP — sizing up 1.5×`);
 
-    // NEW_LAUNCH: use profile max size cap (10 XRP) not the burst 25 XRP cap
+    // FIX #33: TDE is authoritative for sizing when provided — avoids alert/actual mismatch.
+    // Fallback: internal velocity-based formula for cases where TDE size not passed.
     const isNewLaunch = (snapshot as any).isNewLaunch === true;
     const hardCap = isNewLaunch ? 10 : 25;
-    const tradeSizeXRP = Math.min(
-      this.config.minTradeXRP * velocityMultiplier * liquidityMultiplier * reentryMultiplier,
-      hardCap
-    );
+    const tradeSizeXRP = tdeSizeXRP != null
+      ? Math.min(Math.max(tdeSizeXRP, this.config.minTradeXRP), hardCap)
+      : Math.min(
+          this.config.minTradeXRP * velocityMultiplier * liquidityMultiplier * reentryMultiplier,
+          hardCap
+        );
     if (this.bankrollXRP < tradeSizeXRP) {
       warn(`Insufficient bankroll for burst trade`);
       return null;
@@ -931,9 +936,13 @@ export class PaperTrader {
     const actualPct = Math.min(percentOfOriginal, trade.remainingPosition);
     if (actualPct <= 0) return;
 
-    // Tokens to sell = original tokens * fraction of original being sold
-    const originalTokens = trade.entryAmountXRP / trade.entryPriceXRP;
-    const tokensToSell = originalTokens * (actualPct / 100);
+    // FIX #33: tokens to sell derived from live position.tokensHeld, not entry math.
+    // entryAmountXRP / entryPriceXRP ignored slippage on entry, so original token count
+    // was slightly off. Use the actual tracked tokensHeld scaled by fraction being sold.
+    // actualPct is % of original; convert to % of remaining for a clean proportional sell.
+    const remainingBefore = trade.remainingPosition; // % of original still held
+    const fractionOfRemaining = remainingBefore > 0 ? actualPct / remainingBefore : 0;
+    const tokensToSell = position.tokensHeld * fractionOfRemaining;
 
     // Slippage on trade value vs pool XRP reserve
     const tradeValueXRP = tokensToSell * exitPrice;
@@ -1242,10 +1251,20 @@ export class PaperTrader {
     const UNPRICEABLE_TIMEOUT_MS = 2 * 60 * 60 * 1000; // 2h (was 30min)
     const WARMUP_GRACE_MS = 5 * 60 * 1000; // never force-close within 5 min of opening
 
-    for (const [key, position] of this.openPositions.entries()) {
+    // FIX #33: fetch prices for all open positions concurrently (was sequential await).
+    // With 4 open positions × ~300ms per AMM fetch = 1.2s sequential delay per scan cycle.
+    // Parallel fetch reduces this to ~300ms regardless of position count.
+    const positionEntries = Array.from(this.openPositions.entries());
+    const prices = await Promise.all(
+      positionEntries.map(([, pos]) =>
+        getPrice(pos.trade.tokenCurrency, pos.trade.tokenIssuer, pos.trade.rawCurrency)
+      )
+    );
+
+    for (let i = 0; i < positionEntries.length; i++) {
+      const [key, position] = positionEntries[i];
       const { trade } = position;
-      // Always pass rawCurrency (hex) so ammPriceFetcher uses the correct API format
-      const price = await getPrice(trade.tokenCurrency, trade.tokenIssuer, trade.rawCurrency);
+      const price = prices[i];
 
       // No price — check if position has been open too long without pricing
       if (!price || price <= 0) {

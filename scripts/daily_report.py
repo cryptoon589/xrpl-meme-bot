@@ -105,8 +105,28 @@ def main():
     c.execute("""SELECT ROUND(SUM(pnl_xrp),2) FROM paper_trades
         WHERE status='closed' AND exit_reason != 'force_close_no_price'""")
     all_pnl = c.fetchone()[0] or 0
-    # Starting bankroll was 100 XRP
     bankroll_est = 100 + all_pnl
+
+    # --- Exit reason breakdown (7d) ---
+    c.execute("""SELECT exit_reason, COUNT(*), ROUND(AVG(pnl_percent),1)
+        FROM paper_trades WHERE status='closed' AND entry_timestamp > ?
+        GROUP BY exit_reason ORDER BY COUNT(*) DESC LIMIT 8""", (now_ts - week_ms,))
+    exit_reasons = c.fetchall()
+
+    # --- Shadow backtest stats (resolved) ---
+    shadow_rows = []
+    try:
+        c.execute("""SELECT reject_reason,
+            COUNT(*) as cnt,
+            ROUND(AVG(pct_gain_1h),1) as avg_1h,
+            ROUND(AVG(pct_gain_4h),1) as avg_4h,
+            SUM(CASE WHEN pct_gain_1h > 50 THEN 1 ELSE 0 END) as winners
+            FROM shadow_trades WHERE resolved_at IS NOT NULL
+            AND skipped_at > ?
+            GROUP BY reject_reason ORDER BY cnt DESC LIMIT 6""", (now_ts - week_ms,))
+        shadow_rows = c.fetchall()
+    except Exception:
+        pass  # table may not exist on older DBs
 
     conn.close()
 
@@ -138,6 +158,16 @@ def main():
         for label, ok, val in checks
     )
 
+    exit_lines = '\n'.join(
+        f"  {r[0] or 'unknown'}: {r[1]}x avg {r[2]}%"
+        for r in exit_reasons
+    ) or '  no data'
+
+    shadow_lines = '\n'.join(
+        f"  {r[0]}: {r[1]}x | avg 1h {'+' if (r[2] or 0)>=0 else ''}{r[2]}% | {r[4]} winners"
+        for r in shadow_rows
+    ) or '  no data (table empty or unresolved)'
+
     msg = f"""📊 <b>DAILY BOT REPORT — {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}</b>
 
 <b>Bankroll:</b> ~{bankroll_est:.2f} XRP
@@ -155,6 +185,12 @@ Trades: {total_t} | WR: {total_wr}% | Net: {'+' if (total_net or 0)>=0 else ''}{
 
 <b>By Profile (7d)</b>
 {profile_lines}
+
+<b>Exit Reasons (7d)</b>
+{exit_lines}
+
+<b>Shadow Backtest — Rejected Signals (7d)</b>
+{shadow_lines}
 
 <b>Live Readiness: {readiness}</b>
 {check_lines}"""

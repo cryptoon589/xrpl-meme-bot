@@ -27,7 +27,12 @@ import {
 } from './tradeProfiles';
 import { diagnostics } from '../diagnostics/diagnostics';
 
-export type DecisionOutcome = 'APPROVED' | 'REJECTED' | 'DRY_RUN';
+// FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
+// APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
+// DRY_RUN kept as alias for backward compat; callers should treat same as APPROVED_PAPER.
+export type DecisionOutcome = 'APPROVED_LIVE' | 'APPROVED_PAPER' | 'DRY_RUN' | 'REJECTED';
+/** @deprecated use APPROVED_LIVE */ export type ApprovedLive = 'APPROVED_LIVE';
+/** @deprecated use APPROVED_PAPER */ export type ApprovedPaper = 'APPROVED_PAPER';
 
 export interface DecisionResult {
   outcome: DecisionOutcome;
@@ -125,10 +130,12 @@ export class TradeDecisionEngine {
     // Whale signals bypass pool cap — a 90%+ WR whale on a large pool is valid.
     const isBurstSignal = input.signalType === 'burst' || input.signalType === 'whale_burst';
     const isWhaleSignal = input.signalType === 'whale_burst' || input.signalType === 'whale_stream';
-    const MAX_BURST_POOL_XRP = 2000; // XRP reserve (one side), not TVL
+    // FIX #33: env-configurable pool cap. Default 2000 XRP (data-driven).
+    // Override with MAX_BURST_POOL_XRP=5000 to experiment with larger pools.
+    const MAX_BURST_POOL_XRP = parseInt(process.env.MAX_BURST_POOL_XRP || '2000', 10);
     if (isBurstSignal && !isWhaleSignal && poolXrpReserve > MAX_BURST_POOL_XRP) {
       return reject(0, 0,
-        `Pool too large for burst: ${poolXrpReserve.toFixed(0)} XRP > ${MAX_BURST_POOL_XRP} XRP max (large pools 0-7% WR)`);
+        `Pool too large for burst: ${poolXrpReserve.toFixed(0)} XRP > ${MAX_BURST_POOL_XRP} XRP max`);
     }
 
     // Whale signals get a relaxed min-pool threshold — a 90%+ WR whale buying a
@@ -176,8 +183,8 @@ export class TradeDecisionEngine {
     const seedSet = !!process.env.TRADING_WALLET_SEED;
 
     if (!isLiveMode || !liveEnabled || !seedSet) {
-      debug(`[TDE] DRY_RUN approved: ${posKey} profile=${profile.name} size=${sizeXRP.toFixed(2)} slip=${(slippage*100).toFixed(2)}%`);
-      return { outcome: 'DRY_RUN', profile, sizeXRP, slippage, roundTripLossPct };
+      debug(`[TDE] APPROVED_PAPER: ${posKey} profile=${profile.name} size=${sizeXRP.toFixed(2)} slip=${(slippage*100).toFixed(2)}%`);
+      return { outcome: 'APPROVED_PAPER', profile, sizeXRP, slippage, roundTripLossPct };
     }
 
     // ── 10. LIVE preflight ─────────────────────────────────────────────────
@@ -186,9 +193,9 @@ export class TradeDecisionEngine {
       return reject(sizeXRP, slippage, `Live preflight failed: ${liveChecks.reason}`);
     }
 
-    info(`[TDE] APPROVED LIVE: ${posKey} profile=${profile.name} size=${sizeXRP.toFixed(2)} slip=${(slippage*100).toFixed(2)}%`);
+    info(`[TDE] APPROVED_LIVE: ${posKey} profile=${profile.name} size=${sizeXRP.toFixed(2)} slip=${(slippage*100).toFixed(2)}%`);
     return {
-      outcome: 'APPROVED',
+      outcome: 'APPROVED_LIVE',
       profile,
       sizeXRP,
       slippage,

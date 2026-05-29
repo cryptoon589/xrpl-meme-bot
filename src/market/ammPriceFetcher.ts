@@ -2,7 +2,7 @@
  * AMM Price Fetcher
  *
  * Fetches real price and liquidity directly from AMM pools via amm_info.
- * This is the authoritative price source for XRPL meme tokens — most
+ * This is the authoritative price source for XRPL meme tokens - most
  * liquidity lives in AMM pools, not the DEX order book.
  *
  * Falls back to book_offers if no AMM pool exists.
@@ -25,10 +25,14 @@ export class AMMPriceFetcher {
   private xrplClient: XRPLClient;
   // Cache: key = "currency:issuer", value = { price, fetchedAt }
   private cache: Map<string, { price: TokenPrice; fetchedAt: number }> = new Map();
-  // Null cache: tokens confirmed to have no price source — skip retrying for 5 min
+  // Null cache: tokens confirmed to have no price source - skip retrying for 5 min
   private nullCache: Map<string, number> = new Map();
-  private readonly CACHE_TTL_MS = 90_000;      // 90s price cache
-  private readonly NULL_CACHE_TTL_MS = 300_000; // 5 min null cache — don't retry no-price tokens
+  // FIX #33: tiered price cache TTLs.
+  // Open positions need fresh exit prices - 90s stale price on a dumping meme = missed stop.
+  // Non-position scanning can tolerate 90s (reduces AMM hammering during discovery).
+  private readonly CACHE_TTL_MS = 90_000;           // 90s for non-position scanning
+  private readonly OPEN_POS_CACHE_TTL_MS = 15_000;  // 15s for tokens with open positions
+  private readonly NULL_CACHE_TTL_MS = 300_000;     // 5 min null cache - don't retry no-price tokens
   // Open position tracking: bypass null cache for tokens with open trades
   private openPositionKeys: Set<string> = new Set();
 
@@ -36,7 +40,7 @@ export class AMMPriceFetcher {
     this.xrplClient = xrplClient;
   }
 
-  /** Register an open position — bypasses null cache so exit checks always get a live price */
+  /** Register an open position - bypasses null cache so exit checks always get a live price */
   registerOpenPosition(currency: string, issuer: string): void {
     this.openPositionKeys.add(`${currency}:${issuer}`);
   }
@@ -57,24 +61,25 @@ export class AMMPriceFetcher {
   async getPrice(currency: string, issuer: string, rawCurrency?: string, bypassNullCache = false): Promise<TokenPrice | null> {
     const key = `${currency}:${issuer}`;
     const now = Date.now();
-    // Open positions always bypass null cache — we need a price to manage exit
+    // Open positions always bypass null cache - we need a price to manage exit
     const isOpen = this.openPositionKeys.has(key);
     const effectiveBypass = bypassNullCache || isOpen;
 
-    // Return cached price if fresh (open positions still use the positive cache — 90s is fine)
+    // FIX #33: use shorter TTL for open positions — exit accuracy matters more than scan efficiency.
+    const cacheTtl = isOpen ? this.OPEN_POS_CACHE_TTL_MS : this.CACHE_TTL_MS;
     const cached = this.cache.get(key);
-    if (cached && now - cached.fetchedAt < this.CACHE_TTL_MS) {
+    if (cached && now - cached.fetchedAt < cacheTtl) {
       return cached.price;
     }
 
-    // Skip tokens that previously returned no price — avoid hammering the network
+    // Skip tokens that previously returned no price - avoid hammering the network
     // Exception: open positions bypass the null cache so exit checks always fire
     const nullTs = this.nullCache.get(key);
     if (!effectiveBypass && nullTs && now - nullTs < this.NULL_CACHE_TTL_MS) {
       return null;
     }
 
-    // Use rawCurrency (hex) for API calls — decoded name causes "Issue is malformed"
+    // Use rawCurrency (hex) for API calls - decoded name causes "Issue is malformed"
     const apiCurrency = rawCurrency || currency;
 
     // Try AMM pool first (primary)
@@ -88,7 +93,7 @@ export class AMMPriceFetcher {
     // Some tokens have their AMM indexed under the hex-padded key, not the ASCII key.
     // This catches cases where currency='ARMY' but AMM registered as hex equivalent.
     if (apiCurrency === currency && currency.length <= 20) {
-      // currency might be ASCII — try hex-padded version
+      // currency might be ASCII - try hex-padded version
       const hexPadded = Buffer.from(currency).toString('hex').toUpperCase().padEnd(40, '0');
       if (hexPadded !== apiCurrency) {
         const ammPrice2 = await this.fetchFromAMM(hexPadded, issuer);
@@ -141,7 +146,7 @@ export class AMMPriceFetcher {
       let tokenUnits: number;
 
       // XRPL AMM: XRP side is always a string (drops), token side is always an object
-      // amount1 is XRP (string) and amount2 is the token (object) — or vice versa
+      // amount1 is XRP (string) and amount2 is the token (object) - or vice versa
       if (typeof amount1 === 'string' && typeof amount2 === 'object') {
         // Normal layout: amount1=XRP drops, amount2=token
         xrpDrops = parseInt(amount1);
@@ -171,7 +176,7 @@ export class AMMPriceFetcher {
         source: 'amm',
       };
     } catch (err: any) {
-      // "actNotFound" means no AMM pool exists — normal, not an error
+      // "actNotFound" means no AMM pool exists - normal, not an error
       if (err?.message?.includes('actNotFound') || err?.message?.includes('Account not found')) {
         return null;
       }

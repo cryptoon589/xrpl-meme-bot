@@ -186,6 +186,33 @@ export const SCHEMA = {
     )
   `,
 
+  // Shadow backtest: every rejected/skipped signal is recorded with entry price.
+  // A background job periodically resolves max_price_Xm so we can measure
+  // "what would have happened" for each rejection reason.
+  shadowTrades: `
+    CREATE TABLE IF NOT EXISTS shadow_trades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      currency TEXT NOT NULL,
+      issuer TEXT NOT NULL,
+      raw_currency TEXT,
+      signal_type TEXT NOT NULL,
+      reject_reason TEXT NOT NULL,
+      price_at_signal REAL NOT NULL,
+      pool_xrp_reserve REAL,
+      signal_score REAL,
+      skipped_at INTEGER NOT NULL,
+      -- Filled in later by shadow resolver
+      max_price_15m REAL,
+      max_price_1h REAL,
+      max_price_4h REAL,
+      pct_gain_15m REAL,
+      pct_gain_1h REAL,
+      pct_gain_4h REAL,
+      resolved_at INTEGER,
+      UNIQUE(currency, issuer, skipped_at)
+    )
+  `,
+
   profileStats: `
     CREATE TABLE IF NOT EXISTS profile_stats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
