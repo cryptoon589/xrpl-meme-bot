@@ -1,6 +1,6 @@
 import { info, debug } from '../utils/logger';
 
-export type SignalSource = 'burst' | 'stream' | 'scored' | 'sweep' | 'trending' | 'unknown';
+export type SignalSource = 'burst' | 'stream' | 'scored' | 'momentum' | 'sweep' | 'trending' | 'unknown';
 
 export interface TokenDiagnostic {
   token: string;

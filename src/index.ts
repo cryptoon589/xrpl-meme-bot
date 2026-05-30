@@ -1241,35 +1241,34 @@ function startPeriodicScan(
           tradeLocks.delete(tradeKey);
           return;
         }
-        const trade = paperTrader.tryOpenTrade(
+        const burstTpM = runtimeLearning.getTpTargets('burst');
+        const trade = paperTrader.tryOpenBurstTrade(
           token,
           { ...snapshot, priceXRP: _live.priceXRP, poolXrpReserve: _live.poolXRP },
-          score.totalScore,
-          `[SCORED] ${entryReason} | profile: ${decision.profile.name}`,
-          scoredTp
+          `[MOMENTUM] ${entryReason} | profile: ${decision.profile.name}`,
+          burstTpM, decision.sizeXRP
         );
-                tradeLocks.delete(tradeKey);
-                if (trade) {
-                  trade.tradeProfile = decision.profile.name;
-                  trade.tradeSource  = 'scored';
-                  db.updatePaperTrade(trade);
-                  diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'scored');
-                  setTimeout(() => sendAlert(telegramAlerter, db, {
-                    type: 'paper_trade_opened',
-                    tokenCurrency: token.currency, tokenIssuer: token.issuer,
-                    paperTrade: trade,
-                    tradeProfileName: decision.profile.name,
-                    tradeSource: 'scored',
-                    poolXrpReserve: snapshot.poolXrpReserve,
-                    slippage: decision.slippage,
-                    decisionSizeXRP: decision.sizeXRP,
-                    message: `Opened scored trade for ${token.currency}`,
-                  }, config), 0);
-                  totalTrades++;
-                  if (process.env.TRADING_WALLET_SEED && snapshot.priceXRP) {
-                    liveValidator.recordIntended(token.currency, token.issuer, snapshot.priceXRP, trade.entryAmountXRP);
-                  }
-                }
+        tradeLocks.delete(tradeKey);
+        if (trade) {
+          trade.tradeProfile = decision.profile.name;
+          trade.tradeSource = 'momentum';
+          db.updatePaperTrade(trade);
+          diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'momentum');
+          setTimeout(() => sendAlert(telegramAlerter, db, {
+            type: 'paper_trade_opened',
+            tokenCurrency: token.currency, tokenIssuer: token.issuer,
+            paperTrade: trade, tradeProfileName: decision.profile.name,
+            tradeSource: 'momentum',
+            poolXrpReserve: _live.poolXRP,
+            slippage: decision.slippage,
+            decisionSizeXRP: decision.sizeXRP,
+            message: `⚡ Momentum entry: ${token.currency}`,
+          }, config), 0);
+          totalTrades++;
+          if (process.env.TRADING_WALLET_SEED && _live.priceXRP) {
+            liveValidator.recordIntended(token.currency, token.issuer, _live.priceXRP, trade.entryAmountXRP);
+          }
+        }
               }).catch(err => { warn(`[TDE] Scored decision error: ${err}`); tradeLocks.delete(tradeKey); });
             }
 
