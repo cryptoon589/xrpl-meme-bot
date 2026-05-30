@@ -121,23 +121,10 @@ export class TradeDecisionEngine {
     const poolXrpReserve = input.snapshot.poolXrpReserve
       ?? (input.snapshot.liquidityXRP ? input.snapshot.liquidityXRP / 2 : 0);
 
-    // FIX #30: Data-driven pool size cap for burst entries.
-    // Historical analysis (156 real trades):
-    //   <2k XRP pool:  17% WR, +94.67 XRP ✓
-    //   2k-5k XRP:      7% WR, -12.44 XRP ✗
-    //   5k-20k XRP:     0% WR, -14.11 XRP ✗
-    //   >20k XRP:       2% WR,  -5.34 XRP ✗
-    // Every burst trade on a pool >2000 XRP reserve is net negative.
-    // Whale signals bypass pool cap — a 90%+ WR whale on a large pool is valid.
-    const isBurstSignal = input.signalType === 'burst' || input.signalType === 'whale_burst';
-    const isWhaleSignal = input.signalType === 'whale_burst' || input.signalType === 'whale_stream';
-    // FIX #33: env-configurable pool cap. Default 2000 XRP (data-driven).
-    // Override with MAX_BURST_POOL_XRP=5000 to experiment with larger pools.
-    const MAX_BURST_POOL_XRP = parseInt(process.env.MAX_BURST_POOL_XRP || '2000', 10);
-    if (isBurstSignal && !isWhaleSignal && poolXrpReserve > MAX_BURST_POOL_XRP) {
-      return reject(0, 0,
-        `Pool too large for burst: ${poolXrpReserve.toFixed(0)} XRP > ${MAX_BURST_POOL_XRP} XRP max`);
-    }
+  // FIX #38: Pool size cap removed — momentum gate (price movement + buy pressure)
+  // is the quality filter now. Any pool size is valid if momentum signals align.
+  const isBurstSignal = input.signalType === 'burst' || input.signalType === 'whale_burst';
+  const isWhaleSignal = input.signalType === 'whale_burst' || input.signalType === 'whale_stream';
 
     // Whale signals get a relaxed min-pool threshold — a 90%+ WR whale buying a
     // 300 XRP pool is more informative than a 0% WR signal on a 1000 XRP pool.
