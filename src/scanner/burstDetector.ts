@@ -116,6 +116,32 @@ export class BurstDetector {
    * ensureAmmRegistered fires an async lookup AFTER scanAmmFlows already ran.
    * Calling this at startup means every subsequent live buy is caught from tx #1.
    */
+  /**
+   * FIX #35: Register a brand-new token (from AMMCreate) with the burst detector
+   * immediately so it starts tracking buys from the first transaction.
+   * Bypasses the normal discovery path (OfferCreate/Payment detection).
+   */
+  registerNewLaunch(rawCurrency: string, issuer: string, displayName: string): void {
+    const key = `${rawCurrency}:${issuer}`;
+    if (this.tokens.has(key)) return; // already known
+    if (STABLECOINS.has(rawCurrency) || STABLECOINS.has(displayName)) return;
+    this.tokens.set(key, {
+      rawCurrency, issuer,
+      displayName: displayName || rawCurrency,
+      buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
+      lastTrade: Date.now(),
+      firstSeenAt: Date.now(),
+    });
+    // Register AMM account async so future buys are caught immediately
+    this.fetchAMMAccount(rawCurrency, issuer).then(ammAccount => {
+      if (ammAccount) {
+        this.ammToToken.set(ammAccount, key);
+        debug(`[NewLaunch] Registered AMM account for ${displayName}: ${ammAccount}`);
+      }
+    }).catch(() => {});
+    info(`[NewLaunch] Registered ${displayName} with burst detector (AMMCreate)`);
+  }
+
   async preloadAMMs(): Promise<void> {
     const tokens = this.db.getTrackedTokens();
     info(`[BurstDetector] Pre-loading AMM accounts for ${tokens.length} tracked tokens...`);

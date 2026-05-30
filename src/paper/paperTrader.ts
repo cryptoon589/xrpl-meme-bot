@@ -44,6 +44,9 @@ export class PaperTrader {
   private lastResetDate: string = '';
   private buyPressureTracker: BuyPressureTracker | null = null;
   private ammPriceFetcher: AMMPriceFetcher | null = null;
+  /** FIX #36: Runner re-entry callback — fired when TP1 hits with strong momentum.
+   * index.ts wires this to attempt a small re-entry position on confirmed runners. */
+  public onTP1Hit?: (currency: string, issuer: string, rawCurrency: string, currentPrice: number, poolXRP: number) => void;
 
   // Trading stats for Kelly Criterion
   private totalTrades: number = 0;
@@ -606,6 +609,11 @@ export class PaperTrader {
           trade.tp1Hit = true;
           this.db.updatePaperTrade(trade);
           tradeEvents.push(this.snapshotTrade(trade));
+         // FIX #36: fire runner re-entry callback — index.ts decides whether to re-enter
+         if (this.onTP1Hit) {
+           const _poolXRP = (snapshot as any)?.poolXrpReserve ?? ((snapshot as any)?.liquidityXRP ?? 0) / 2;
+           this.onTP1Hit(trade.tokenCurrency, trade.tokenIssuer, trade.rawCurrency ?? trade.tokenCurrency, currentPrice, _poolXRP);
+         }
         }
 
         // TP2 — partial exit per profile, leaves runner (if any)

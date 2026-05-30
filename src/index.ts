@@ -316,6 +316,78 @@ async function main() {
     paperTrader.setBuyPressureTracker(buyPressureTracker);
     paperTrader.setAMMPriceFetcher(ammPriceFetcher);
 
+    // FIX #36: Runner re-entry — when TP1 hits with confirmed momentum,
+    // open a small follow-on position to ride the rest of the move.
+    // Uses NEW_LAUNCH profile (wide stop, no time stop after TP1).
+    paperTrader.onTP1Hit = async (currency, issuer, rawCurrency, currentPrice, poolXRP) => {
+      const reKey = `runner:${currency}:${issuer}`;
+      if (tradeLocks.has(reKey)) return;
+      if (paperTrader.hasOpenPosition(currency, issuer)) return; // still in original position
+      // Only re-enter if buy pressure is still strong
+      const pressure = buyPressureTracker.getSnapshot(rawCurrency, issuer);
+      const totalTx = pressure.buyCount + pressure.sellCount;
+      const buyRatio = totalTx > 0 ? pressure.buyCount / totalTx : 0;
+      if (buyRatio < 0.65 || pressure.buyVolumeXRP < 20) {
+        debug(`[RunnerRe] Skipping ${currency} re-entry — momentum fading (buyRatio=${buyRatio.toFixed(2)} vol=${pressure.buyVolumeXRP.toFixed(0)} XRP)`);
+        return;
+      }
+      // Verify pool still alive with live price
+      const livePrice = await ammPriceFetcher.getPrice(rawCurrency, issuer, rawCurrency, true).catch(() => null);
+      if (!livePrice || livePrice.priceXRP <= 0 || livePrice.poolXRP < 300) return;
+      // Don't re-enter if price already 2x from our TP1 exit — too late
+      if (livePrice.priceXRP > currentPrice * 2) {
+        debug(`[RunnerRe] Skipping ${currency} — price already 2x from TP1 exit`);
+        return;
+      }
+      tradeLocks.add(reKey);
+      info(`[RunnerRe] TP1 hit — attempting runner re-entry on ${currency} @ ${livePrice.priceXRP.toFixed(8)} XRP`);
+      const reSnapshot: any = {
+        tokenCurrency: currency, tokenIssuer: issuer,
+        priceXRP: livePrice.priceXRP, liquidityXRP: livePrice.liquidityXRP,
+        poolXrpReserve: livePrice.poolXRP,
+        buyCount5m: pressure.buyCount, sellCount5m: pressure.sellCount,
+        isNewLaunch: false,
+      };
+      const reToken = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
+      const reTp = runtimeLearning.getTpTargets('burst');
+      tradeDecisionEngine.decide({
+        currency, issuer, rawCurrency, snapshot: reSnapshot,
+        signalType: 'burst', signalScore: 0,
+        bankrollXRP: paperTrader.getState().bankrollXRP,
+        openPositions: paperTrader.getOpenPositionsSummary().length,
+        dailyPnL: paperTrader.getState().dailyPnL,
+        openPositionKeys: new Set(paperTrader.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
+        blocklist: BURST_TRADE_BLOCKLIST,
+      }).then(decision => {
+        tradeLocks.delete(reKey);
+        if (decision.outcome === 'REJECTED') {
+          debug(`[RunnerRe] TDE rejected ${currency}: ${decision.rejectReason}`);
+          return;
+        }
+        const reTrade = paperTrader.tryOpenBurstTrade(
+          reToken, reSnapshot,
+          `[RUNNER_REENTRY] post-TP1 momentum confirmed buyRatio=${buyRatio.toFixed(2)}`,
+          reTp, Math.min(decision.sizeXRP, 5) // cap re-entry at 5 XRP
+        );
+        if (reTrade) {
+          reTrade.tradeProfile = 'NEW_LAUNCH';
+          reTrade.tradeSource = 'burst';
+          db.updatePaperTrade(reTrade);
+          paperTrader.setPositionProfile(currency, issuer, 'NEW_LAUNCH' as any);
+          diagnostics.markTradeOpened(reTrade.tokenCurrency, reTrade.tokenIssuer, 'burst');
+          info(`[RunnerRe] ✅ Re-entry opened on ${currency} — riding the runner`);
+          setTimeout(() => sendAlert(telegramAlerter, db, {
+            type: 'paper_trade_opened',
+            tokenCurrency: currency, tokenIssuer: issuer,
+            paperTrade: reTrade, tradeProfileName: 'NEW_LAUNCH', tradeSource: 'burst',
+            poolXrpReserve: livePrice.poolXRP, slippage: decision.slippage,
+            decisionSizeXRP: decision.sizeXRP,
+            message: `🔄 Runner re-entry: ${currency} (post-TP1)`,
+          }, config), 0);
+        }
+      }).catch(err => { warn(`[RunnerRe] TDE error: ${err}`); tradeLocks.delete(reKey); });
+    };
+
     buyPressureTracker.onMomentumDetected = (currency, issuer, snap) => {
       // Decode hex currency immediately — all downstream keys use decoded form
       const displayCurrency = decodeCurrency(currency);
@@ -473,6 +545,75 @@ async function main() {
     if (discovered) {
       const tracked = activeDiscovery.toTrackedToken(discovered);
       tokenDiscovery.addTrackedToken(tracked);
+      // FIX #35: AMMCreate → immediate burst attempt.
+      // New pool detected live — register with burstDetector immediately
+      // so it tracks buys from tx #1, then attempt a burst entry if pool
+      // has enough XRP. This catches launches at second 0, not scan minute.
+      if (discovered.source === 'amm_pool' && paperTrader && ammPriceFetcher) {
+        const liq = discovered.liquidityXRP ?? 0;
+        const poolXRP = liq / 2;
+        if (poolXRP >= 300) {
+          // Register with burstDetector so it watches buys immediately
+          burstDetector.registerNewLaunch(discovered.rawCurrency, discovered.issuer, discovered.currency);
+          // Attempt burst entry after short delay — give amm_info time to propagate
+          setTimeout(async () => {
+            try {
+              const livePrice = await ammPriceFetcher.getPrice(
+                discovered.rawCurrency, discovered.issuer, discovered.rawCurrency, true
+              );
+              if (!livePrice || livePrice.priceXRP <= 0 || livePrice.poolXRP < 300) return;
+              const launchKey = `${discovered.currency}:${discovered.issuer}`;
+              if (paperTrader.hasOpenPosition(discovered.currency, discovered.issuer)) return;
+              if (tradeLocks.has(launchKey)) return;
+              tradeLocks.add(launchKey);
+              info(`[NewLaunch] AMMCreate detected: ${discovered.currency} pool=${livePrice.poolXRP.toFixed(0)} XRP — attempting entry`);
+              const launchSnapshot: any = {
+                tokenCurrency: discovered.currency, tokenIssuer: discovered.issuer,
+                priceXRP: livePrice.priceXRP, liquidityXRP: livePrice.liquidityXRP,
+                poolXrpReserve: livePrice.poolXRP,
+                buyCount5m: 0, sellCount5m: 0, isNewLaunch: true, tokenAgeMs: 0,
+              };
+              const launchToken = { currency: discovered.currency, issuer: discovered.issuer, rawCurrency: discovered.rawCurrency, lastUpdated: Date.now() } as any;
+              const launchTp = runtimeLearning.getTpTargets('burst');
+              tradeDecisionEngine.decide({
+                currency: discovered.currency, issuer: discovered.issuer, rawCurrency: discovered.rawCurrency,
+                snapshot: launchSnapshot, signalType: 'burst', signalScore: 0,
+                bankrollXRP: paperTrader.getState().bankrollXRP,
+                openPositions: paperTrader.getOpenPositionsSummary().length,
+                dailyPnL: paperTrader.getState().dailyPnL,
+                openPositionKeys: new Set(paperTrader.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
+                blocklist: BURST_TRADE_BLOCKLIST,
+              }).then(decision => {
+                tradeLocks.delete(launchKey);
+                if (decision.outcome === 'REJECTED') {
+                  debug(`[NewLaunch] TDE rejected ${discovered.currency}: ${decision.rejectReason}`);
+                  return;
+                }
+                const trade = paperTrader.tryOpenBurstTrade(
+                  launchToken, launchSnapshot,
+                  `[NEW_LAUNCH] AMMCreate pool=${livePrice.poolXRP.toFixed(0)} XRP`,
+                  launchTp, decision.sizeXRP
+                );
+                if (trade) {
+                  trade.tradeProfile = 'NEW_LAUNCH';
+                  trade.tradeSource = 'burst';
+                  db.updatePaperTrade(trade);
+                  paperTrader.setPositionProfile(discovered.currency, discovered.issuer, 'NEW_LAUNCH' as any);
+                  diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'burst');
+                  setTimeout(() => sendAlert(telegramAlerter, db, {
+                    type: 'paper_trade_opened',
+                    tokenCurrency: discovered.currency, tokenIssuer: discovered.issuer,
+                    paperTrade: trade, tradeProfileName: 'NEW_LAUNCH', tradeSource: 'burst',
+                    poolXrpReserve: livePrice.poolXRP, slippage: decision.slippage,
+                    decisionSizeXRP: decision.sizeXRP,
+                    message: `🆕 New launch entry (AMMCreate): ${discovered.currency}`,
+                  }, config), 0);
+                }
+              }).catch(err => { warn(`[NewLaunch] TDE error: ${err}`); tradeLocks.delete(launchKey); });
+            } catch (err) { warn(`[NewLaunch] entry error: ${err}`); }
+          }, 3000); // 3s delay for amm_info to propagate
+        }
+      }
     }
 
     // Queue for scoring/volume tracking
