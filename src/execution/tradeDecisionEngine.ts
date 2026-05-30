@@ -109,11 +109,12 @@ export class TradeDecisionEngine {
     if (!priceXRP || priceXRP <= 0) {
       return reject(0, 0, 'No valid price');
     }
-    // Reject tokens with suspiciously round/extreme prices that indicate a
-    // misconfigured or USDC-denominated pool — these cause force_close_no_price.
-    // A real meme token at exactly 0.00000000 XRP is a dead pool.
-    const priceStr = priceXRP.toFixed(8);
-    if (priceStr === '0.00000000') {
+    // Reject tokens with zero prices indicating dead/misconfigured pools.
+    // FIX #37: Use toFixed(12) — high-supply tokens have valid prices like 1e-10.
+    // Exception: pool >500 XRP means it's real regardless of price magnitude.
+    const _poolCheck = input.snapshot.poolXrpReserve ?? (input.snapshot.liquidityXRP ? input.snapshot.liquidityXRP / 2 : 0);
+    const priceStr = priceXRP.toFixed(12);
+    if (priceStr === '0.000000000000' && _poolCheck < 500) {
       return reject(0, 0, 'Zero-price token (dead/misconfigured pool)');
     }
 

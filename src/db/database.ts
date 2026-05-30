@@ -1017,7 +1017,7 @@ export class Database {
 
       if (rows.length === 0) return;
 
-      for (const row of rows) {
+      (async () => { for (const row of rows) {
         // Best effort: use current price as proxy for "what it is now"
         // Real resolution needs price history — use missed_opportunities max_price fields if available
         const missedRow = this.db.prepare(`
@@ -1030,9 +1030,20 @@ export class Database {
         const base = row.price_at_signal;
         const pct = (p: number | null) => p && base > 0 ? ((p - base) / base) * 100 : null;
 
-        const max15m = missedRow?.max_price_10m ?? null; // closest available
-        const max1h  = missedRow?.max_price_30m ?? null;
-        const max4h  = missedRow?.max_price_60m ?? null;
+        // FIX #37: fall back to live price when missed_opportunities has no match.
+        // Without this, resolved_at gets set but pct_gain_* stays NULL forever.
+        let max15m = missedRow?.max_price_10m ?? null;
+        let max1h  = missedRow?.max_price_30m ?? null;
+        let max4h  = missedRow?.max_price_60m ?? null;
+
+        // If no missed_opportunity match, use live price as 4h proxy (best effort)
+        if (max1h === null && max4h === null) {
+          const livePrice = await getPrice(row.raw_currency || row.currency, row.issuer, row.raw_currency);
+          if (livePrice && livePrice > 0) {
+            max4h = livePrice;
+            // 15m/1h unknown — leave null (honest about missing data)
+          }
+        }
 
         this.db.prepare(`
           UPDATE shadow_trades SET
@@ -1045,7 +1056,7 @@ export class Database {
           pct(max15m), pct(max1h), pct(max4h),
           now, row.id
         );
-      }
+      } })().catch(err => warn(`[ShadowBacktest] async error: ${err}`));
 
       if (rows.length > 0) {
         debug(`[ShadowBacktest] Resolved ${rows.length} shadow trades`);
