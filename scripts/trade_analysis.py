@@ -145,7 +145,8 @@ c.execute("""SELECT token_currency, trade_profile, trade_source,
     FROM paper_trades WHERE status='closed' AND pnl_xrp IS NOT NULL AND pnl_xrp < 0
     ORDER BY pnl_xrp ASC LIMIT 10""")
 for r in c.fetchall():
-    print(f"  {r[7]}  {r[0]:12s} {r[1]:15s} src={r[2]:8s}  {r[3]:7.2f} XRP  {r[4]:8.1f}%  {r[5]:30s}  hold={r[6]}min")
+    row = tuple(v if v is not None else "" for v in r)
+    print(f" {row[7]:19s} {row[0]:12s} {row[1]:15s} src={row[2]:8s} {float(row[3] or 0):7.2f} XRP {float(row[4] or 0):8.1f}% {row[5]:30s} hold={row[6]}min")
 
 # ── 10. BEST WIN TRADES ──────────────────────────────────────────
 h("10. BEST 10 WINS (all time)")
@@ -156,7 +157,8 @@ c.execute("""SELECT token_currency, trade_profile, trade_source,
     FROM paper_trades WHERE status='closed' AND pnl_xrp IS NOT NULL AND pnl_xrp > 0
     ORDER BY pnl_xrp DESC LIMIT 10""")
 for r in c.fetchall():
-    print(f"  {r[7]}  {r[0]:12s} {r[1]:15s} src={r[2]:8s}  {r[3]:7.2f} XRP  {r[4]:8.1f}%  {r[5]:30s}  hold={r[6]}min")
+    row = tuple(v if v is not None else "" for v in r)
+    print(f" {row[7]:19s} {row[0]:12s} {row[1]:15s} src={row[2]:8s} {float(row[3] or 0):7.2f} XRP {float(row[4] or 0):8.1f}% {row[5]:30s} hold={row[6]}min")
 
 # ── 11. REPEAT TOKEN PATTERNS ────────────────────────────────────
 h("11. TOKENS TRADED 3+ TIMES (pattern tokens)")
@@ -252,7 +254,8 @@ for r in c.fetchall():
     expected_pnl = round(r[3] - r[2], 2) if r[3] and r[2] else None
     mismatch = abs(expected_pnl - r[4]) > 0.1 if expected_pnl is not None and r[4] is not None else False
     flag = "  *** PnL MISMATCH ***" if mismatch else ""
-    print(f"  {r[0]:12s} {r[1]:15s}  entry={r[2]:5.1f}  ret={r[3]:5.1f}  pnl={r[4]:6.2f}  pct={r[5]:7.1f}%  rem={r[6]}%  {r[7]}{flag}")
+    row = tuple(v if v is not None else "" for v in r)
+    print(f" {row[7]:19s} {row[0]:12s} {row[1]:15s} src={row[2]:8s} {float(row[3] or 0):7.2f} XRP {float(row[4] or 0):8.1f}% {row[5]:30s} hold={row[6]}min")
 
 conn.close()
 print("\n=== ANALYSIS COMPLETE ===")

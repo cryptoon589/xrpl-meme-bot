@@ -1075,19 +1075,38 @@ function startPeriodicScan(
                 dailyPnL: paperTrader.getState().dailyPnL,
                 openPositionKeys: new Set(paperTrader.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
                 blocklist: BURST_TRADE_BLOCKLIST,
-              }).then(decision => {
+              }).then(async decision => {
                 if (decision.outcome === 'REJECTED') {
                   info(`[TDE] Scored rejected: ${decision.rejectReason}`);
                   diagnostics.recordTdeReject(decision.rejectReason, 'scored');
                   tradeLocks.delete(tradeKey);
                   return;
                 }
-                const scoredTp = runtimeLearning.getTpTargets('scored');
-                const trade = paperTrader.tryOpenTrade(
-                  token, snapshot, score.totalScore,
-                  `[SCORED] ${entryReason} | profile: ${decision.profile.name}`,
-                  scoredTp
-                );
+        const scoredTp = runtimeLearning.getTpTargets('scored');
+        // FIX #34: Pre-entry live AMM check — snapshot up to 90s stale.
+        // Abort if AMM gone or pool drained >60% since scan.
+        const _live = await ammPriceFetcher.getPrice(
+          token.rawCurrency || token.currency, token.issuer, token.rawCurrency, true
+        );
+        if (!_live || _live.priceXRP <= 0) {
+          warn(`[PreEntry] ${token.currency} — no live AMM price, aborting scored entry`);
+          noPriceCooldowns.set(tradeKey, Date.now());
+          tradeLocks.delete(tradeKey);
+          return;
+        }
+        const _snapPool = snapshot.poolXrpReserve ?? (snapshot.liquidityXRP ? snapshot.liquidityXRP / 2 : 0);
+        if (_snapPool > 200 && _live.poolXRP < _snapPool * 0.4) {
+          warn(`[PreEntry] ${token.currency} — pool drained ${_live.poolXRP.toFixed(0)} vs ${_snapPool.toFixed(0)} XRP, aborting`);
+          tradeLocks.delete(tradeKey);
+          return;
+        }
+        const trade = paperTrader.tryOpenTrade(
+          token,
+          { ...snapshot, priceXRP: _live.priceXRP, poolXrpReserve: _live.poolXRP },
+          score.totalScore,
+          `[SCORED] ${entryReason} | profile: ${decision.profile.name}`,
+          scoredTp
+        );
                 tradeLocks.delete(tradeKey);
                 if (trade) {
                   trade.tradeProfile = decision.profile.name;
@@ -1220,7 +1239,7 @@ function startPeriodicScan(
       if (!raw || raw.length !== 40) return raw || 'UNKNOWN';
       try {
         const stripped = raw.replace(/00+$/, '');
-        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/ /g, '').trim();
+        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
         if (/^[ -~]+$/.test(decoded) && decoded.length > 0) return decoded;
       } catch {}
       return raw.slice(0, 8) + '…';
