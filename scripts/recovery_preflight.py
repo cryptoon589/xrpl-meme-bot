@@ -34,8 +34,8 @@ def main():
         file = Path(str(DB) + suffix)
         if file.exists():
             print(f"SQLite sidecar: {file.name} ({file.stat().st_size} bytes)")
-            if suffix == "-wal":
-                problems.append("WAL file exists; confirm checkpoint/consistent snapshot before copying")
+            if suffix == "-wal" and file.stat().st_size > 0:
+                problems.append("Non-empty WAL file exists; confirm checkpoint/consistent snapshot before copying")
     try:
         p = subprocess.run(["pgrep", "-af", "node.*(dist/index|ts-node.*src/index)|pm2.*xrpl-meme-bot"],
                            capture_output=True, text=True, timeout=5)
