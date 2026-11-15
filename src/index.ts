@@ -1729,16 +1729,20 @@ function startHealthEndpoint(
 
   healthServer = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/healthz') {
+      const xrplStatus = xrplClient.getStatus();
+      const healthy = xrplStatus.connected && xrplStatus.streamConnected &&
+        (xrplStatus.lastTransactionAgeMs < 90000 || xrplStatus.lastTransactionAgeMs === -1);
       const status = {
-        status: 'ok',
+        status: healthy ? 'ok' : 'degraded',
         uptime: Math.round(process.uptime()),
         tokens: tokenDiscovery.getTokenCount(),
         positions: paperTrader?.getOpenPositions().length || 0,
-        xrplConnected: xrplClient.getStatus().connected,
-        xrplStreamConnected: xrplClient.getStatus().streamConnected,
+        xrplConnected: xrplStatus.connected,
+        xrplStreamConnected: xrplStatus.streamConnected,
+        xrplLastTxAgeMs: xrplStatus.lastTransactionAgeMs,
         timestamp: Date.now(),
       };
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(status, null, 2));
     } else if (req.url === '/metrics') {
       const state = paperTrader?.getState();
@@ -1749,6 +1753,7 @@ function startHealthEndpoint(
         `bot_bankroll_xrp ${state?.bankrollXRP || 0}`,
         `bot_daily_pnl_xrp ${state?.dailyPnL || 0}`,
         `bot_xrpl_connected ${xrplClient.getStatus().connected ? 1 : 0}`,
+        `bot_xrpl_stream_connected ${xrplClient.getStatus().streamConnected ? 1 : 0}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(metrics.join('\n') + '\n');
