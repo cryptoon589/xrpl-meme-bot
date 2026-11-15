@@ -1699,8 +1699,10 @@ function startHealthCheck(
       warn('⚠️  Health: XRPL transaction stream disconnected — dedicated stream reconnecting independently');
       return;
     }
-    if (streamAgeMs > STALE_STREAM_MS && streamAgeMs !== -1) {
-      warn(`⚠️  Health: WS stream STALE — last tx ${Math.round(streamAgeMs/1000)}s ago (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
+    if ((streamAgeMs > STALE_STREAM_MS) ||
+        (streamAgeMs === -1 && process.uptime() > 120)) {
+      const txAgeLabel = streamAgeMs === -1 ? 'no transactions since startup' : `last tx ${Math.round(streamAgeMs/1000)}s ago`;
+      warn(`⚠️  Health: WS stream STALE — ${txAgeLabel} (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
       // Use forceReconnect() which properly tears down state and re-subscribes
       if (process.env.XRPL_SEPARATE_STREAM === '1') {
         xrplClient.forceStreamReconnect().catch((e: any) => warn(`forceStreamReconnect error: ${e}`));
@@ -1730,8 +1732,10 @@ function startHealthEndpoint(
   healthServer = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/healthz') {
       const xrplStatus = xrplClient.getStatus();
-      const healthy = xrplStatus.connected && xrplStatus.streamConnected &&
-        (xrplStatus.lastTransactionAgeMs < 90000 || xrplStatus.lastTransactionAgeMs === -1);
+      const recentTx = xrplStatus.lastTransactionAgeMs >= 0
+        ? xrplStatus.lastTransactionAgeMs < 90000
+        : process.uptime() < 120;
+      const healthy = xrplStatus.connected && xrplStatus.streamConnected && recentTx;
       const status = {
         status: healthy ? 'ok' : 'degraded',
         uptime: Math.round(process.uptime()),
