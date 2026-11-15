@@ -131,8 +131,9 @@ export class XRPLClient {
       let peakDelay = 0;
       let lastTick = Date.now();
       const byCommand: Record<string, number> = {};
+      const failuresByCommand: Record<string, number> = {};
       const report = (reason: string) => {
-        warn(`XRPL_DIAG ${reason}: rpc=${requests} failures=${failures} inflight=${inFlight} peak=${peak} eventLoopDelayMaxMs=${peakDelay} rawTx=${this.rawTxCount} commands=${JSON.stringify(byCommand)}`);
+        warn(`XRPL_DIAG ${reason}: rpc=${requests} failures=${failures} inflight=${inFlight} peak=${peak} eventLoopDelayMaxMs=${peakDelay} rawTx=${this.rawTxCount} commands=${JSON.stringify(byCommand)} failuresByCommand=${JSON.stringify(failuresByCommand)}`);
       };
       instrumented.request = async (...args: any[]) => {
         const command = String(args[0]?.command || 'unknown');
@@ -141,7 +142,7 @@ export class XRPLClient {
         inFlight++;
         peak = Math.max(peak, inFlight);
         try { return await originalRequest(...args); }
-        catch (err) { failures++; throw err; }
+        catch (err) { failures++; failuresByCommand[command] = (failuresByCommand[command] || 0) + 1; throw err; }
         finally { inFlight--; }
       };
       const timer = setInterval(() => {
