@@ -15,9 +15,17 @@ export BOT_DB_PATH="$PWD/data/meme_bot.recovery.db"
 export MODE=PAPER LIVE_TRADING=false BOT_ENABLE_STARTUP_PRUNE=0
 unset TRADING_WALLET_SEED
 echo "Recovery DB backed up: $backup"
-echo "PAPER startup probe for 90 seconds; not starting a background service."
+duration="${PAPER_PROBE_SECONDS:-90}"
+if [[ ! "$duration" =~ ^[0-9]+$ ]] || (( duration < 30 || duration > 900 )); then
+  echo "FAIL: PAPER_PROBE_SECONDS must be 30..900"; exit 1
+fi
+free_kb="$(df -Pk data | awk 'NR==2 {print $4}')"
+if (( free_kb < 450 * 1024 )); then
+  echo "FAIL: less than 450 MiB free disk; refusing to start"; exit 1
+fi
+echo "PAPER startup probe for ${duration} seconds; not starting a background service."
 set +e
-timeout --signal=INT --kill-after=10s 90s node dist/index.js > recovery-backups/paper-probe.log 2>&1
+timeout --signal=INT --kill-after=10s "${duration}s" node dist/index.js > recovery-backups/paper-probe.log 2>&1
 status=$?
 set -e
 echo "Process exit status: $status (124 means timeout reached)"
