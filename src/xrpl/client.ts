@@ -307,6 +307,13 @@ export class XRPLClient {
     }, 5000);
   }
 
+  async forceStreamReconnect(): Promise<void> {
+    if (process.env.XRPL_SEPARATE_STREAM !== '1') return this.forceReconnect();
+    this.stopDedicatedStream();
+    this.streamStopped = false;
+    await this.startDedicatedStream();
+  }
+
   private stopDedicatedStream(): void {
     this.streamStopped = true;
     this.streamGeneration++;
