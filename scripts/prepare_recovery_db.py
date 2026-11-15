@@ -3,7 +3,7 @@
 
 Run only while the bot is stopped and after confirming an external snapshot.
 Creates data/meme_bot.recovery.db. Does NOT activate it or delete the source.
-Historical high-frequency observations remain available in the droplet snapshot.
+Historical high-frequency observations and shadow/missed signal logs remain\navailable in the droplet snapshot.
 """
 import os
 import sqlite3
@@ -15,8 +15,7 @@ SOURCE = ROOT / "data" / "meme_bot.db"
 TARGET = ROOT / "data" / "meme_bot.recovery.db"
 KEEP = (
     "tokens", "amm_pools", "paper_trades", "daily_summaries",
-    "profile_stats", "whale_wallets", "missed_opportunities",
-    "shadow_trades",
+    "profile_stats", "whale_wallets",
 )
 # Avoid filling the last free gigabyte. Abort rather than touch the source.
 MIN_FREE_AFTER = 500 * 1024 * 1024
@@ -72,7 +71,7 @@ def main():
                 if copied % 100000 == 0:
                     print(f"  {copied:,} records", flush=True)
             print(f"  completed {copied:,}", flush=True)
-        # Leave indexes for the application schema initializer after the cutover.
+        # Do not copy historical shadow/missed signals: they may be unbounded.\n        # These tables remain present but empty for future analysis.\n        # Leave indexes for the application schema initializer after the cutover.
         # Building indexes now could exhaust the nearly full disk.
         # Only lightweight views are created here.
         for kind, name, sql in schema:
