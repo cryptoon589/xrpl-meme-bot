@@ -132,8 +132,9 @@ export class XRPLClient {
       let lastTick = Date.now();
       const byCommand: Record<string, number> = {};
       const failuresByCommand: Record<string, number> = {};
+      const failuresByReason: Record<string, number> = {};
       const report = (reason: string) => {
-        warn(`XRPL_DIAG ${reason}: rpc=${requests} failures=${failures} inflight=${inFlight} peak=${peak} eventLoopDelayMaxMs=${peakDelay} rawTx=${this.rawTxCount} commands=${JSON.stringify(byCommand)} failuresByCommand=${JSON.stringify(failuresByCommand)}`);
+        warn(`XRPL_DIAG ${reason}: rpc=${requests} failures=${failures} inflight=${inFlight} peak=${peak} eventLoopDelayMaxMs=${peakDelay} rawTx=${this.rawTxCount} commands=${JSON.stringify(byCommand)} failuresByCommand=${JSON.stringify(failuresByCommand)} failuresByReason=${JSON.stringify(failuresByReason)}`);
       };
       instrumented.request = async (...args: any[]) => {
         const command = String(args[0]?.command || 'unknown');
@@ -142,7 +143,26 @@ export class XRPLClient {
         inFlight++;
         peak = Math.max(peak, inFlight);
         try { return await originalRequest(...args); }
-        catch (err) { failures++; failuresByCommand[command] = (failuresByCommand[command] || 0) + 1; throw err; }
+        catch (err: any) {
+          failures++;
+          failuresByCommand[command] = (failuresByCommand[command] || 0) + 1;
+          const code = String(err?.data?.error || err?.result?.error || err?.error || '');
+          const message = String(err?.message || '');
+          // Fixed categories; never log raw request bodies or arbitrary error strings.
+          const reason = /actNotFound|Account not found/i.test(code + ' ' + message)
+            ? 'amm_or_account_not_found'
+            : /invalidParams|malformed|invalidField/i.test(code + ' ' + message)
+            ? 'invalid_parameters'
+            : /too slow|rate.limit|slowDown/i.test(code + ' ' + message)
+            ? 'rate_or_backpressure'
+            : /timeout/i.test(code + ' ' + message)
+            ? 'timeout'
+            : /websocket|disconnect|closed/i.test(code + ' ' + message)
+            ? 'connection_closed'
+            : 'other';
+          failuresByReason[reason] = (failuresByReason[reason] || 0) + 1;
+          throw err;
+        }
         finally { inFlight--; }
       };
       const timer = setInterval(() => {
