@@ -54,6 +54,50 @@ export class XRPLClient {
     });
 
     await this.client.connect();
+    // Opt-in RPC pacing, scoped to this connection. Diagnostic only.
+    // Never rate-limit subscribe/unsubscribe or transaction submission.
+    if (process.env.XRPL_RPC_MAX_INFLIGHT || process.env.XRPL_RPC_MAX_PER_SEC) {
+      const guardedClient = this.client as any;
+      const rawRequest = guardedClient.request.bind(guardedClient);
+      const maxInflight = Math.max(1, Math.min(20, Number(process.env.XRPL_RPC_MAX_INFLIGHT) || 6));
+      const perSecond = Math.max(1, Math.min(50, Number(process.env.XRPL_RPC_MAX_PER_SEC) || 12));
+      let active = 0;
+      let nextSlot = 0;
+      let closed = false;
+      const waiters: Array<() => void> = [];
+      const release = () => { active--; const next = waiters.shift(); if (next) next(); };
+      const wake = () => { closed = true; while (waiters.length) waiters.shift()?.(); };
+      guardedClient.once('disconnected', wake);
+      guardedClient.request = async (...args: any[]) => {
+        const command = String(args[0]?.command || '');
+        if (command === 'subscribe' || command === 'unsubscribe' || command === 'submit' || command === 'submit_multisigned') {
+          return rawRequest(...args);
+        }
+        if (closed) throw new Error('XRPL RPC connection closed');
+        if (active >= maxInflight) {
+          await new Promise<void>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              const i = waiters.indexOf(resume);
+              if (i >= 0) waiters.splice(i, 1);
+              reject(new Error('XRPL RPC queue timeout'));
+            }, 15000);
+            const resume = () => { clearTimeout(timeout); resolve(); };
+            waiters.push(resume);
+          });
+        }
+        if (closed) throw new Error('XRPL RPC connection closed');
+        active++;
+        try {
+          const now = Date.now();
+          const slot = Math.max(now, nextSlot);
+          nextSlot = slot + 1000 / perSecond;
+          if (slot > now) await new Promise(resolve => setTimeout(resolve, slot - now));
+          if (closed) throw new Error('XRPL RPC connection closed');
+          return await rawRequest(...args);
+        } finally { release(); }
+      };
+      info(`XRPL RPC pacing enabled: max ${maxInflight} in-flight, ${perSecond}/sec`);
+    }
     // Opt-in instrumentation: captures RPC concurrency and event-loop stalls.
     // Logs aggregates only; no wallet keys, transaction bodies or account identifiers.
     if (process.env.XRPL_DIAG_METRICS === '1') {
