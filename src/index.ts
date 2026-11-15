@@ -712,15 +712,18 @@ function startTransactionProcessor(
   db: Database
 ): void {
   let lastProcessTime = 0;
+  let processing = false;
   const MIN_PROCESS_INTERVAL_MS = 500;
 
   txProcessingTimer = setInterval(async () => {
-    if (!isRunning || txQueue.length === 0) return;
+    if (processing || !isRunning || txQueue.length === 0) return;
 
     const now = Date.now();
     if (now - lastProcessTime < MIN_PROCESS_INTERVAL_MS) return;
 
     lastProcessTime = now;
+    processing = true;
+    try {
     const batchSize = Math.min(MAX_TX_PER_BATCH, txQueue.length);
     const toProcess = txQueue.splice(0, batchSize);
 
@@ -736,6 +739,9 @@ function startTransactionProcessor(
       } catch (err) {
         warn(`Error processing transaction: ${err}`);
       }
+    }
+    } finally {
+      processing = false;
     }
   }, 100);
 }
