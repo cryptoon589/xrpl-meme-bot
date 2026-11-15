@@ -709,6 +709,7 @@ async function main() {
   startHealthCheck(xrplClient, buyPressureTracker, paperTrader);
   startHealthEndpoint(tokenDiscovery, paperTrader, xrplClient, liveValidator);
   setupGracefulShutdown(xrplClient, db);
+  startRecoveryDiskGuard();
 
   info('✅ XRPL Meme Bot is running!');
   info(`Tracking ${tokenDiscovery.getTokenCount()} tokens`);
@@ -1640,6 +1641,39 @@ function startPeriodicScan(
 }
 
 
+
+/**
+ * Recovery-only disk safety monitor. On low space, request graceful SIGTERM
+ * rather than allowing SQLite/WAL or log writes to exhaust the filesystem.
+ * Disabled unless explicitly opted into PAPER recovery operation.
+ */
+function startRecoveryDiskGuard(): void {
+  if (process.env.BOT_ENABLE_RECOVERY_DISK_GUARD !== '1' ||
+      process.env.MODE !== 'PAPER' ||
+      process.env.LIVE_TRADING !== 'false' ||
+      !process.env.BOT_DB_PATH?.endsWith('/data/meme_bot.recovery.db')) return;
+
+  const fs = require('fs');
+  let shuttingDown = false;
+  const check = () => {
+    try {
+      const stats = fs.statfsSync(process.cwd());
+      const freeMiB = Math.floor(stats.bavail * stats.bsize / (1024 * 1024));
+      if (freeMiB < 550 && !shuttingDown) {
+        shuttingDown = true;
+        error(`[DiskGuard] Only ${freeMiB} MiB free; stopping PAPER bot to protect database`);
+        process.kill(process.pid, 'SIGTERM');
+      } else if (freeMiB < 700) {
+        warn(`[DiskGuard] Low disk: ${freeMiB} MiB available`);
+      }
+    } catch (err) {
+      warn(`[DiskGuard] Unable to read free disk: ${err}`);
+    }
+  };
+  check();
+  const timer = setInterval(check, 60_000);
+  timer.unref();
+}
 
 /**
  * Health check interval
