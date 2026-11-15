@@ -27,6 +27,7 @@
  */
 
 import { XRPLClient } from '../xrpl/client';
+import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { TelegramAlerter } from '../telegram/alerts';
 import { Database } from '../db/database';
 import { info, warn, debug } from '../utils/logger';
@@ -150,20 +151,22 @@ export class BurstDetector {
     for (let i = 0; i < tokens.length; i += 10) {
       const batch = tokens.slice(i, i + 10);
       await Promise.all(batch.map(async (token) => {
-        const key = `${token.currency}:${token.issuer}`;
-        if (this.ammToToken.has(key)) return; // already registered
-        if (STABLECOINS.has(token.currency)) return;
+        const rawCurrency = normalizeIssuedCurrency(token.rawCurrency || token.currency);
+        if (!rawCurrency) return;
+        const key = `${rawCurrency}:${token.issuer}`;
+        if (STABLECOINS.has(token.currency) || STABLECOINS.has(rawCurrency)) return;
+        if (this.tokens.has(key)) return; // already registered
         // Init state so recordBuy can work immediately
         if (!this.tokens.has(key)) {
           const displayName = this.decodeCurrency(token.currency);
           this.tokens.set(key, {
-            rawCurrency: token.currency, issuer: token.issuer, displayName,
+            rawCurrency, issuer: token.issuer, displayName,
             buys: [], lastAlertTs: 0, poolXRP: null, baselinePrice: null,
             lastTrade: Date.now(),
             firstSeenAt: Date.now(),
           });
         }
-        const ammAccount = await this.fetchAMMAccount(token.currency, token.issuer);
+        const ammAccount = await this.fetchAMMAccount(rawCurrency, token.issuer);
         if (ammAccount) {
           this.ammToToken.set(ammAccount, key);
           registered++;
@@ -306,13 +309,15 @@ export class BurstDetector {
   // Fetch the AMM pool account address for a token
   // ─────────────────────────────────────────
   private async fetchAMMAccount(rawCurrency: string, issuer: string): Promise<string | null> {
+    const currencyCode = normalizeIssuedCurrency(rawCurrency);
+    if (!currencyCode) return null;
     try {
       const client = this.xrplClient.getClient();
       if (!client) return null;
       const res: any = await client.request({
         command: 'amm_info',
         asset:  { currency: 'XRP' },
-        asset2: { currency: rawCurrency, issuer },
+        asset2: { currency: currencyCode, issuer },
       });
       return res?.result?.amm?.account ?? null;
     } catch {
@@ -488,6 +493,8 @@ export class BurstDetector {
     rawCurrency: string,
     issuer: string
   ): Promise<{ priceXRP: number; poolXRP: number; tradingFee: number } | null> {
+    const currencyCode = normalizeIssuedCurrency(rawCurrency);
+    if (!currencyCode) return null;
     // Try up to 3 times with 1s delay between attempts (WebSocket may be reconnecting)
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
@@ -500,7 +507,7 @@ export class BurstDetector {
         const res: any = await client.request({
           command: 'amm_info',
           asset:  { currency: 'XRP' },
-          asset2: { currency: rawCurrency, issuer },
+          asset2: { currency: currencyCode, issuer },
         });
 
         const amm = res.result?.amm;
