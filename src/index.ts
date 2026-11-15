@@ -889,7 +889,7 @@ function startPeriodicScan(
   BURST_TRADE_BLOCKLIST: Set<string>
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
-  const BATCH_SIZE = 10; // Process 10 tokens concurrently
+  const BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.SCAN_BATCH_SIZE || '10', 10) || 10)); // Configurable scanner concurrency
   const HOLDER_SCAN_INTERVAL = 24; // Scan holders every 24th cycle (~6 minutes)
   let scanCycle = 0;
   let isScanning = false;
