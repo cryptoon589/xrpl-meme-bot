@@ -284,6 +284,15 @@ export class Database {
   // ==================== MARKET SNAPSHOTS ====================
 
   saveMarketSnapshot(snapshot: MarketSnapshot): void {
+    // Bound historical write amplification: at most one sample per token per minute.
+    // Keep the most recent row queryable; only suppress redundant high-frequency inserts.
+    const recent = this.db.prepare(`
+      SELECT timestamp FROM market_snapshots
+      WHERE token_currency = ? AND token_issuer = ?
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(snapshot.tokenCurrency, snapshot.tokenIssuer) as { timestamp: number } | undefined;
+    if (recent && snapshot.timestamp >= recent.timestamp &&
+        snapshot.timestamp - recent.timestamp < 60_000) return;
     try {
       const stmt = this.db.prepare(`
         INSERT INTO market_snapshots
@@ -384,6 +393,15 @@ export class Database {
   // ==================== SCORES ====================
 
   saveScore(score: TokenScore): void {
+    // Bound historical write amplification: at most one sample per token per minute.
+    // Keep the most recent row queryable; only suppress redundant high-frequency inserts.
+    const recent = this.db.prepare(`
+      SELECT timestamp FROM scores
+      WHERE token_currency = ? AND token_issuer = ?
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(score.tokenCurrency, score.tokenIssuer) as { timestamp: number } | undefined;
+    if (recent && score.timestamp >= recent.timestamp &&
+        score.timestamp - recent.timestamp < 60_000) return;
     try {
       const stmt = this.db.prepare(`
         INSERT INTO scores
