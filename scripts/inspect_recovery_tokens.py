@@ -24,15 +24,15 @@ def inspect(path: Path):
         keys = {(r[0], r[1]) for r in rows}
         cutoff_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 48 * 3600 * 1000
         stale = sum(1 for r in rows if r[2] < cutoff_ms)
-        positions = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status = 'open'").fetchone()[0]
-        return {"count": len(rows), "keys": keys, "stale": stale, "open": positions}
+        positions = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status IN ('open','partial')").fetchone()[0]
+        return {"count": len(rows), "keys": keys, "stale": stale, "open_or_partial": positions}
     finally:
         con.close()
 
 def summary(label, path, result):
     if result is None:
         return
-    print(f"{label}: tokens={result['count']} stale_48h={result['stale']} open_paper_positions={result['open']} path={path}")
+    print(f"{label}: tokens={result['count']} stale_48h={result['stale']} open_or_partial_paper_positions={result['open_or_partial']} path={path}")
 
 def main():
     original = inspect(ORIGINAL)
