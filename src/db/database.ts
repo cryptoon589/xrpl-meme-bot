@@ -105,6 +105,16 @@ export class Database {
       }
     }
 
+    // Recovery schema may have been copied from a legacy table without its UNIQUE constraint.
+    // This must run at startup, not only when optional missed-opportunity setup is invoked.
+    try {
+      this.execWithRetry(`CREATE UNIQUE INDEX IF NOT EXISTS idx_missed_opp_natural_key
+        ON missed_opportunities(currency, issuer, skipped_at)`);
+    } catch (err) {
+      warn(`Failed to establish missed-opportunity UPSERT key: ${err}`);
+      throw err;
+    }
+
     // Migrations: add columns that may be missing from older DB files
     const migrations = [
       `ALTER TABLE market_snapshots ADD COLUMN unique_buyers_5m INTEGER DEFAULT 0`,
