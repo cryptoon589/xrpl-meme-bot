@@ -968,6 +968,8 @@ export class Database {
       this.db.exec(SCHEMA.profileStats);
       this.db.exec(SCHEMA.shadowTrades);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_missed_opp_currency ON missed_opportunities(currency, issuer)`);
+      // Required by ON CONFLICT(currency, issuer, skipped_at) in upsertMissedOpportunity.
+      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_missed_opp_natural_key ON missed_opportunities(currency, issuer, skipped_at)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_stats_profile ON profile_stats(profile, closed_at)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_currency ON shadow_trades(currency, issuer, skipped_at)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_unresolved ON shadow_trades(resolved_at, skipped_at)`);
