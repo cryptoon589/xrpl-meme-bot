@@ -52,6 +52,46 @@ export class XRPLClient {
     });
 
     await this.client.connect();
+    // Opt-in instrumentation: captures RPC concurrency and event-loop stalls.
+    // Logs aggregates only; no wallet keys, transaction bodies or account identifiers.
+    if (process.env.XRPL_DIAG_METRICS === '1') {
+      const instrumented = this.client as any;
+      const originalRequest = instrumented.request.bind(instrumented);
+      let inFlight = 0;
+      let peak = 0;
+      let requests = 0;
+      let failures = 0;
+      let peakDelay = 0;
+      let lastTick = Date.now();
+      const byCommand: Record<string, number> = {};
+      const report = (reason: string) => {
+        warn(`XRPL_DIAG ${reason}: rpc=${requests} failures=${failures} inflight=${inFlight} peak=${peak} eventLoopDelayMaxMs=${peakDelay} rawTx=${this.rawTxCount} commands=${JSON.stringify(byCommand)}`);
+      };
+      instrumented.request = async (...args: any[]) => {
+        const command = String(args[0]?.command || 'unknown');
+        byCommand[command] = (byCommand[command] || 0) + 1;
+        requests++;
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        try { return await originalRequest(...args); }
+        catch (err) { failures++; throw err; }
+        finally { inFlight--; }
+      };
+      const timer = setInterval(() => {
+        const now = Date.now();
+        peakDelay = Math.max(peakDelay, Math.max(0, now - lastTick - 1000));
+        lastTick = now;
+      }, 1000);
+      const reportTimer = setInterval(() => report('periodic'), 15000);
+      const cleanup = () => { clearInterval(timer); clearInterval(reportTimer); };
+      this.client.once('disconnected', (code: number) => { report(`disconnect-code-${code}`); cleanup(); });
+      // Cleanup also on normal shutdown, where disconnected may not be emitted.
+      const originalDisconnect = instrumented.disconnect.bind(instrumented);
+      instrumented.disconnect = async (...args: any[]) => {
+        cleanup();
+        return originalDisconnect(...args);
+      };
+    }
     this.isConnected = true;
     this.reconnectAttempts = 0;
     info('Connected to XRPL successfully');
