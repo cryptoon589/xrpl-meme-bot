@@ -37,10 +37,10 @@ def main():
             if suffix == "-wal":
                 problems.append("WAL file exists; confirm checkpoint/consistent snapshot before copying")
     try:
-        p = subprocess.run(["pgrep", "-af", "node|ts-node|meme_bot"],
+        p = subprocess.run(["pgrep", "-af", "node.*(dist/index|ts-node.*src/index)|pm2.*xrpl-meme-bot"],
                            capture_output=True, text=True, timeout=5)
         if p.returncode == 0:
-            print("Potential bot processes detected; inspect before proceeding:")
+            print("Potential trading bot processes detected; inspect before proceeding:")
             print(p.stdout[:1500])
             problems.append("Potential bot process detected")
     except (OSError, subprocess.TimeoutExpired):
