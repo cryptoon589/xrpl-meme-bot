@@ -8,6 +8,7 @@ on:
     paths:
       - 'scripts/prepare_recovery_db.py'
       - 'scripts/test_prepare_recovery_db.py'
+      - 'scripts/recovery_preflight.py'
       - '.github/workflows/recovery-tests.yml'
   workflow_dispatch:
 
@@ -17,6 +18,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Test SQLite recovery on synthetic database
-        run: python3 scripts/test_prepare_recovery_db.py
+        run: python3 scripts/test_prepare_recovery_db.py scripts/recovery_preflight.py
       - name: Python syntax validation
         run: python3 -m py_compile scripts/prepare_recovery_db.py scripts/test_prepare_recovery_db.py
