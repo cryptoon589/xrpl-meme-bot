@@ -219,7 +219,7 @@ export class Database {
             SELECT 1 FROM paper_trades p
             WHERE p.token_currency = tokens.currency
               AND p.token_issuer = tokens.issuer
-              AND p.status = 'open'
+              AND p.status IN ('open', 'partial')
           )
       `).run(cutoff, cutoff) as any;
       return result.changes ?? 0;
