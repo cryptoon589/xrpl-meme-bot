@@ -19,6 +19,7 @@ export class XRPLClient {
   private lastLedgerAt = 0;
   private ledgerHandler?: (ledger: any) => void;
   private txHandler?: (tx: any) => void;
+  private bookOfferCache = new Map<string, { expiresAt: number; promise: Promise<any> }>();
 
   constructor(wsUrl: string) {
     this.wsUrl = wsUrl;
@@ -35,6 +36,7 @@ export class XRPLClient {
       this.client = null;
     }
     this.isConnected = false;
+    this.bookOfferCache.clear();
   }
 
   /**
@@ -253,10 +255,34 @@ export class XRPLClient {
 
   async getBookOffers(takerGets: any, takerPays: any, limit: number = 20): Promise<any> {
     if (!this.client || !this.isConnected) return null;
-    try {
-      const response = await this.client.request({ command: 'book_offers', taker_gets: takerGets, taker_pays: takerPays, ledger_index: 'validated', limit });
-      return response.result;
-    } catch (err) { debug(`Book offers failed: ${err}`); return null; }
+    const ttl = process.env.XRPL_BOOK_CACHE_MS
+      ? Math.max(0, Math.min(5000, Number(process.env.XRPL_BOOK_CACHE_MS) || 0))
+      : 0;
+    const key = JSON.stringify([takerGets, takerPays, limit]);
+    const now = Date.now();
+    if (ttl > 0) {
+      const cached = this.bookOfferCache.get(key);
+      if (cached && cached.expiresAt > now) return cached.promise;
+    }
+    const activeClient = this.client;
+    const request = activeClient.request({
+      command: 'book_offers', taker_gets: takerGets, taker_pays: takerPays,
+      ledger_index: 'validated', limit,
+    }).then(response => response.result)
+      .catch(err => { debug(`Book offers failed: ${err}`); return null; });
+    if (ttl > 0) {
+      // Small bounded cache: repeated reads share in-flight work and recent results.
+      if (this.bookOfferCache.size >= 256) {
+        for (const [k, v] of this.bookOfferCache) {
+          if (v.expiresAt <= now) this.bookOfferCache.delete(k);
+        }
+        if (this.bookOfferCache.size >= 256) {
+          this.bookOfferCache.delete(this.bookOfferCache.keys().next().value!);
+        }
+      }
+      this.bookOfferCache.set(key, { expiresAt: now + ttl, promise: request });
+    }
+    return request;
   }
 
   async getTransaction(hash: string): Promise<any> {
