@@ -10,7 +10,6 @@ from pathlib import Path
 import os
 import sqlite3
 import sys
-import time
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINAL = ROOT / "data" / "meme_bot.db"
@@ -25,7 +24,7 @@ def bot_running():
         if not entry.name.isdecimal() or int(entry.name) == os.getpid():
             continue
         try:
-            args = (entry / "cmdline").read_bytes().replace(b"\\x00", b" ")
+            args = (entry / "cmdline").read_bytes().replace(bytes([0]), b" ")
         except (OSError, PermissionError):
             continue
         if b"node " in args and b"dist/index.js" in args:
