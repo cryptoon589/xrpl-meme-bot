@@ -19,11 +19,13 @@ import { info, warn, debug } from '../utils/logger';
 
 export class Database {
   private db: BetterSQLite3.Database;
+  private readonly isCompactRecoveryDb: boolean;
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY_MS = 100;
 
   constructor(dbPath?: string) {
     const filePath = dbPath || process.env.BOT_DB_PATH || path.join(process.cwd(), 'data', 'meme_bot.db');
+    this.isCompactRecoveryDb = path.resolve(filePath) === path.resolve(process.cwd(), 'data', 'meme_bot.recovery.db');
 
     // Ensure data directory exists
     const fs = require('fs');
@@ -103,6 +105,17 @@ export class Database {
       } catch (err) {
         warn(`Error creating index: ${err}`);
       }
+    }
+
+    // Timestamp indexes for bounded retention, only on the small recovered DB.
+    // Do NOT attempt to index the full 18 GiB original during recovery.
+    if (this.isCompactRecoveryDb) {
+      for (const sql of [
+        'CREATE INDEX IF NOT EXISTS idx_recovery_snapshots_timestamp ON market_snapshots(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_recovery_scores_timestamp ON scores(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_recovery_risk_timestamp ON risk_flags(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_recovery_risk_token ON risk_flags(token_currency, token_issuer, timestamp)'
+      ]) this.execWithRetry(sql);
     }
 
     // Recovery schema may have been copied from a legacy table without its UNIQUE constraint.
@@ -310,7 +323,7 @@ export class Database {
       ORDER BY timestamp DESC LIMIT 1
     `).get(snapshot.tokenCurrency, snapshot.tokenIssuer) as { timestamp: number } | undefined;
     if (recent && snapshot.timestamp >= recent.timestamp &&
-        snapshot.timestamp - recent.timestamp < 60_000) return;
+        snapshot.timestamp - recent.timestamp < (this.isCompactRecoveryDb ? 120_000 : 60_000)) return;
     try {
       const stmt = this.db.prepare(`
         INSERT INTO market_snapshots
@@ -381,6 +394,16 @@ export class Database {
 
   saveRiskFlags(tokenCurrency: string, tokenIssuer: string, riskFlags: RiskFlags): void {
     try {
+      // Risk flags otherwise emit one row per token per scan (millions/day).
+      // Cap optional recovery history to one row per token every 5 minutes.
+      const now = Date.now();
+      if (this.isCompactRecoveryDb) {
+        const latest = this.db.prepare(`
+          SELECT timestamp FROM risk_flags WHERE token_currency = ? AND token_issuer = ?
+          ORDER BY timestamp DESC LIMIT 1
+        `).get(tokenCurrency, tokenIssuer) as { timestamp: number } | undefined;
+        if (latest && now >= latest.timestamp && now - latest.timestamp < 300_000) return;
+      }
       const stmt = this.db.prepare(`
         INSERT INTO risk_flags
         (token_currency, token_issuer, timestamp,
@@ -392,7 +415,7 @@ export class Database {
       this.runWithRetry(stmt, [
         tokenCurrency,
         tokenIssuer,
-        Date.now(),
+        now,
         riskFlags.lowLiquidity ? 1 : 0,
         riskFlags.wideSpread ? 1 : 0,
         riskFlags.concentratedSupply ? 1 : 0,
@@ -419,7 +442,7 @@ export class Database {
       ORDER BY timestamp DESC LIMIT 1
     `).get(score.tokenCurrency, score.tokenIssuer) as { timestamp: number } | undefined;
     if (recent && score.timestamp >= recent.timestamp &&
-        score.timestamp - recent.timestamp < 60_000) return;
+        score.timestamp - recent.timestamp < (this.isCompactRecoveryDb ? 120_000 : 60_000)) return;
     try {
       const stmt = this.db.prepare(`
         INSERT INTO scores
@@ -1259,6 +1282,42 @@ export class Database {
       }
       return result;
     } catch { return {}; }
+  }
+
+  /**
+   * Bounded observation-history retention for compact PAPER recovery only.
+   * Deletes up to 5000 aged rows from each ephemeral history table per pass.
+   * Never touches tokens, token_archive, paper_trades, alerts, or trading logs.
+   * SQLite reuses freed pages; this does not VACUUM or grow a second DB copy.
+   */
+  pruneRecoveryObservations(): void {
+    if (!this.isCompactRecoveryDb ||
+        process.env.BOT_ENABLE_OBSERVATION_RETENTION !== '1' ||
+        process.env.MODE !== 'PAPER' ||
+        process.env.LIVE_TRADING !== 'false') {
+      warn('Recovery observation retention skipped (requires explicit PAPER-only opt-in)');
+      return;
+    }
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    try {
+      const removed: Record<string, number> = {};
+      this.db.transaction(() => {
+        for (const table of ['market_snapshots', 'scores', 'risk_flags']) {
+          // Table identifiers are from this fixed internal allowlist.
+          const result = this.db.prepare(`
+            DELETE FROM ${table} WHERE id IN (
+              SELECT id FROM ${table} WHERE timestamp < ? ORDER BY timestamp LIMIT 5000
+            )
+          `).run(cutoff);
+          removed[table] = result.changes;
+        }
+      })();
+      if (Object.values(removed).some(n => n > 0)) {
+        info(`Recovery observation retention (7d): ${JSON.stringify(removed)}`);
+      }
+    } catch (err) {
+      warn(`Recovery observation retention failed: ${err}`);
+    }
   }
 
   /**
