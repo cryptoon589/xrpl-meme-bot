@@ -26,7 +26,7 @@ module.exports = {
       BOT_ENABLE_RECOVERY_DISK_GUARD: '1',
       XRPL_SEPARATE_STREAM: '1',
       XRPL_BOOK_CACHE_MS: '2000',
-      XRPL_DIAG_METRICS: '0',
+      XRPL_DIAG_METRICS: '1',
       XRPL_DIAG_LEDGER_ONLY: '0',
       SCAN_BATCH_SIZE: '10',
       NODE_ENV: 'production'
