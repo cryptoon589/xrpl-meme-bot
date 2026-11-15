@@ -54,8 +54,8 @@ export class XRPLClient {
     });
 
     await this.client.connect();
-    // Opt-in RPC pacing, scoped to this connection. Diagnostic only.
-    // Never rate-limit subscribe/unsubscribe or transaction submission.
+    // Opt-in RPC pacing. Reserve semaphore slots before waking waiters.
+    // This is a diagnostic switch; normal behavior is unchanged.
     if (process.env.XRPL_RPC_MAX_INFLIGHT || process.env.XRPL_RPC_MAX_PER_SEC) {
       const guardedClient = this.client as any;
       const rawRequest = guardedClient.request.bind(guardedClient);
@@ -64,30 +64,46 @@ export class XRPLClient {
       let active = 0;
       let nextSlot = 0;
       let closed = false;
-      const waiters: Array<() => void> = [];
-      const release = () => { active--; const next = waiters.shift(); if (next) next(); };
-      const wake = () => { closed = true; while (waiters.length) waiters.shift()?.(); };
-      guardedClient.once('disconnected', wake);
+      const waiters: Array<{ grant: () => void; fail: (err: Error) => void }> = [];
+      const acquire = (): Promise<void> => {
+        if (closed) return Promise.reject(new Error('XRPL RPC connection closed'));
+        if (active < maxInflight) { active++; return Promise.resolve(); }
+        return new Promise<void>((resolve, reject) => {
+          let timer: NodeJS.Timeout;
+          const waiter = {
+            grant: () => { clearTimeout(timer); resolve(); },
+            fail: (err: Error) => { clearTimeout(timer); reject(err); },
+          };
+          timer = setTimeout(() => {
+            const i = waiters.indexOf(waiter);
+            if (i >= 0) waiters.splice(i, 1);
+            reject(new Error('XRPL RPC queue timeout'));
+          }, 15000);
+          waiters.push(waiter);
+        });
+      };
+      const release = () => {
+        const next = waiters.shift();
+        if (next && !closed) {
+          // Ownership of this slot transfers directly; active stays unchanged.
+          next.grant();
+        } else {
+          active--;
+        }
+      };
+      const close = () => {
+        closed = true;
+        while (waiters.length) waiters.shift()?.fail(new Error('XRPL RPC connection closed'));
+      };
+      guardedClient.once('disconnected', close);
       guardedClient.request = async (...args: any[]) => {
         const command = String(args[0]?.command || '');
         if (command === 'subscribe' || command === 'unsubscribe' || command === 'submit' || command === 'submit_multisigned') {
           return rawRequest(...args);
         }
-        if (closed) throw new Error('XRPL RPC connection closed');
-        if (active >= maxInflight) {
-          await new Promise<void>((resolve, reject) => {
-            const timeout = setTimeout(() => {
-              const i = waiters.indexOf(resume);
-              if (i >= 0) waiters.splice(i, 1);
-              reject(new Error('XRPL RPC queue timeout'));
-            }, 15000);
-            const resume = () => { clearTimeout(timeout); resolve(); };
-            waiters.push(resume);
-          });
-        }
-        if (closed) throw new Error('XRPL RPC connection closed');
-        active++;
+        await acquire();
         try {
+          if (closed) throw new Error('XRPL RPC connection closed');
           const now = Date.now();
           const slot = Math.max(now, nextSlot);
           nextSlot = slot + 1000 / perSecond;
