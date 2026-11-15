@@ -822,8 +822,11 @@ function smartPruneTokens(
   ammScanner: AMMScanner,
   tokenScorer: TokenScorer,
   riskFilter: RiskFilter,
-  config: any
+  config: any,
+  paperTrader: PaperTrader | null
 ): any[] {
+  const openPositionKeys = new Set((paperTrader?.getOpenPositions() ?? [])
+    .map(position => `${position.tokenCurrency}:${position.tokenIssuer}`));
   const PRUNE_AGE_MS  = 6 * 60 * 60 * 1000;  // 6h (was 48h) — be aggressive
   const HARD_CAP      = 300;                    // never score more than 300 tokens
   const MIN_SCORE_TO_KEEP = 40;
@@ -834,8 +837,8 @@ function smartPruneTokens(
   const skipPoolPrune = ammPoolsLoaded < 50;
 
   let kept = tokens.filter(token => {
-    // Always keep tokens with open paper positions
-    // (checked by currency only since issuer may differ)
+    // Never prune a token with an open PAPER position; match currency AND issuer.
+    if (openPositionKeys.has(`${token.currency}:${token.issuer}`)) return true;
     // Keep recently updated tokens
     if (now - token.lastUpdated < PRUNE_AGE_MS) return true;
 
@@ -860,8 +863,9 @@ function smartPruneTokens(
   // Hard cap: if still over limit, drop lowest-scored tokens
   if (kept.length > HARD_CAP) {
     kept = kept
-      .map(t => ({ t, score: db.getLatestScore(t.currency, t.issuer)?.totalScore ?? 0 }))
-      .sort((a, b) => b.score - a.score)
+      .map(t => ({ t, score: db.getLatestScore(t.currency, t.issuer)?.totalScore ?? 0,
+                    open: openPositionKeys.has(`${t.currency}:${t.issuer}`) }))
+      .sort((a, b) => Number(b.open) - Number(a.open) || b.score - a.score)
       .slice(0, HARD_CAP)
       .map(({ t }) => t);
     info(`Token list hard-capped at ${HARD_CAP}`);
@@ -919,7 +923,7 @@ function startPeriodicScan(
       let tokens = tokenDiscovery.getTrackedTokens();
 
       // Smart pruning: remove inactive tokens with no pool and low score
-      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config);
+      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config, paperTrader);
 
       // Hard cap if still over limit
       if (tokens.length > MAX_TRACKED_TOKENS) {
