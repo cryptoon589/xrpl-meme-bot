@@ -19,7 +19,8 @@ KEEP = (
     "shadow_trades",
 )
 # Avoid filling the last free gigabyte. Abort rather than touch the source.
-MIN_FREE_AFTER = 350 * 1024 * 1024
+MIN_FREE_AFTER = 500 * 1024 * 1024
+MAX_RECOVERY_SIZE = 650 * 1024 * 1024
 BATCH = 1000
 
 def quote(identifier):
@@ -64,15 +65,16 @@ def main():
                 target.commit()
                 copied += len(batch)
                 st = os.statvfs(ROOT)
+                if TARGET.stat().st_size > MAX_RECOVERY_SIZE:
+                    raise RuntimeError("Recovery DB exceeded 650 MiB; stop and choose a smaller retention set")
                 if st.f_bavail * st.f_frsize < MIN_FREE_AFTER:
                     raise RuntimeError("Low disk space: stopped before exhausting disk")
                 if copied % 100000 == 0:
                     print(f"  {copied:,} records", flush=True)
             print(f"  completed {copied:,}", flush=True)
-        # Build indexes only after bulk copying; index creation can need extra disk.
-        for kind, name, sql in schema:
-            if kind == "index":
-                target.execute(sql)
+        # Leave indexes for the application schema initializer after the cutover.
+        # Building indexes now could exhaust the nearly full disk.
+        # Only lightweight views are created here.
         for kind, name, sql in schema:
             if kind == "view":
                 target.execute(sql)
