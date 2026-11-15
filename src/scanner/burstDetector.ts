@@ -155,7 +155,7 @@ export class BurstDetector {
         if (!rawCurrency) return;
         const key = `${rawCurrency}:${token.issuer}`;
         if (STABLECOINS.has(token.currency) || STABLECOINS.has(rawCurrency)) return;
-        if (this.tokens.has(key)) return; // already registered
+        if (Array.from(this.ammToToken.values()).includes(key)) return; // AMM account already registered
         // Init state so recordBuy can work immediately
         if (!this.tokens.has(key)) {
           const displayName = this.decodeCurrency(token.currency);
