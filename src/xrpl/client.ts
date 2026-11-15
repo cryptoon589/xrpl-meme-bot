@@ -8,6 +8,10 @@ import { diagnostics } from '../diagnostics/diagnostics';
 
 export class XRPLClient {
   private client: Client | null = null;
+  private streamClient: Client | null = null;
+  private streamReconnectTimer: NodeJS.Timeout | null = null;
+  private streamGeneration = 0;
+  private streamStopped = false;
   private wsUrl: string;
   private reconnectAttempts = 0;
   private reconnectDelay = 5000; // 5 seconds base, doubles up to 60s
@@ -254,6 +258,64 @@ export class XRPLClient {
   }
 
   /**
+   * Optional dedicated transaction stream. The scanner continues to use this.client.
+   * Stream reconnects independently; no database, wallet or trading operations here.
+   */
+  private async startDedicatedStream(): Promise<void> {
+    if (this.streamClient?.isConnected()) return;
+    const generation = ++this.streamGeneration;
+    const stream = new Client(this.wsUrl, { timeout: 20000, connectionTimeout: 10000 });
+    this.streamClient = stream;
+    try {
+      await stream.connect();
+      if (this.streamStopped || generation !== this.streamGeneration) {
+        await stream.disconnect().catch(() => {});
+        return;
+      }
+      stream.on('transaction', tx => {
+        this.rawTxCount++;
+        diagnostics.recordRawTx();
+        if (this.txHandler && XRPLClient.isRelevant(tx)) {
+          this.filteredTxCount++;
+          diagnostics.recordTx(tx);
+          this.txHandler(tx);
+        }
+      });
+      stream.on('disconnected', code => {
+        if (generation !== this.streamGeneration || this.streamStopped) return;
+        warn(`XRPL dedicated transaction stream disconnected (code ${code})`);
+        this.streamClient = null;
+        this.scheduleStreamReconnect();
+      });
+      await stream.request({ command: 'subscribe', streams: ['transactions'] });
+      info('Dedicated XRPL transaction stream subscribed (scanner RPC isolated)');
+    } catch (err) {
+      warn(`Dedicated XRPL transaction stream connection failed: ${err}`);
+      if (this.streamClient === stream) this.streamClient = null;
+      await stream.disconnect().catch(() => {});
+      if (!this.streamStopped && generation === this.streamGeneration) this.scheduleStreamReconnect();
+    }
+  }
+
+  private scheduleStreamReconnect(): void {
+    if (this.streamStopped || this.streamReconnectTimer) return;
+    this.streamReconnectTimer = setTimeout(() => {
+      this.streamReconnectTimer = null;
+      void this.startDedicatedStream();
+    }, 5000);
+  }
+
+  private stopDedicatedStream(): void {
+    this.streamStopped = true;
+    this.streamGeneration++;
+    if (this.streamReconnectTimer) clearTimeout(this.streamReconnectTimer);
+    this.streamReconnectTimer = null;
+    const old = this.streamClient;
+    this.streamClient = null;
+    if (old) void old.disconnect().catch(() => {});
+  }
+
+  /**
    * Subscribe to transactions stream
    */
   async subscribeTransactions(handler: (tx: any) => void): Promise<void> {
@@ -263,6 +325,11 @@ export class XRPLClient {
     // It is intentionally not suitable for normal trading/discovery.
     if (process.env.XRPL_DIAG_LEDGER_ONLY === '1') {
       warn('DIAGNOSTIC: transaction stream disabled; ledger stream only');
+      return;
+    }
+    if (process.env.XRPL_SEPARATE_STREAM === '1') {
+      this.streamStopped = false;
+      await this.startDedicatedStream();
       return;
     }
     await this.client.request({ command: 'subscribe', streams: ['transactions'] });
@@ -370,6 +437,7 @@ export class XRPLClient {
   async disconnect(): Promise<void> {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.isReconnecting = false;
+    this.stopDedicatedStream();
     this.destroyClient();
     info('Disconnected from XRPL');
   }
