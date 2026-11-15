@@ -12,6 +12,7 @@ export class XRPLClient {
   private streamReconnectTimer: NodeJS.Timeout | null = null;
   private streamGeneration = 0;
   private streamStopped = false;
+  private lastStreamTxAt = 0;
   private wsUrl: string;
   private reconnectAttempts = 0;
   private reconnectDelay = 5000; // 5 seconds base, doubles up to 60s
@@ -273,6 +274,7 @@ export class XRPLClient {
         return;
       }
       stream.on('transaction', tx => {
+        this.lastStreamTxAt = Date.now();
         this.rawTxCount++;
         diagnostics.recordRawTx();
         if (this.txHandler && XRPLClient.isRelevant(tx)) {
@@ -335,6 +337,7 @@ export class XRPLClient {
     await this.client.request({ command: 'subscribe', streams: ['transactions'] });
     info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
     this.client.on('transaction', (tx) => {
+      this.lastStreamTxAt = Date.now();
       this.rawTxCount++;
       diagnostics.recordRawTx();
       if (this.txHandler && XRPLClient.isRelevant(tx)) {
@@ -422,11 +425,14 @@ export class XRPLClient {
 
   recordLedger(): void { this.lastLedgerAt = Date.now(); }
 
-  getStatus(): { connected: boolean; url: string; lastLedgerAgeMs: number } {
+  getStatus(): { connected: boolean; streamConnected: boolean; url: string; lastLedgerAgeMs: number; lastTransactionAgeMs: number } {
+    const dedicated = process.env.XRPL_SEPARATE_STREAM === '1';
     return {
       connected: this.isConnected,
+      streamConnected: dedicated ? Boolean(this.streamClient?.isConnected()) : this.isConnected,
       url: this.wsUrl,
       lastLedgerAgeMs: this.lastLedgerAt > 0 ? Date.now() - this.lastLedgerAt : -1,
+      lastTransactionAgeMs: this.lastStreamTxAt > 0 ? Date.now() - this.lastStreamTxAt : -1,
     };
   }
 
