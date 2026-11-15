@@ -195,23 +195,31 @@ export class Database {
   }
 
   /**
-   * Prune tokens that haven't been updated in 48h AND have no score in 48h.
-   * Reduces startup preload time and scan overhead.
+   * Destructive startup token cleanup — intentionally disabled by default.
+   * Score history was excluded from compact recovery DBs, so absent scores
+   * must not be treated as evidence that tokens are safe to delete.
    */
   pruneStaleTokens(): number {
+    if (process.env.BOT_ENABLE_STARTUP_PRUNE !== '1') {
+      warn('Refusing destructive token prune without BOT_ENABLE_STARTUP_PRUNE=1');
+      return 0;
+    }
     try {
       const cutoff = Date.now() - 48 * 60 * 60 * 1000;
-      // Keep tokens that have either been updated recently OR have a recent score
       const result = this.db.prepare(`
         DELETE FROM tokens
         WHERE last_updated < ?
-          AND currency NOT IN (
-            SELECT DISTINCT token_currency FROM scores
-            WHERE timestamp > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM scores s
+            WHERE s.token_currency = tokens.currency
+              AND s.token_issuer = tokens.issuer
+              AND s.timestamp > ?
           )
-          AND currency NOT IN (
-            SELECT DISTINCT token_currency FROM paper_trades
-            WHERE status = 'open'
+          AND NOT EXISTS (
+            SELECT 1 FROM paper_trades p
+            WHERE p.token_currency = tokens.currency
+              AND p.token_issuer = tokens.issuer
+              AND p.status = 'open'
           )
       `).run(cutoff, cutoff) as any;
       return result.changes ?? 0;
