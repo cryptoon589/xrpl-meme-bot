@@ -9,6 +9,7 @@
  */
 
 import { XRPLClient } from '../xrpl/client';
+import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { debug, warn } from '../utils/logger';
 
 export interface TokenPrice {
@@ -79,32 +80,31 @@ export class AMMPriceFetcher {
       return null;
     }
 
-    // Use rawCurrency (hex) for API calls - decoded name causes "Issue is malformed"
-    const apiCurrency = rawCurrency || currency;
-
-    // Try AMM pool first (primary)
-    const ammPrice = await this.fetchFromAMM(apiCurrency, issuer);
-    if (ammPrice) {
-      this.cache.set(key, { price: ammPrice, fetchedAt: now });
-      return ammPrice;
+    // Prefer the original 40-hex ledger code; never send decoded labels like
+    // PHNIX directly as an Issue currency (XRPL rejects anything but 3 chars
+    // or 40 hex). If the old DB has a display name only, normalize safely.
+    const apiCurrency = normalizeIssuedCurrency(rawCurrency || currency);
+    if (!apiCurrency) {
+      debug(`Skipping unrepresentable XRPL currency ${currency}`);
+      return null;
     }
 
-    // FIX #32: If rawCurrency was a decoded name (short ASCII), also try the hex form.
-    // Some tokens have their AMM indexed under the hex-padded key, not the ASCII key.
-    // This catches cases where currency='ARMY' but AMM registered as hex equivalent.
-    if (apiCurrency === currency && currency.length <= 20) {
-      // currency might be ASCII - try hex-padded version
-      const hexPadded = Buffer.from(currency).toString('hex').toUpperCase().padEnd(40, '0');
-      if (hexPadded !== apiCurrency) {
-        const ammPrice2 = await this.fetchFromAMM(hexPadded, issuer);
-        if (ammPrice2) {
-          this.cache.set(key, { price: ammPrice2, fetchedAt: now });
-          return ammPrice2;
-        }
+    // Only for ambiguous 3-character display names without a raw ledger code,
+    // retain a second lookup using nonstandard ASCII/hex representation.
+    const ammCandidates = [apiCurrency];
+    if (!rawCurrency && apiCurrency === currency && currency.length === 3) {
+      const hexPadded = Buffer.from(currency, 'ascii').toString('hex').toUpperCase().padEnd(40, '0');
+      ammCandidates.push(hexPadded);
+    }
+    for (const ammCurrency of ammCandidates) {
+      const ammPrice = await this.fetchFromAMM(ammCurrency, issuer);
+      if (ammPrice) {
+        this.cache.set(key, { price: ammPrice, fetchedAt: now });
+        return ammPrice;
       }
     }
 
-    // Fall back to order book
+    // Fall back to order book using the same normalized valid currency.
     const bookPrice = await this.fetchFromOrderBook(apiCurrency, issuer);
     if (bookPrice) {
       this.cache.set(key, { price: bookPrice, fetchedAt: now });
@@ -124,6 +124,8 @@ export class AMMPriceFetcher {
    * Calculates price from pool reserves: price = XRP_reserve / token_reserve
    */
   private async fetchFromAMM(currency: string, issuer: string): Promise<TokenPrice | null> {
+    const validCurrency = normalizeIssuedCurrency(currency);
+    if (!validCurrency) return null;
     const client = this.xrplClient.getClient();
     if (!client) return null;
 
@@ -131,7 +133,7 @@ export class AMMPriceFetcher {
       const res: any = await client.request({
         command: 'amm_info',
         asset: { currency: 'XRP' },
-        asset2: { currency, issuer },
+        asset2: { currency: validCurrency, issuer },
         ledger_index: 'validated',
       });
 
