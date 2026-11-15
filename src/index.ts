@@ -98,10 +98,15 @@ async function main() {
   // Initialize components
   const db = new Database();
 
-  // Prune stale tokens at startup to keep the tracked list lean.
-  // 4000+ tokens causes preloadAMMs to take 5-15 min and slows every scan.
-  const pruned = db.pruneStaleTokens();
-  if (pruned > 0) info(`Startup: pruned ${pruned} stale tokens from DB`);
+  // Recovery safety: never delete the tracked-token history merely because
+  // the compact recovery DB does not contain recent score rows.
+  // This destructive operation requires explicit opt-in.
+  if (process.env.BOT_ENABLE_STARTUP_PRUNE === '1') {
+    const pruned = db.pruneStaleTokens();
+    if (pruned > 0) warn(`Startup: permanently pruned ${pruned} stale tokens from DB`);
+  } else {
+    info('Startup token deletion disabled (BOT_ENABLE_STARTUP_PRUNE is not 1)');
+  }
 
   const xrplClient = new XRPLClient(config.xrplWsUrl);
   xrplClientRef = xrplClient;
