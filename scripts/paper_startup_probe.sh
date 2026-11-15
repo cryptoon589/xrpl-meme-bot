@@ -12,7 +12,7 @@ mkdir -p recovery-backups
 backup="recovery-backups/meme_bot.recovery.pre-start.$(date -u +%Y%m%dT%H%M%SZ).db"
 cp data/meme_bot.recovery.db "$backup"
 export BOT_DB_PATH="$PWD/data/meme_bot.recovery.db"
-export MODE=PAPER LIVE_TRADING=false
+export MODE=PAPER LIVE_TRADING=false BOT_ENABLE_STARTUP_PRUNE=0
 unset TRADING_WALLET_SEED
 echo "Recovery DB backed up: $backup"
 echo "PAPER startup probe for 90 seconds; not starting a background service."
