@@ -42,7 +42,7 @@ for (const [t,cols,vals] of tables) {
   stmt.run(...recent);
 }
 sql.close();
-const db = new Database();
+const db = new Database(path);
 db.pruneRecoveryObservations();
 db.close();
 const after = new DB(path, { readonly: true, fileMustExist: true });
