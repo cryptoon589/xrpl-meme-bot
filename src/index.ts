@@ -98,6 +98,17 @@ async function main() {
   // Initialize components
   const db = new Database();
 
+  // Opt-in incremental retention for ephemeral observations. It is guarded
+  // again inside Database and never runs against the original 18 GiB DB.
+  if (process.env.BOT_ENABLE_OBSERVATION_RETENTION === '1') {
+    const observationRetentionTimer = setInterval(
+      () => db.pruneRecoveryObservations(),
+      10 * 60 * 1000
+    );
+    observationRetentionTimer.unref();
+    info('Compact recovery observation retention scheduled: 7 days, 10-minute passes');
+  }
+
   // Recovery safety: never delete the tracked-token history merely because
   // the compact recovery DB does not contain recent score rows.
   // This destructive operation requires explicit opt-in.
