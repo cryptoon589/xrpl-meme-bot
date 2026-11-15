@@ -23,7 +23,7 @@ export class Database {
   private readonly RETRY_DELAY_MS = 100;
 
   constructor(dbPath?: string) {
-    const filePath = dbPath || path.join(process.cwd(), 'data', 'meme_bot.db');
+    const filePath = dbPath || process.env.BOT_DB_PATH || path.join(process.cwd(), 'data', 'meme_bot.db');
 
     // Ensure data directory exists
     const fs = require('fs');
