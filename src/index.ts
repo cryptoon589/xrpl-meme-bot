@@ -98,10 +98,26 @@ async function main() {
   // Initialize components
   const db = new Database();
 
-  // Prune stale tokens at startup to keep the tracked list lean.
-  // 4000+ tokens causes preloadAMMs to take 5-15 min and slows every scan.
-  const pruned = db.pruneStaleTokens();
-  if (pruned > 0) info(`Startup: pruned ${pruned} stale tokens from DB`);
+  // Opt-in incremental retention for ephemeral observations. It is guarded
+  // again inside Database and never runs against the original 18 GiB DB.
+  if (process.env.BOT_ENABLE_OBSERVATION_RETENTION === '1') {
+    const observationRetentionTimer = setInterval(
+      () => db.pruneRecoveryObservations(),
+      10 * 60 * 1000
+    );
+    observationRetentionTimer.unref();
+    info('Compact recovery observation retention scheduled: 7 days, 10-minute passes');
+  }
+
+  // Recovery safety: never delete the tracked-token history merely because
+  // the compact recovery DB does not contain recent score rows.
+  // This destructive operation requires explicit opt-in.
+  if (process.env.BOT_ENABLE_STARTUP_PRUNE === '1') {
+    const pruned = db.pruneStaleTokens();
+    if (pruned > 0) warn(`Startup: permanently pruned ${pruned} stale tokens from DB`);
+  } else {
+    info('Startup token deletion disabled (BOT_ENABLE_STARTUP_PRUNE is not 1)');
+  }
 
   const xrplClient = new XRPLClient(config.xrplWsUrl);
   xrplClientRef = xrplClient;
@@ -693,6 +709,7 @@ async function main() {
   startHealthCheck(xrplClient, buyPressureTracker, paperTrader);
   startHealthEndpoint(tokenDiscovery, paperTrader, xrplClient, liveValidator);
   setupGracefulShutdown(xrplClient, db);
+  startRecoveryDiskGuard();
 
   info('✅ XRPL Meme Bot is running!');
   info(`Tracking ${tokenDiscovery.getTokenCount()} tokens`);
@@ -712,15 +729,18 @@ function startTransactionProcessor(
   db: Database
 ): void {
   let lastProcessTime = 0;
+  let processing = false;
   const MIN_PROCESS_INTERVAL_MS = 500;
 
   txProcessingTimer = setInterval(async () => {
-    if (!isRunning || txQueue.length === 0) return;
+    if (processing || !isRunning || txQueue.length === 0) return;
 
     const now = Date.now();
     if (now - lastProcessTime < MIN_PROCESS_INTERVAL_MS) return;
 
     lastProcessTime = now;
+    processing = true;
+    try {
     const batchSize = Math.min(MAX_TX_PER_BATCH, txQueue.length);
     const toProcess = txQueue.splice(0, batchSize);
 
@@ -736,6 +756,9 @@ function startTransactionProcessor(
       } catch (err) {
         warn(`Error processing transaction: ${err}`);
       }
+    }
+    } finally {
+      processing = false;
     }
   }, 100);
 }
@@ -811,8 +834,11 @@ function smartPruneTokens(
   ammScanner: AMMScanner,
   tokenScorer: TokenScorer,
   riskFilter: RiskFilter,
-  config: any
+  config: any,
+  paperTrader: PaperTrader | null
 ): any[] {
+  const openPositionKeys = new Set((paperTrader?.getOpenPositions() ?? [])
+    .map(position => `${position.tokenCurrency}:${position.tokenIssuer}`));
   const PRUNE_AGE_MS  = 6 * 60 * 60 * 1000;  // 6h (was 48h) — be aggressive
   const HARD_CAP      = 300;                    // never score more than 300 tokens
   const MIN_SCORE_TO_KEEP = 40;
@@ -823,8 +849,8 @@ function smartPruneTokens(
   const skipPoolPrune = ammPoolsLoaded < 50;
 
   let kept = tokens.filter(token => {
-    // Always keep tokens with open paper positions
-    // (checked by currency only since issuer may differ)
+    // Never prune a token with an open PAPER position; match currency AND issuer.
+    if (openPositionKeys.has(`${token.currency}:${token.issuer}`)) return true;
     // Keep recently updated tokens
     if (now - token.lastUpdated < PRUNE_AGE_MS) return true;
 
@@ -849,8 +875,9 @@ function smartPruneTokens(
   // Hard cap: if still over limit, drop lowest-scored tokens
   if (kept.length > HARD_CAP) {
     kept = kept
-      .map(t => ({ t, score: db.getLatestScore(t.currency, t.issuer)?.totalScore ?? 0 }))
-      .sort((a, b) => b.score - a.score)
+      .map(t => ({ t, score: db.getLatestScore(t.currency, t.issuer)?.totalScore ?? 0,
+                    open: openPositionKeys.has(`${t.currency}:${t.issuer}`) }))
+      .sort((a, b) => Number(b.open) - Number(a.open) || b.score - a.score)
       .slice(0, HARD_CAP)
       .map(({ t }) => t);
     info(`Token list hard-capped at ${HARD_CAP}`);
@@ -889,7 +916,7 @@ function startPeriodicScan(
   BURST_TRADE_BLOCKLIST: Set<string>
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
-  const BATCH_SIZE = 10; // Process 10 tokens concurrently
+  const BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.SCAN_BATCH_SIZE || '10', 10) || 10)); // Configurable scanner concurrency
   const HOLDER_SCAN_INTERVAL = 24; // Scan holders every 24th cycle (~6 minutes)
   let scanCycle = 0;
   let isScanning = false;
@@ -908,7 +935,7 @@ function startPeriodicScan(
       let tokens = tokenDiscovery.getTrackedTokens();
 
       // Smart pruning: remove inactive tokens with no pool and low score
-      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config);
+      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config, paperTrader);
 
       // Hard cap if still over limit
       if (tokens.length > MAX_TRACKED_TOKENS) {
@@ -1616,6 +1643,39 @@ function startPeriodicScan(
 
 
 /**
+ * Recovery-only disk safety monitor. On low space, request graceful SIGTERM
+ * rather than allowing SQLite/WAL or log writes to exhaust the filesystem.
+ * Disabled unless explicitly opted into PAPER recovery operation.
+ */
+function startRecoveryDiskGuard(): void {
+  if (process.env.BOT_ENABLE_RECOVERY_DISK_GUARD !== '1' ||
+      process.env.MODE !== 'PAPER' ||
+      process.env.LIVE_TRADING !== 'false' ||
+      !process.env.BOT_DB_PATH?.endsWith('/data/meme_bot.recovery.db')) return;
+
+  const fs = require('fs');
+  let shuttingDown = false;
+  const check = () => {
+    try {
+      const stats = fs.statfsSync(process.cwd());
+      const freeMiB = Math.floor(stats.bavail * stats.bsize / (1024 * 1024));
+      if (freeMiB < 550 && !shuttingDown) {
+        shuttingDown = true;
+        error(`[DiskGuard] Only ${freeMiB} MiB free; stopping PAPER bot to protect database`);
+        process.kill(process.pid, 'SIGTERM');
+      } else if (freeMiB < 700) {
+        warn(`[DiskGuard] Low disk: ${freeMiB} MiB available`);
+      }
+    } catch (err) {
+      warn(`[DiskGuard] Unable to read free disk: ${err}`);
+    }
+  };
+  check();
+  const timer = setInterval(check, 60_000);
+  timer.unref();
+}
+
+/**
  * Health check interval
  */
 function startHealthCheck(
@@ -1627,7 +1687,7 @@ function startHealthCheck(
   healthCheckInterval = setInterval(() => {
     const status = xrplClient.getStatus();
     const txStats = xrplClient.getTxStats();
-    const streamAgeMs = status.lastLedgerAgeMs;
+    const streamAgeMs = status.lastTransactionAgeMs;
 
     if (!status.connected) {
       warn('⚠️  Health: NOT connected to XRPL — waiting for reconnect');
@@ -1635,10 +1695,20 @@ function startHealthCheck(
     }
 
     // Detect silent stream death (connected flag = true but no data)
-    if (streamAgeMs > STALE_STREAM_MS && streamAgeMs !== -1) {
-      warn(`⚠️  Health: WS stream STALE — last tx ${Math.round(streamAgeMs/1000)}s ago (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
+    if (!status.streamConnected) {
+      warn('⚠️  Health: XRPL transaction stream disconnected — dedicated stream reconnecting independently');
+      return;
+    }
+    if ((streamAgeMs > STALE_STREAM_MS) ||
+        (streamAgeMs === -1 && process.uptime() > 120)) {
+      const txAgeLabel = streamAgeMs === -1 ? 'no transactions since startup' : `last tx ${Math.round(streamAgeMs/1000)}s ago`;
+      warn(`⚠️  Health: WS stream STALE — ${txAgeLabel} (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
       // Use forceReconnect() which properly tears down state and re-subscribes
-      xrplClient.forceReconnect().catch((e: any) => warn(`forceReconnect error: ${e}`));
+      if (process.env.XRPL_SEPARATE_STREAM === '1') {
+        xrplClient.forceStreamReconnect().catch((e: any) => warn(`forceStreamReconnect error: ${e}`));
+      } else {
+        xrplClient.forceReconnect().catch((e: any) => warn(`forceReconnect error: ${e}`));
+      }
       return;
     }
 
@@ -1661,15 +1731,22 @@ function startHealthEndpoint(
 
   healthServer = http.createServer((req, res) => {
     if (req.url === '/health' || req.url === '/healthz') {
+      const xrplStatus = xrplClient.getStatus();
+      const recentTx = xrplStatus.lastTransactionAgeMs >= 0
+        ? xrplStatus.lastTransactionAgeMs < 90000
+        : process.uptime() < 120;
+      const healthy = xrplStatus.connected && xrplStatus.streamConnected && recentTx;
       const status = {
-        status: 'ok',
+        status: healthy ? 'ok' : 'degraded',
         uptime: Math.round(process.uptime()),
         tokens: tokenDiscovery.getTokenCount(),
         positions: paperTrader?.getOpenPositions().length || 0,
-        xrplConnected: xrplClient.getStatus().connected,
+        xrplConnected: xrplStatus.connected,
+        xrplStreamConnected: xrplStatus.streamConnected,
+        xrplLastTxAgeMs: xrplStatus.lastTransactionAgeMs,
         timestamp: Date.now(),
       };
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(healthy ? 200 : 503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(status, null, 2));
     } else if (req.url === '/metrics') {
       const state = paperTrader?.getState();
@@ -1680,6 +1757,7 @@ function startHealthEndpoint(
         `bot_bankroll_xrp ${state?.bankrollXRP || 0}`,
         `bot_daily_pnl_xrp ${state?.dailyPnL || 0}`,
         `bot_xrpl_connected ${xrplClient.getStatus().connected ? 1 : 0}`,
+        `bot_xrpl_stream_connected ${xrplClient.getStatus().streamConnected ? 1 : 0}`,
       ];
       res.writeHead(200, { 'Content-Type': 'text/plain' });
       res.end(metrics.join('\n') + '\n');

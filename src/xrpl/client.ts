@@ -8,6 +8,11 @@ import { diagnostics } from '../diagnostics/diagnostics';
 
 export class XRPLClient {
   private client: Client | null = null;
+  private streamClient: Client | null = null;
+  private streamReconnectTimer: NodeJS.Timeout | null = null;
+  private streamGeneration = 0;
+  private streamStopped = false;
+  private lastStreamTxAt = 0;
   private wsUrl: string;
   private reconnectAttempts = 0;
   private reconnectDelay = 5000; // 5 seconds base, doubles up to 60s
@@ -19,6 +24,7 @@ export class XRPLClient {
   private lastLedgerAt = 0;
   private ledgerHandler?: (ledger: any) => void;
   private txHandler?: (tx: any) => void;
+  private bookOfferCache = new Map<string, { expiresAt: number; promise: Promise<any> }>();
 
   constructor(wsUrl: string) {
     this.wsUrl = wsUrl;
@@ -35,6 +41,7 @@ export class XRPLClient {
       this.client = null;
     }
     this.isConnected = false;
+    this.bookOfferCache.clear();
   }
 
   /**
@@ -52,6 +59,127 @@ export class XRPLClient {
     });
 
     await this.client.connect();
+    // Opt-in RPC pacing. Reserve semaphore slots before waking waiters.
+    // This is a diagnostic switch; normal behavior is unchanged.
+    if (process.env.XRPL_RPC_MAX_INFLIGHT || process.env.XRPL_RPC_MAX_PER_SEC) {
+      const guardedClient = this.client as any;
+      const rawRequest = guardedClient.request.bind(guardedClient);
+      const maxInflight = Math.max(1, Math.min(20, Number(process.env.XRPL_RPC_MAX_INFLIGHT) || 6));
+      const perSecond = Math.max(1, Math.min(50, Number(process.env.XRPL_RPC_MAX_PER_SEC) || 12));
+      let active = 0;
+      let nextSlot = 0;
+      let closed = false;
+      const waiters: Array<{ grant: () => void; fail: (err: Error) => void }> = [];
+      const acquire = (): Promise<void> => {
+        if (closed) return Promise.reject(new Error('XRPL RPC connection closed'));
+        if (active < maxInflight) { active++; return Promise.resolve(); }
+        return new Promise<void>((resolve, reject) => {
+          let timer: NodeJS.Timeout;
+          const waiter = {
+            grant: () => { clearTimeout(timer); resolve(); },
+            fail: (err: Error) => { clearTimeout(timer); reject(err); },
+          };
+          timer = setTimeout(() => {
+            const i = waiters.indexOf(waiter);
+            if (i >= 0) waiters.splice(i, 1);
+            reject(new Error('XRPL RPC queue timeout'));
+          }, 15000);
+          waiters.push(waiter);
+        });
+      };
+      const release = () => {
+        const next = waiters.shift();
+        if (next && !closed) {
+          // Ownership of this slot transfers directly; active stays unchanged.
+          next.grant();
+        } else {
+          active--;
+        }
+      };
+      const close = () => {
+        closed = true;
+        while (waiters.length) waiters.shift()?.fail(new Error('XRPL RPC connection closed'));
+      };
+      guardedClient.once('disconnected', close);
+      guardedClient.request = async (...args: any[]) => {
+        const command = String(args[0]?.command || '');
+        if (command === 'subscribe' || command === 'unsubscribe' || command === 'submit' || command === 'submit_multisigned') {
+          return rawRequest(...args);
+        }
+        await acquire();
+        try {
+          if (closed) throw new Error('XRPL RPC connection closed');
+          const now = Date.now();
+          const slot = Math.max(now, nextSlot);
+          nextSlot = slot + 1000 / perSecond;
+          if (slot > now) await new Promise(resolve => setTimeout(resolve, slot - now));
+          if (closed) throw new Error('XRPL RPC connection closed');
+          return await rawRequest(...args);
+        } finally { release(); }
+      };
+      info(`XRPL RPC pacing enabled: max ${maxInflight} in-flight, ${perSecond}/sec`);
+    }
+    // Opt-in instrumentation: captures RPC concurrency and event-loop stalls.
+    // Logs aggregates only; no wallet keys, transaction bodies or account identifiers.
+    if (process.env.XRPL_DIAG_METRICS === '1') {
+      const instrumented = this.client as any;
+      const originalRequest = instrumented.request.bind(instrumented);
+      let inFlight = 0;
+      let peak = 0;
+      let requests = 0;
+      let failures = 0;
+      let peakDelay = 0;
+      let lastTick = Date.now();
+      const byCommand: Record<string, number> = {};
+      const failuresByCommand: Record<string, number> = {};
+      const failuresByReason: Record<string, number> = {};
+      const report = (reason: string) => {
+        warn(`XRPL_DIAG ${reason}: rpc=${requests} failures=${failures} inflight=${inFlight} peak=${peak} eventLoopDelayMaxMs=${peakDelay} rawTx=${this.rawTxCount} commands=${JSON.stringify(byCommand)} failuresByCommand=${JSON.stringify(failuresByCommand)} failuresByReason=${JSON.stringify(failuresByReason)}`);
+      };
+      instrumented.request = async (...args: any[]) => {
+        const command = String(args[0]?.command || 'unknown');
+        byCommand[command] = (byCommand[command] || 0) + 1;
+        requests++;
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        try { return await originalRequest(...args); }
+        catch (err: any) {
+          failures++;
+          failuresByCommand[command] = (failuresByCommand[command] || 0) + 1;
+          const code = String(err?.data?.error || err?.result?.error || err?.error || '');
+          const message = String(err?.message || '');
+          // Fixed categories; never log raw request bodies or arbitrary error strings.
+          const reason = /actNotFound|Account not found/i.test(code + ' ' + message)
+            ? 'amm_or_account_not_found'
+            : /invalidParams|malformed|invalidField/i.test(code + ' ' + message)
+            ? 'invalid_parameters'
+            : /too slow|rate.limit|slowDown/i.test(code + ' ' + message)
+            ? 'rate_or_backpressure'
+            : /timeout/i.test(code + ' ' + message)
+            ? 'timeout'
+            : /websocket|disconnect|closed/i.test(code + ' ' + message)
+            ? 'connection_closed'
+            : 'other';
+          failuresByReason[reason] = (failuresByReason[reason] || 0) + 1;
+          throw err;
+        }
+        finally { inFlight--; }
+      };
+      const timer = setInterval(() => {
+        const now = Date.now();
+        peakDelay = Math.max(peakDelay, Math.max(0, now - lastTick - 1000));
+        lastTick = now;
+      }, 1000);
+      const reportTimer = setInterval(() => report('periodic'), 15000);
+      const cleanup = () => { clearInterval(timer); clearInterval(reportTimer); };
+      this.client.once('disconnected', (code: number) => { report(`disconnect-code-${code}`); cleanup(); });
+      // Cleanup also on normal shutdown, where disconnected may not be emitted.
+      const originalDisconnect = instrumented.disconnect.bind(instrumented);
+      instrumented.disconnect = async (...args: any[]) => {
+        cleanup();
+        return originalDisconnect(...args);
+      };
+    }
     this.isConnected = true;
     this.reconnectAttempts = 0;
     info('Connected to XRPL successfully');
@@ -152,14 +280,92 @@ export class XRPLClient {
   }
 
   /**
+   * Optional dedicated transaction stream. The scanner continues to use this.client.
+   * Stream reconnects independently; no database, wallet or trading operations here.
+   */
+  private async startDedicatedStream(): Promise<void> {
+    if (this.streamClient?.isConnected()) return;
+    const generation = ++this.streamGeneration;
+    const stream = new Client(this.wsUrl, { timeout: 20000, connectionTimeout: 10000 });
+    this.streamClient = stream;
+    try {
+      await stream.connect();
+      if (this.streamStopped || generation !== this.streamGeneration) {
+        await stream.disconnect().catch(() => {});
+        return;
+      }
+      stream.on('transaction', tx => {
+        this.lastStreamTxAt = Date.now();
+        this.rawTxCount++;
+        diagnostics.recordRawTx();
+        if (this.txHandler && XRPLClient.isRelevant(tx)) {
+          this.filteredTxCount++;
+          diagnostics.recordTx(tx);
+          this.txHandler(tx);
+        }
+      });
+      stream.on('disconnected', code => {
+        if (generation !== this.streamGeneration || this.streamStopped) return;
+        warn(`XRPL dedicated transaction stream disconnected (code ${code})`);
+        this.streamClient = null;
+        this.scheduleStreamReconnect();
+      });
+      await stream.request({ command: 'subscribe', streams: ['transactions'] });
+      info('Dedicated XRPL transaction stream subscribed (scanner RPC isolated)');
+    } catch (err) {
+      warn(`Dedicated XRPL transaction stream connection failed: ${err}`);
+      if (this.streamClient === stream) this.streamClient = null;
+      await stream.disconnect().catch(() => {});
+      if (!this.streamStopped && generation === this.streamGeneration) this.scheduleStreamReconnect();
+    }
+  }
+
+  private scheduleStreamReconnect(): void {
+    if (this.streamStopped || this.streamReconnectTimer) return;
+    this.streamReconnectTimer = setTimeout(() => {
+      this.streamReconnectTimer = null;
+      void this.startDedicatedStream();
+    }, 5000);
+  }
+
+  async forceStreamReconnect(): Promise<void> {
+    if (process.env.XRPL_SEPARATE_STREAM !== '1') return this.forceReconnect();
+    this.stopDedicatedStream();
+    this.streamStopped = false;
+    await this.startDedicatedStream();
+  }
+
+  private stopDedicatedStream(): void {
+    this.streamStopped = true;
+    this.streamGeneration++;
+    if (this.streamReconnectTimer) clearTimeout(this.streamReconnectTimer);
+    this.streamReconnectTimer = null;
+    const old = this.streamClient;
+    this.streamClient = null;
+    if (old) void old.disconnect().catch(() => {});
+  }
+
+  /**
    * Subscribe to transactions stream
    */
   async subscribeTransactions(handler: (tx: any) => void): Promise<void> {
     if (!this.client || !this.isConnected) throw new Error('XRPL client not connected');
     this.txHandler = handler;
+    // Diagnostic mode: ledger-only avoids the high-volume transaction stream.
+    // It is intentionally not suitable for normal trading/discovery.
+    if (process.env.XRPL_DIAG_LEDGER_ONLY === '1') {
+      warn('DIAGNOSTIC: transaction stream disabled; ledger stream only');
+      return;
+    }
+    if (process.env.XRPL_SEPARATE_STREAM === '1') {
+      this.streamStopped = false;
+      await this.startDedicatedStream();
+      return;
+    }
     await this.client.request({ command: 'subscribe', streams: ['transactions'] });
     info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
     this.client.on('transaction', (tx) => {
+      this.lastStreamTxAt = Date.now();
       this.rawTxCount++;
       diagnostics.recordRawTx();
       if (this.txHandler && XRPLClient.isRelevant(tx)) {
@@ -207,10 +413,34 @@ export class XRPLClient {
 
   async getBookOffers(takerGets: any, takerPays: any, limit: number = 20): Promise<any> {
     if (!this.client || !this.isConnected) return null;
-    try {
-      const response = await this.client.request({ command: 'book_offers', taker_gets: takerGets, taker_pays: takerPays, ledger_index: 'validated', limit });
-      return response.result;
-    } catch (err) { debug(`Book offers failed: ${err}`); return null; }
+    const ttl = process.env.XRPL_BOOK_CACHE_MS
+      ? Math.max(0, Math.min(5000, Number(process.env.XRPL_BOOK_CACHE_MS) || 0))
+      : 0;
+    const key = JSON.stringify([takerGets, takerPays, limit]);
+    const now = Date.now();
+    if (ttl > 0) {
+      const cached = this.bookOfferCache.get(key);
+      if (cached && cached.expiresAt > now) return cached.promise;
+    }
+    const activeClient = this.client;
+    const request = activeClient.request({
+      command: 'book_offers', taker_gets: takerGets, taker_pays: takerPays,
+      ledger_index: 'validated', limit,
+    }).then(response => response.result)
+      .catch(err => { debug(`Book offers failed: ${err}`); return null; });
+    if (ttl > 0) {
+      // Small bounded cache: repeated reads share in-flight work and recent results.
+      if (this.bookOfferCache.size >= 256) {
+        for (const [k, v] of this.bookOfferCache) {
+          if (v.expiresAt <= now) this.bookOfferCache.delete(k);
+        }
+        if (this.bookOfferCache.size >= 256) {
+          this.bookOfferCache.delete(this.bookOfferCache.keys().next().value!);
+        }
+      }
+      this.bookOfferCache.set(key, { expiresAt: now + ttl, promise: request });
+    }
+    return request;
   }
 
   async getTransaction(hash: string): Promise<any> {
@@ -223,11 +453,14 @@ export class XRPLClient {
 
   recordLedger(): void { this.lastLedgerAt = Date.now(); }
 
-  getStatus(): { connected: boolean; url: string; lastLedgerAgeMs: number } {
+  getStatus(): { connected: boolean; streamConnected: boolean; url: string; lastLedgerAgeMs: number; lastTransactionAgeMs: number } {
+    const dedicated = process.env.XRPL_SEPARATE_STREAM === '1';
     return {
       connected: this.isConnected,
+      streamConnected: dedicated ? Boolean(this.streamClient?.isConnected()) : this.isConnected,
       url: this.wsUrl,
       lastLedgerAgeMs: this.lastLedgerAt > 0 ? Date.now() - this.lastLedgerAt : -1,
+      lastTransactionAgeMs: this.lastStreamTxAt > 0 ? Date.now() - this.lastStreamTxAt : -1,
     };
   }
 
@@ -238,6 +471,7 @@ export class XRPLClient {
   async disconnect(): Promise<void> {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     this.isReconnecting = false;
+    this.stopDedicatedStream();
     this.destroyClient();
     info('Disconnected from XRPL');
   }

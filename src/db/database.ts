@@ -19,11 +19,13 @@ import { info, warn, debug } from '../utils/logger';
 
 export class Database {
   private db: BetterSQLite3.Database;
+  private readonly isCompactRecoveryDb: boolean;
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY_MS = 100;
 
   constructor(dbPath?: string) {
-    const filePath = dbPath || path.join(process.cwd(), 'data', 'meme_bot.db');
+    const filePath = dbPath || process.env.BOT_DB_PATH || path.join(process.cwd(), 'data', 'meme_bot.db');
+    this.isCompactRecoveryDb = path.resolve(filePath) === path.resolve(process.cwd(), 'data', 'meme_bot.recovery.db');
 
     // Ensure data directory exists
     const fs = require('fs');
@@ -105,6 +107,27 @@ export class Database {
       }
     }
 
+    // Timestamp indexes for bounded retention, only on the small recovered DB.
+    // Do NOT attempt to index the full 18 GiB original during recovery.
+    if (this.isCompactRecoveryDb) {
+      for (const sql of [
+        'CREATE INDEX IF NOT EXISTS idx_recovery_snapshots_timestamp ON market_snapshots(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_recovery_scores_timestamp ON scores(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_recovery_risk_timestamp ON risk_flags(timestamp)',
+        'CREATE INDEX IF NOT EXISTS idx_recovery_risk_token ON risk_flags(token_currency, token_issuer, timestamp)'
+      ]) this.execWithRetry(sql);
+    }
+
+    // Recovery schema may have been copied from a legacy table without its UNIQUE constraint.
+    // This must run at startup, not only when optional missed-opportunity setup is invoked.
+    try {
+      this.execWithRetry(`CREATE UNIQUE INDEX IF NOT EXISTS idx_missed_opp_natural_key
+        ON missed_opportunities(currency, issuer, skipped_at)`);
+    } catch (err) {
+      warn(`Failed to establish missed-opportunity UPSERT key: ${err}`);
+      throw err;
+    }
+
     // Migrations: add columns that may be missing from older DB files
     const migrations = [
       `ALTER TABLE market_snapshots ADD COLUMN unique_buyers_5m INTEGER DEFAULT 0`,
@@ -120,29 +143,10 @@ export class Database {
       // so no ALTER TABLE needed; these are no-op guards for idempotency
     ];
 
-    // FIX #26: Clean up historical trades where xrp_returned=0 but pnl_xrp is wildly wrong.
-    // These are pre-migration artifacts from before the xrp_returned column existed.
-    // Any closed trade with xrp_returned=0 that isn't already force_close_no_price
-    // had its PnL calculated from stale/zero entry price data — reclassify as ghost.
-    const dataFixMigrations = [
-      `UPDATE paper_trades
-       SET exit_reason = 'force_close_no_price',
-           pnl_xrp = -entry_amount_xrp,
-           pnl_percent = -100.0
-       WHERE status = 'closed'
-         AND (xrp_returned IS NULL OR xrp_returned = 0)
-         AND exit_reason != 'force_close_no_price'`,
-    ];
-    for (const sql of dataFixMigrations) {
-      try {
-        const result = this.db.prepare(sql).run();
-        if (result.changes > 0) {
-          info(`FIX #26 data migration: reclassified ${result.changes} zero-return trade(s) as force_close_no_price`);
-        }
-      } catch (err) {
-        warn(`FIX #26 data migration error: ${err}`);
-      }
-    }
+    // Historical PnL is immutable during startup. The old FIX #26 UPDATE
+    // overwrote closed trades whenever xrp_returned was zero or missing,
+    // potentially turning legitimate historical results into -100% losses.
+    // Review suspicious rows separately; never rewrite them on boot.
     for (const sql of migrations) {
       try {
         this.db.exec(sql);
@@ -204,23 +208,31 @@ export class Database {
   }
 
   /**
-   * Prune tokens that haven't been updated in 48h AND have no score in 48h.
-   * Reduces startup preload time and scan overhead.
+   * Destructive startup token cleanup — intentionally disabled by default.
+   * Score history was excluded from compact recovery DBs, so absent scores
+   * must not be treated as evidence that tokens are safe to delete.
    */
   pruneStaleTokens(): number {
+    if (process.env.BOT_ENABLE_STARTUP_PRUNE !== '1') {
+      warn('Refusing destructive token prune without BOT_ENABLE_STARTUP_PRUNE=1');
+      return 0;
+    }
     try {
       const cutoff = Date.now() - 48 * 60 * 60 * 1000;
-      // Keep tokens that have either been updated recently OR have a recent score
       const result = this.db.prepare(`
         DELETE FROM tokens
         WHERE last_updated < ?
-          AND currency NOT IN (
-            SELECT DISTINCT token_currency FROM scores
-            WHERE timestamp > ?
+          AND NOT EXISTS (
+            SELECT 1 FROM scores s
+            WHERE s.token_currency = tokens.currency
+              AND s.token_issuer = tokens.issuer
+              AND s.timestamp > ?
           )
-          AND currency NOT IN (
-            SELECT DISTINCT token_currency FROM paper_trades
-            WHERE status = 'open'
+          AND NOT EXISTS (
+            SELECT 1 FROM paper_trades p
+            WHERE p.token_currency = tokens.currency
+              AND p.token_issuer = tokens.issuer
+              AND p.status IN ('open', 'partial')
           )
       `).run(cutoff, cutoff) as any;
       return result.changes ?? 0;
@@ -303,6 +315,15 @@ export class Database {
   // ==================== MARKET SNAPSHOTS ====================
 
   saveMarketSnapshot(snapshot: MarketSnapshot): void {
+    // Bound historical write amplification: at most one sample per token per minute.
+    // Keep the most recent row queryable; only suppress redundant high-frequency inserts.
+    const recent = this.db.prepare(`
+      SELECT timestamp FROM market_snapshots
+      WHERE token_currency = ? AND token_issuer = ?
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(snapshot.tokenCurrency, snapshot.tokenIssuer) as { timestamp: number } | undefined;
+    if (recent && snapshot.timestamp >= recent.timestamp &&
+        snapshot.timestamp - recent.timestamp < (this.isCompactRecoveryDb ? 120_000 : 60_000)) return;
     try {
       const stmt = this.db.prepare(`
         INSERT INTO market_snapshots
@@ -373,6 +394,16 @@ export class Database {
 
   saveRiskFlags(tokenCurrency: string, tokenIssuer: string, riskFlags: RiskFlags): void {
     try {
+      // Risk flags otherwise emit one row per token per scan (millions/day).
+      // Cap optional recovery history to one row per token every 5 minutes.
+      const now = Date.now();
+      if (this.isCompactRecoveryDb) {
+        const latest = this.db.prepare(`
+          SELECT timestamp FROM risk_flags WHERE token_currency = ? AND token_issuer = ?
+          ORDER BY timestamp DESC LIMIT 1
+        `).get(tokenCurrency, tokenIssuer) as { timestamp: number } | undefined;
+        if (latest && now >= latest.timestamp && now - latest.timestamp < 300_000) return;
+      }
       const stmt = this.db.prepare(`
         INSERT INTO risk_flags
         (token_currency, token_issuer, timestamp,
@@ -384,7 +415,7 @@ export class Database {
       this.runWithRetry(stmt, [
         tokenCurrency,
         tokenIssuer,
-        Date.now(),
+        now,
         riskFlags.lowLiquidity ? 1 : 0,
         riskFlags.wideSpread ? 1 : 0,
         riskFlags.concentratedSupply ? 1 : 0,
@@ -403,6 +434,15 @@ export class Database {
   // ==================== SCORES ====================
 
   saveScore(score: TokenScore): void {
+    // Bound historical write amplification: at most one sample per token per minute.
+    // Keep the most recent row queryable; only suppress redundant high-frequency inserts.
+    const recent = this.db.prepare(`
+      SELECT timestamp FROM scores
+      WHERE token_currency = ? AND token_issuer = ?
+      ORDER BY timestamp DESC LIMIT 1
+    `).get(score.tokenCurrency, score.tokenIssuer) as { timestamp: number } | undefined;
+    if (recent && score.timestamp >= recent.timestamp &&
+        score.timestamp - recent.timestamp < (this.isCompactRecoveryDb ? 120_000 : 60_000)) return;
     try {
       const stmt = this.db.prepare(`
         INSERT INTO scores
@@ -969,6 +1009,8 @@ export class Database {
       this.db.exec(SCHEMA.profileStats);
       this.db.exec(SCHEMA.shadowTrades);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_missed_opp_currency ON missed_opportunities(currency, issuer)`);
+      // Required by ON CONFLICT(currency, issuer, skipped_at) in upsertMissedOpportunity.
+      this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_missed_opp_natural_key ON missed_opportunities(currency, issuer, skipped_at)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_profile_stats_profile ON profile_stats(profile, closed_at)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_currency ON shadow_trades(currency, issuer, skipped_at)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_shadow_unresolved ON shadow_trades(resolved_at, skipped_at)`);
@@ -1240,6 +1282,42 @@ export class Database {
       }
       return result;
     } catch { return {}; }
+  }
+
+  /**
+   * Bounded observation-history retention for compact PAPER recovery only.
+   * Deletes up to 5000 aged rows from each ephemeral history table per pass.
+   * Never touches tokens, token_archive, paper_trades, alerts, or trading logs.
+   * SQLite reuses freed pages; this does not VACUUM or grow a second DB copy.
+   */
+  pruneRecoveryObservations(): void {
+    if (!this.isCompactRecoveryDb ||
+        process.env.BOT_ENABLE_OBSERVATION_RETENTION !== '1' ||
+        process.env.MODE !== 'PAPER' ||
+        process.env.LIVE_TRADING !== 'false') {
+      warn('Recovery observation retention skipped (requires explicit PAPER-only opt-in)');
+      return;
+    }
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    try {
+      const removed: Record<string, number> = {};
+      this.db.transaction(() => {
+        for (const table of ['market_snapshots', 'scores', 'risk_flags']) {
+          // Table identifiers are from this fixed internal allowlist.
+          const result = this.db.prepare(`
+            DELETE FROM ${table} WHERE id IN (
+              SELECT id FROM ${table} WHERE timestamp < ? ORDER BY timestamp LIMIT 5000
+            )
+          `).run(cutoff);
+          removed[table] = result.changes;
+        }
+      })();
+      if (Object.values(removed).some(n => n > 0)) {
+        info(`Recovery observation retention (7d): ${JSON.stringify(removed)}`);
+      }
+    } catch (err) {
+      warn(`Recovery observation retention failed: ${err}`);
+    }
   }
 
   /**
