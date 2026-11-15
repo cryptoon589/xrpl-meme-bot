@@ -25,7 +25,10 @@ def inspect(path: Path):
         cutoff_ms = int(datetime.now(timezone.utc).timestamp() * 1000) - 48 * 3600 * 1000
         stale = sum(1 for r in rows if r[2] < cutoff_ms)
         positions = con.execute("SELECT COUNT(*) FROM paper_trades WHERE status IN ('open','partial')").fetchone()[0]
-        return {"count": len(rows), "keys": keys, "stale": stale, "open_or_partial": positions}
+        has_archive = con.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='token_archive'").fetchone()[0]
+        archive_keys = set(con.execute("SELECT currency, issuer FROM token_archive")) if has_archive else set()
+        return {"count": len(rows), "keys": keys, "stale": stale,
+                "open_or_partial": positions, "archive_keys": archive_keys}
     finally:
         con.close()
 
@@ -47,8 +50,11 @@ def main():
             newest = inspect(BACKUPS[-1])
             summary("Latest pre-probe backup (read-only)", BACKUPS[-1], newest)
     if current and original:
-        print(f"Token keys present in original but missing from recovery: {len(original['keys'] - current['keys'])}")
-        print(f"Token keys newly discovered since original: {len(current['keys'] - original['keys'])}")
+        archived = current['archive_keys']
+        print(f"Original token identities preserved in archive: {len(original['keys'] & archived)} / {len(original['keys'])}")
+        print(f"Original token identities missing from BOTH active and archive: {len(original['keys'] - current['keys'] - archived)}")
+        print(f"Original tokens intentionally absent from active scanner: {len(original['keys'] - current['keys'])}")
+        print(f"Newly discovered active tokens: {len(current['keys'] - original['keys'])}")
     if current and oldest:
         print(f"Token keys in earliest recovery backup but missing now: {len(oldest['keys'] - current['keys'])}")
     print("READ-ONLY AUDIT COMPLETE: no database was modified")
