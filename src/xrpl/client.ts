@@ -157,6 +157,12 @@ export class XRPLClient {
   async subscribeTransactions(handler: (tx: any) => void): Promise<void> {
     if (!this.client || !this.isConnected) throw new Error('XRPL client not connected');
     this.txHandler = handler;
+    // Diagnostic mode: ledger-only avoids the high-volume transaction stream.
+    // It is intentionally not suitable for normal trading/discovery.
+    if (process.env.XRPL_DIAG_LEDGER_ONLY === '1') {
+      warn('DIAGNOSTIC: transaction stream disabled; ledger stream only');
+      return;
+    }
     await this.client.request({ command: 'subscribe', streams: ['transactions'] });
     info('Subscribed to transactions stream (filtered: TrustSet, AMM*, OfferCreate, token Payments)');
     this.client.on('transaction', (tx) => {
