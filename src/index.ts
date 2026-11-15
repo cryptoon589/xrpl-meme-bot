@@ -1633,7 +1633,7 @@ function startHealthCheck(
   healthCheckInterval = setInterval(() => {
     const status = xrplClient.getStatus();
     const txStats = xrplClient.getTxStats();
-    const streamAgeMs = status.lastLedgerAgeMs;
+    const streamAgeMs = status.lastTransactionAgeMs;
 
     if (!status.connected) {
       warn('⚠️  Health: NOT connected to XRPL — waiting for reconnect');
@@ -1641,10 +1641,18 @@ function startHealthCheck(
     }
 
     // Detect silent stream death (connected flag = true but no data)
+    if (!status.streamConnected) {
+      warn('⚠️  Health: XRPL transaction stream disconnected — dedicated stream reconnecting independently');
+      return;
+    }
     if (streamAgeMs > STALE_STREAM_MS && streamAgeMs !== -1) {
       warn(`⚠️  Health: WS stream STALE — last tx ${Math.round(streamAgeMs/1000)}s ago (threshold: ${STALE_STREAM_MS/1000}s). Forcing reconnect.`);
       // Use forceReconnect() which properly tears down state and re-subscribes
-      xrplClient.forceReconnect().catch((e: any) => warn(`forceReconnect error: ${e}`));
+      if (process.env.XRPL_SEPARATE_STREAM === '1') {
+        xrplClient.forceStreamReconnect().catch((e: any) => warn(`forceStreamReconnect error: ${e}`));
+      } else {
+        xrplClient.forceReconnect().catch((e: any) => warn(`forceReconnect error: ${e}`));
+      }
       return;
     }
 
@@ -1673,6 +1681,7 @@ function startHealthEndpoint(
         tokens: tokenDiscovery.getTokenCount(),
         positions: paperTrader?.getOpenPositions().length || 0,
         xrplConnected: xrplClient.getStatus().connected,
+        xrplStreamConnected: xrplClient.getStatus().streamConnected,
         timestamp: Date.now(),
       };
       res.writeHead(200, { 'Content-Type': 'application/json' });
