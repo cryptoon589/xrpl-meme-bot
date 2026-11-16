@@ -12,6 +12,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Database } from '../db/database';
+import { isLearningApproved } from './learningApproval';
+import type { LearningValidation } from './learningApproval';
 import { info, warn } from '../utils/logger';
 
 const MIN_TRADES_FOR_ANALYSIS = 5; // lowered — send partial log even with few trades
@@ -53,6 +55,8 @@ export interface TradeRecommendations {
 
   insights: string[];
   autoApplyReady: boolean;
+  /** Reviewed forward OOS record; never populated automatically by the analyzer. */
+  validation?: LearningValidation;
 
   // #1 Entry timing: learned pullback depth before continuation
   entryPullbackPct: number;      // wait for this % dip after burst signal before entering
@@ -491,12 +495,13 @@ export class TradeAnalyzer {
     }
 
     // ── Auto-apply readiness ──────────────────────────────────────
-    const autoApplyReady = winRate >= 0.5 && rawTrades.length >= 30;
+    // Legacy statistical heuristic is advisory only; independent OOS approval is mandatory.
+    const autoApplyReady = false;
     if (autoApplyReady) {
       insights.push(`✅ ${(winRate*100).toFixed(0)}% win rate with ${rawTrades.length} trades — auto-apply active`);
     } else {
       const need = Math.max(0, 30 - rawTrades.length);
-      insights.push(`⏳ Need ${need} more trades + 50%+ win rate for auto-apply`);
+      insights.push(`⏳ Learning suggestions are advisory. Require epoch-specific out-of-sample validation and an explicit PAPER-only opt-in before applying; raw sample ${rawTrades.length} trades.`);
     }
 
     const recs: TradeRecommendations = {
@@ -547,6 +552,10 @@ export class TradeAnalyzer {
    * Called automatically when autoApplyReady, or on operator command.
    */
   applyRecommendations(recs: TradeRecommendations, configPath: string): boolean {
+    if (!isLearningApproved(recs)) {
+      warn('[TradeAnalyzer] Config auto-apply blocked: missing PAPER epoch-specific forward validation and opt-in');
+      return false;
+    }
     try {
       const raw = fs.readFileSync(configPath, 'utf8');
       const config = JSON.parse(raw);
@@ -591,13 +600,20 @@ export class TradeAnalyzer {
           s.dev_safety_score,
           s.spread_score
         FROM paper_trades pt
-        LEFT JOIN scores s ON
-          s.token_currency = pt.token_currency
-          AND s.token_issuer = pt.token_issuer
-          AND s.timestamp BETWEEN pt.entry_timestamp - 300000 AND pt.entry_timestamp + 300000
+        LEFT JOIN scores s ON s.id = (
+          SELECT si.id FROM scores si
+          WHERE si.token_currency = pt.token_currency
+            AND si.token_issuer = pt.token_issuer
+            AND si.timestamp BETWEEN pt.entry_timestamp - 300000 AND pt.entry_timestamp
+          ORDER BY si.timestamp DESC, si.id DESC
+          LIMIT 1
+        )
         WHERE pt.status = 'closed'
           AND pt.pnl_xrp IS NOT NULL
-        GROUP BY pt.id
+          AND pt.exit_reason IS NOT NULL
+          AND pt.exit_reason != 'force_close_no_price'
+          AND pt.exit_price_xrp > 0
+          AND pt.entry_amount_xrp > 0
         ORDER BY pt.exit_timestamp DESC
       `).all() as TradeWithScore[];
     } catch (err) {
