@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - release/hunterix-vnext-paper-20261116
+      - fix/hunterix-vnext-meme-only-20261116
   workflow_dispatch:
 
 jobs:
@@ -32,6 +33,8 @@ jobs:
         run: node scripts/test_xrpl_reconnect_backoff.js
       - name: User-approved four-token blacklist and main XRPL ARMY issue AMM price regression
         run: node scripts/test_army_pricing_and_blacklist.js
+      - name: Meme-only PAPER trade eligibility regression
+        run: node scripts/test_meme_entry_universe.js
       - name: Whale, burst, validated new launches and operator blacklist
         run: |
           node scripts/test_manual_blacklist.js
@@ -55,6 +58,7 @@ jobs:
           assert.throws(()=>require(p),/Approved operator-manifest SHA256/);
           process.env.HUNTERIX_VNEXT_XRPL_WS_URL='wss://xrplcluster.com';
           process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256='a'.repeat(64);
+          process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256='b'.repeat(64);
           delete require.cache[require.resolve(p)];
           const e=require(p).apps[0].env;
           assert.equal(e.XRPL_WS_URL,'wss://xrplcluster.com');
@@ -64,6 +68,8 @@ jobs:
           assert.equal(e.LIVE_TRADING,'false');
           assert.equal(e.TRADING_WALLET_SEED,'');
           assert.equal(e.BOT_USE_RESERVE_QUOTES,'1');
+          assert.equal(e.BOT_PAPER_MEME_ONLY,'1');
+          assert.ok(e.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE.endsWith('paper_meme_entry_allowlist.json'));
           assert.equal(e.BOT_ENABLE_LIQUIDITY_LOSS_GUARD,'1');
           assert.equal(e.BOT_DB_PATH.endsWith('meme_bot.paper-epoch-20261116-ci.db'),true);
           console.log('PASS explicit epoch, approved blacklist and safe PAPER PM2 configuration');
