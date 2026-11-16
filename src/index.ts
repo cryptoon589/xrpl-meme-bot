@@ -41,6 +41,7 @@ import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
+import { OperatorBlacklist } from './risk/operatorBlacklist';
 import { isLearningApproved } from './analysis/learningApproval';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
@@ -165,32 +166,13 @@ async function main() {
   const telegramAlerter = new TelegramAlerter(config);
   const burstDetector = new BurstDetector(xrplClient, telegramAlerter, db);
 
-  // Tokens that should never be burst-traded (native chain tokens, stablecoins, etc.)
-  // Includes both ASCII names AND hex-encoded equivalents
-  const BURST_TRADE_BLOCKLIST = new Set([
-    // ASCII names
-    'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+  // The operator's explicit manual list is the ONLY permanent token blacklist.
+  // Missing manifest => startup fails closed, rather than silently guessing
+  // what the operator previously chose to blacklist.
+  const manualBlacklist = OperatorBlacklist.load();
+  const BURST_TRADE_BLOCKLIST = manualBlacklist.asDecisionSet();
+  info(`[Blacklist] Loaded ${manualBlacklist.list().length} operator entries. No automatic token additions.`);
 
-    'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP', 'EUR',
-    // Hex-encoded equivalents (40-char, right-padded with 00s)
-    '524C555344000000000000000000000000000000', // RLUSD
-    '5553440000000000000000000000000000000000', // USD
-    '5553444300000000000000000000000000000000', // USDC
-    '5553445400000000000000000000000000000000', // USDT
-    '4555520000000000000000000000000000000000', // EUR
-    '4254430000000000000000000000000000000000', // BTC
-    '4554480000000000000000000000000000000000', // ETH
-    '5841480000000000000000000000000000000000', // XAH
-    '584C4D0000000000000000000000000000000000', // XLM
-    '5347420000000000000000000000000000000000', // SGB
-    '464C520000000000000000000000000000000000', // FLR
-    '534F4C4F00000000000000000000000000000000', // SOLO
-    '4556520000000000000000000000000000000000', // EVR
-    '4353430000000000000000000000000000000000', // CSC
-    '44524F0000000000000000000000000000000000', // DRO
-  ]);
-
-  // Helper: decode 40-char hex currency to ASCII (for blocklist checks)
   const decodeCurrency = (raw: string): string => {
     if (raw.length !== 40) return raw;
     try {
@@ -199,9 +181,11 @@ async function main() {
       return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : raw;
     } catch { return raw; }
   };
+  const isBlocklistedToken = (currency: string, issuer: string, raw?: string): boolean =>
+    manualBlacklist.isBlocked(currency, issuer, raw);
 
-  const isBlocklistedToken = (currency: string): boolean =>
-    BURST_TRADE_BLOCKLIST.has(currency) || BURST_TRADE_BLOCKLIST.has(decodeCurrency(currency));
+  burstDetector.isManuallyBlocked = (currency, issuer, raw) =>
+    manualBlacklist.isBlocked(currency, issuer, raw);
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
@@ -210,7 +194,7 @@ async function main() {
       diagnostics.recordSignal({ token: decodeCurrency(rawCurrency || currency), issuer, source: 'burst', reason: 'burst_detected', priceAtSignal: priceXRP, poolXrpReserve: poolTVL / 2, rawCurrency });
       // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
       const poolXrpReserve = poolTVL / 2;
-      if (isBlocklistedToken(currency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
+      if (isBlocklistedToken(currency, issuer, rawCurrency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
       const burstKey = `${currency}:${issuer}`;
       // Skip tokens that were recently force-closed for no-price
       const noPriceCooldownTs = noPriceCooldowns.get(burstKey);
@@ -498,16 +482,11 @@ async function main() {
     };
   }
 
-  // On startup: force-close any positions in blocklisted tokens
-  // (opened before the blocklist was added, e.g. XAH, 666, LOX)
+  // Never liquidate PAPER inventory because a ticker appears in a blacklist.
+  // Manual token entries reject only NEW opportunities; existing positions
+  // need an explicit user-directed price-supported exit.
   if (paperTrader) {
-    for (const token of BURST_TRADE_BLOCKLIST) {
-      const closed = paperTrader.forceCloseByToken(token, 'blocklisted_token_cleanup');
-      if (closed) {
-        warn(`Startup cleanup: force-closed blocklisted position ${token}`);
-      }
-    }
-    // Log open positions restored from DB — do NOT force-close them.
+  // Log open positions restored from DB — do NOT force-close them.
     // The 2h force-close here was silently wiping active positions on every restart.
     // The orphan checker (checkAllOpenExits) handles exits with live prices each scan cycle.
     const startupOpenPositions = paperTrader.getOpenPositionsSummary();
@@ -1082,39 +1061,11 @@ function startPeriodicScan(
             };
             const signalCount = Object.values(signals).filter(Boolean).length;
 
-            // Decode hex currency to its ASCII name for blocklist checks.
-            // token.currency may be raw hex (e.g. 524C5553440000...) or decoded name (e.g. RLUSD).
-            // Normalising here means one blocklist entry covers both forms.
-            const decodedAlertCurrency = (() => {
-              if (token.currency.length !== 40) return token.currency;
-              try {
-                const stripped = token.currency.replace(/00+$/, '');
-                const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-                return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : token.currency;
-              } catch { return token.currency; }
-            })();
-
-            // Established/stablecoin tokens — never alert regardless of score or momentum
-            const ALERT_BLOCKLIST = new Set([
-              // Fiat / stablecoins
-              'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
-              // L1 / ecosystem tokens
-              'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-              // Confirmed established XRPL projects (operator-verified)
-              'OCT', 'SHX', 'MXI', 'CORE',
-            ]);
-            // Also filter brand-impersonation hex tokens (e.g. "ARK Invest XRP ETF", "Deutsche Bank")
-            const BRAND_KEYWORDS = [
-              'invest', 'etf', 'bank', 'financial', 'finance', 'capital', 'fund', 'asset',
-              'deutsche', 'blackrock', 'vanguard', 'fidelity', 'grayscale', 'nasdaq', 'nyse',
-              'federal', 'reserve', 'treasury', 'sec ', 'cftc', 'imf', 'swift',
-              'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
-            ];
-            const isBrandImpersonation = (() => {
-              const lower = decodedAlertCurrency.toLowerCase();
-              return BRAND_KEYWORDS.some(kw => lower.includes(kw));
-            })();
-            const isBlocklisted = ALERT_BLOCKLIST.has(decodedAlertCurrency) || isBrandImpersonation;
+            // No preinstalled stablecoin, ecosystem, brand or keyword blacklist.
+            // Only the operator's exact manually chosen entries are blocked.
+            const isBlocklisted = manualBlacklist.isBlocked(
+              token.currency, token.issuer, token.rawCurrency
+            );
 
             // Minimum wallet breadth gate: require at least 2 unique buyers in the
             // live window before alerting. Stops single-wallet manipulation from
