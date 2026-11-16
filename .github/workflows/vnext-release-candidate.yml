@@ -26,6 +26,8 @@ jobs:
           node scripts/test_amm_sell_quotes.js
           node scripts/test_learning_gate.js
           node scripts/test_telegram_reporting_integrity.js
+      - name: XRPL rate-limit/1008 cooldown and no-extra-RPC regression
+        run: node scripts/test_xrpl_rpc_overload.js
       - name: User-approved four-token blacklist and main XRPL ARMY issue AMM price regression
         run: node scripts/test_army_pricing_and_blacklist.js
       - name: Whale, burst, validated new launches and operator blacklist
