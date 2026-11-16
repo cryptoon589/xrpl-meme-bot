@@ -19,6 +19,8 @@ jobs:
       - run: npm run build
       - name: Existing accounting regression
         run: node scripts/test_paper_accounting_recovery.js
+      - name: Full-reserve XRPL AMM quote model regression
+        run: node scripts/test_amm_sell_quotes.js
       - name: Forward adaptive learning gate
         run: node scripts/test_learning_gate.js
       - name: Clean PAPER epoch; source immutable and existing destination protected
