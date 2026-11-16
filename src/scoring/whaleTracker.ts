@@ -26,7 +26,13 @@ interface WhaleRecord {
 export class WhaleTracker {
   // In-memory registry: address -> record
   private registry: Map<string, WhaleRecord> = new Map();
+  // Fresh imported wallet statistics are separate from historic/training records.
+  // Inferred "winning buyer" wallets remain stored for audit but do NOT boost
+  // entry scores without external current wallet-specific performance evidence.
+  private activeExternal: Map<string, { winRatePct: number; volumeXrp: number; importedAt: number }> = new Map();
   private loaded = false;
+  private readonly EXTERNAL_FRESHNESS_MS = 7 * 24 * 3600 * 1000;
+  private readonly XRPL_ADDRESS = /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/;
 
   /**
    * Called when a paper trade closes with PnL > 50%.
@@ -120,28 +126,19 @@ export class WhaleTracker {
     issuer: string,
     buyerWallets: string[]
   ): number {
-    if (buyerWallets.length === 0 || this.registry.size === 0) return 0;
-
+    if (!buyerWallets?.length) return 0;
     let score = 0;
-
-    for (const wallet of buyerWallets) {
-      const record = this.registry.get(wallet);
-      if (!record) continue;
-
-      if (record.winRatePct !== undefined) {
-        // Externally imported top trader — winRatePct is the signal
-        const wr = record.winRatePct;
-        const contribution = wr >= 90 ? 10 : wr >= 80 ? 7 : wr >= 70 ? 5 : wr >= 60 ? 3 : 0;
-        score += contribution;
-        debug(`[WhaleTracker] TopTrader ${wallet} (WR=${wr}%) in ${currency}:${issuer} → +${contribution}`);
-      } else {
-        // Internally tracked whale — legacy wins-based scoring
-        const contribution = Math.min(10, 5 + (record.wins - 1) * 2);
-        score += contribution;
-        debug(`[WhaleTracker] Whale detected: ${wallet} (wins=${record.wins}) in ${currency}:${issuer} → +${contribution}`);
-      }
+    const now = Date.now();
+    // A duplicated wallet cannot inflate buyer consensus.
+    for (const wallet of new Set(buyerWallets)) {
+      const rec = this.activeExternal.get(wallet);
+      if (!rec || rec.importedAt > now + 60_000 ||
+          now - rec.importedAt > this.EXTERNAL_FRESHNESS_MS) continue;
+      const wr = rec.winRatePct;
+      const contribution = wr >= 90 ? 10 : wr >= 80 ? 7 : wr >= 70 ? 5 : wr >= 60 ? 3 : 0;
+      score += contribution;
+      debug(`[WhaleTracker] Fresh imported wallet ${wallet} (historical WR=${wr}%) ${currency}:${issuer} +${contribution}`);
     }
-
     return Math.min(30, score);
   }
 
@@ -199,9 +196,12 @@ export class WhaleTracker {
    */
   getBestWhaleWinRate(buyerWallets: string[]): number {
     let best = 0;
-    for (const addr of buyerWallets) {
-      const rec = this.registry.get(addr);
-      if (rec && (rec.winRatePct ?? 0) > best) best = rec.winRatePct ?? 0;
+    const now = Date.now();
+    for (const addr of new Set(buyerWallets)) {
+      const rec = this.activeExternal.get(addr);
+      if (!rec || rec.importedAt > now + 60_000 ||
+          now - rec.importedAt > this.EXTERNAL_FRESHNESS_MS) continue;
+      if (rec.winRatePct > best) best = rec.winRatePct;
     }
     return best;
   }
@@ -219,33 +219,42 @@ export class WhaleTracker {
    * sources (FirstLedger) update the whale registry without a code deploy.
    */
   loadTopTradersFromFile(): number {
+    // Revoke previously active stats on each reload; never keep expired
+    // wallet reputation active after file loss or invalid source data.
+    this.activeExternal.clear();
     try {
       const statePath = path.join(process.cwd(), 'state', 'top_traders_import.json');
       if (!fs.existsSync(statePath)) return 0;
       const data = JSON.parse(fs.readFileSync(statePath, 'utf8')) as {
-        importedAt: number;
-        traders: Array<{
-          address: string;
-          winRatePct: number;
-          volumeXrp: number;
-          positionsOpen?: number;
-        }>;
+        importedAt: number; source?: string;
+        traders: Array<{ address: string; winRatePct: number;
+          volumeXrp: number; positionsOpen?: number }>;
       };
-      // Always import top traders from the operator-managed file — no staleness gate.
-      // The operator maintains this externally; missing/wrong data is their concern,
-      // not the bot’s. Removing the 24h check ensures whale data survives restarts
-      // even if the file was imported at the end of a 24h window.
-      if (!data.traders?.length) return 0;
-      let imported = 0;
-      for (const t of data.traders) {
-        if (t.winRatePct >= 60 && t.volumeXrp >= 1000) {
-          this.importTopTrader(t.address, t.winRatePct, t.volumeXrp, t.positionsOpen ?? 0);
-          imported++;
-        }
+      const now = Date.now();
+      if (!Number.isFinite(data.importedAt) ||
+          data.importedAt > now + 60000 ||
+          now - data.importedAt > this.EXTERNAL_FRESHNESS_MS) {
+        info('[WhaleTracker] Imported wallet file is stale or future-dated; preserving records but withholding trading boosts');
+        return 0;
       }
-      if (imported > 0) info(`[WhaleTracker] Imported ${imported} top traders from file`);
+      // Only explicitly sourced trader imports can enable an active signal.
+      if (!['firstledger_radar','firstledger_radar_top20'].includes(data.source || '') ||
+          !Array.isArray(data.traders)) return 0;
+      let imported=0;
+      for (const t of data.traders) {
+        if (!t || !this.XRPL_ADDRESS.test(t.address || '') ||
+            !Number.isFinite(t.winRatePct) || t.winRatePct < 60 || t.winRatePct > 100 ||
+            !Number.isFinite(t.volumeXrp) || t.volumeXrp < 1000) continue;
+        this.importTopTrader(t.address,t.winRatePct,t.volumeXrp,t.positionsOpen || 0);
+        this.activeExternal.set(t.address,{
+          winRatePct:t.winRatePct,volumeXrp:t.volumeXrp,importedAt:data.importedAt
+        });
+        imported++;
+      }
+      if (imported) info(`[WhaleTracker] Active recent imported wallets: ${imported}; historical registry preserved`);
       return imported;
-    } catch {
+    } catch (err) {
+      debug(`[WhaleTracker] No usable fresh external wallet import: ${err}`);
       return 0;
     }
   }
