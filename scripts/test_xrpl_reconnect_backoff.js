@@ -18,11 +18,29 @@ async function main(){
     'ordinary disconnect keeps bounded exponential backoff');
   await ordinary.disconnect();
 
+  const escalation=new XRPLClient('wss://example.invalid');
+  escalation.scheduleReconnect(false);
+  const firstTimer=escalation.reconnectTimer;
+  escalation.scheduleReconnect(true);
+  assert.notEqual(escalation.reconnectTimer,firstTimer,
+    '1008 must replace pending 5-second reconnect');
+  assert.ok(escalation.reconnectTimer._idleTimeout>=120000);
+  await escalation.disconnect();
+
   const stream=new XRPLClient('wss://example.invalid');
   stream.scheduleStreamReconnect(true);
   assert.ok(stream.streamReconnectTimer._idleTimeout>=120000);
   await stream.disconnect();
   assert.equal(stream.streamReconnectTimer,null);
+
+  const streamEscalation=new XRPLClient('wss://example.invalid');
+  streamEscalation.scheduleStreamReconnect(false);
+  const firstStreamTimer=streamEscalation.streamReconnectTimer;
+  streamEscalation.scheduleStreamReconnect(true);
+  assert.notEqual(streamEscalation.streamReconnectTimer,firstStreamTimer,
+    '1008 must replace pending 5-second stream reconnect');
+  assert.ok(streamEscalation.streamReconnectTimer._idleTimeout>=120000);
+  await streamEscalation.disconnect();
 
   const normalStream=new XRPLClient('wss://example.invalid');
   normalStream.scheduleStreamReconnect(false);
