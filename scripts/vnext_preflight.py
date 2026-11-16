@@ -116,7 +116,7 @@ def epoch_state(path, expected_legacy):
         return cash[0],count(db,'tokens'),meta[2],n or 0
 
 
-def check_runtime(epoch, manifest, digest):
+def check_runtime(epoch, manifest, legacy, digest):
     expected_db=str(epoch.resolve())
     expected_id=epoch.stem
     checks={
@@ -124,6 +124,8 @@ def check_runtime(epoch, manifest, digest):
         'LIVE_TRADING=false':os.environ.get('LIVE_TRADING')=='false',
         'wallet seed absent':not os.environ.get('TRADING_WALLET_SEED'),
         'epoch DB exact path':os.environ.get('BOT_DB_PATH')==expected_db,
+        'legacy DB explicit original path':
+          os.environ.get('HUNTERIX_LEGACY_SOURCE_DB_PATH')==str(legacy.resolve()),
         'epoch ID match':os.environ.get('BOT_PAPER_EPOCH_ID')==expected_id,
         'manual blacklist exact path':
           str(Path(os.environ.get('HUNTERIX_MANUAL_BLOCKLIST_FILE','')).resolve())==str(manifest.resolve()),
@@ -209,8 +211,13 @@ def main():
     except (ValueError,OSError,sqlite3.Error) as ex:
         print('NOT READY: clean PAPER epoch:',ex)
         passed=False
+    if args.strict_startup and legacy.resolve() == (ROOT/'data/meme_bot.recovery.db').resolve():
+        # For an isolated vNext worktree the reviewed legacy source must be
+        # outside the staging folder; never silently use a copied DB.
+        print('NOT READY: release must reference original legacy DB outside staging directory')
+        passed=False
     if args.strict_startup and passed:
-        try: check_runtime(epoch,manifest,digest)
+        try: check_runtime(epoch,manifest,legacy,digest)
         except (ValueError,OSError) as ex:
             print('NOT READY: runtime:',ex)
             passed=False
