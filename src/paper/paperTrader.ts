@@ -816,9 +816,7 @@ export class PaperTrader {
       if (closed) {
         tradeEvents.push(this.snapshotTrade(closed));
       } else {
-        // Fallback to the pre-close reference if the position disappeared unexpectedly.
-        const ref = closingTrades.find(t => `${t.tokenCurrency}:${t.tokenIssuer}` === key);
-        if (ref) tradeEvents.push(this.snapshotTrade(ref));
+        warn(`[PAPER] No confirmed simulated close for ${key}; suppressing close event`);
       }
     }
 
@@ -955,6 +953,9 @@ export class PaperTrader {
       lastPartialPnlPercent: parseFloat((legPnlXRP / costBasisSold * 100).toFixed(2)),
       lastPartialXrpReturned: parseFloat(netProceeds.toFixed(6)),
       status: nextRemaining === 0 ? 'closed' : 'partial',
+      // Persist TP milestones atomically with their economic sale.
+      tp1Hit: trade.tp1Hit || reason.startsWith('tp1_') || reason === 'take_profit_1',
+      tp2Hit: trade.tp2Hit || reason.startsWith('tp2_') || reason === 'take_profit_2',
     };
     // Realized earnings on sold inventory only. Never treat open inventory as a full loss.
     updated.pnlXRP = parseFloat((nextRemaining === 0 ?
@@ -1019,9 +1020,11 @@ export class PaperTrader {
 
     if (newCriticalFlags.length > 0) {
       warn(`🚨 Emergency exit triggered for ${key}: ${newCriticalFlags.join(', ')}`);
-      const exitPrice = snapshot?.priceXRP || trade.entryPriceXRP * 0.9;
-      this.closePosition(key, exitPrice, `emergency_${newCriticalFlags.join(',')}`, snapshot);
-      return trade;
+      if (!(snapshot?.priceXRP && snapshot.priceXRP > 0)) {
+        warn(`[PAPER] Critical risk on ${key} but no sell price. Retaining unpriceable inventory; NO invented -10% execution.`);
+        return null;
+      }
+      return this.closePosition(key, snapshot.priceXRP, `emergency_${newCriticalFlags.join(',')}`, snapshot);
     }
 
     // Concentrated supply detected mid-trade: tighten stop to -8% instead of exiting.
@@ -1040,22 +1043,16 @@ export class PaperTrader {
    */
   emergencyExitAll(reason: string, snapshots: Map<string, MarketSnapshot>): PaperTrade[] {
     const closedTrades: PaperTrade[] = [];
-    const keysToClose: string[] = [];
-
-    for (const [key, position] of this.openPositions.entries()) {
+    for (const [key] of this.openPositions.entries()) {
       const snapshot = snapshots.get(key);
-      const exitPrice = snapshot?.priceXRP || position.entryPriceXRP * 0.9; // Default to -10% if no price
-
-      this.closePosition(key, exitPrice, `emergency_${reason}`, snapshot || null);
-      closedTrades.push(position.trade);
-      keysToClose.push(key);
+      // An empty price feed is NOT permission to fabricate a stop-loss fill.
+      if (!(snapshot?.priceXRP && snapshot.priceXRP > 0)) {
+        warn(`[PAPER] Emergency exit requested but ${key} is unpriceable; retaining inventory and marking risk unresolved`);
+        continue;
+      }
+      const closed = this.closePosition(key, snapshot.priceXRP, `emergency_${reason}`, snapshot);
+      if (closed) closedTrades.push(closed);
     }
-
-    // Clean up after iteration
-    for (const key of keysToClose) {
-      this.openPositions.delete(key);
-    }
-
     return closedTrades;
   }
 
