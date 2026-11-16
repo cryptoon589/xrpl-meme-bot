@@ -1,0 +1,32 @@
+name: Read-only live XRPL ARMY price diagnostic
+
+on:
+  push:
+    branches:
+      - release/hunterix-vnext-paper-20261116
+    paths:
+      - .github/workflows/army-live-readonly.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  one-shot-read-only-amm-info:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      TRADING_WALLET_SEED: ''
+      LIVE_TRADING: 'false'
+      MODE: 'PAPER'
+      XRPL_WS_URL: 'wss://xrplcluster.com'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Read one validated ARMY/XRP AMM on a public XRPL WebSocket
+        run: node scripts/diagnose_army_price.js
