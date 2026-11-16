@@ -74,8 +74,15 @@ export class ActiveDiscovery {
     const txType = t.TransactionType;
     const meta = tx.meta;
 
-    // Discover tokens from AMM creation
+    // AMMCreate can be a submitted proposal or an unsuccessful transaction.
+    // An early-launch signal must come from a fully validated ledger success.
+    // Other discovery signals remain advisory and cannot directly open a
+    // NEW_LAUNCH position without the confirmed AMMCreate classification.
     if (txType === 'AMMCreate') {
+      if (tx.validated !== true || meta?.TransactionResult !== 'tesSUCCESS') {
+        debug('[NewLaunch] Ignoring unvalidated/unsuccessful AMMCreate event');
+        return null;
+      }
       return this.extractFromAMMCreate(t, meta);
     }
 
