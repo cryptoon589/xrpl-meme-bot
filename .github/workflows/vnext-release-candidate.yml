@@ -1,0 +1,84 @@
+name: Hunterix vNext PAPER release candidate
+
+on:
+  push:
+    branches:
+      - release/hunterix-vnext-paper-20261116
+  workflow_dispatch:
+
+jobs:
+  release-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - name: Compile strict TypeScript
+        run: |
+          npm ci
+          npm run build
+      - name: Existing PAPER accounting, execution, Telegram and learning invariants
+        run: |
+          node scripts/test_paper_accounting_recovery.js
+          node scripts/test_reserve_paper_execution.js
+          node scripts/test_amm_sell_quotes.js
+          node scripts/test_learning_gate.js
+          node scripts/test_telegram_reporting_integrity.js
+      - name: XRPL rate-limit/1008 cooldown and no-extra-RPC regression
+        run: node scripts/test_xrpl_rpc_overload.js
+      - name: XRP Ledger websocket 1008 stream and RPC reconnect backoff
+        run: node scripts/test_xrpl_reconnect_backoff.js
+      - name: User-approved four-token blacklist and main XRPL ARMY issue AMM price regression
+        run: node scripts/test_army_pricing_and_blacklist.js
+      - name: Whale, burst, validated new launches and operator blacklist
+        run: |
+          node scripts/test_manual_blacklist.js
+          node scripts/test_whale_signal_integrity.js
+          node scripts/test_top_trader_webhook_security.js
+          node scripts/test_burst_launch_integrity.js
+          node scripts/test_validated_launch.js
+      - name: Persistent temporary reentry quarantine (not permanent blacklist)
+        run: node scripts/test_vnext_loss_quarantine.js
+      - name: PAPER-only deployment guard and typed PM2 config
+        run: |
+          bash -n scripts/vnext_paper_entrypoint.sh
+          node --check ecosystem.vnext.paper.config.cjs
+          node - <<'JS'
+          const assert=require('node:assert/strict');
+          const p='./ecosystem.vnext.paper.config.cjs';
+          assert.throws(()=>require(p),/epoch ID absent/);
+          process.env.HUNTERIX_VNEXT_EPOCH_ID='meme_bot.paper-epoch-20261116-ci';
+          process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH='/root/legacy-original/data/meme_bot.recovery.db';
+          delete require.cache[require.resolve(p)];
+          assert.throws(()=>require(p),/Approved operator-manifest SHA256/);
+          process.env.HUNTERIX_VNEXT_XRPL_WS_URL='wss://xrplcluster.com';
+          process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256='a'.repeat(64);
+          delete require.cache[require.resolve(p)];
+          const e=require(p).apps[0].env;
+          assert.equal(e.XRPL_WS_URL,'wss://xrplcluster.com');
+          assert.equal(e.XRPL_RPC_MAX_INFLIGHT,'2');
+          assert.equal(e.XRPL_RPC_MAX_PER_SEC,'3');
+          assert.equal(e.MODE,'PAPER');
+          assert.equal(e.LIVE_TRADING,'false');
+          assert.equal(e.TRADING_WALLET_SEED,'');
+          assert.equal(e.BOT_USE_RESERVE_QUOTES,'1');
+          assert.equal(e.BOT_ENABLE_LIQUIDITY_LOSS_GUARD,'1');
+          assert.equal(e.BOT_DB_PATH.endsWith('meme_bot.paper-epoch-20261116-ci.db'),true);
+          console.log('PASS explicit epoch, approved blacklist and safe PAPER PM2 configuration');
+          JS
+      - name: Telegram-only staged credential copy (synthetic secrets, no remote calls)
+        run: node scripts/test_vnext_telegram_env.js
+      - name: Syntax of stage-only ARMY endpoint and database safety scripts
+        run: |
+          node --check scripts/diagnose_army_using_legacy_endpoint.js
+          node --check scripts/diagnose_army_price.js
+          node --check scripts/prepare_vnext_telegram_env.js
+          python3 -m py_compile scripts/stage_vnext_safely.py scripts/test_vnext_stage.py
+      - name: Independent VPS staging and active-WAL online-backup safety fixture
+        run: python3 scripts/test_vnext_stage.py
+      - name: Read-only cutover plan, manual review digest and restart-safety tests
+        run: |
+          python3 -m py_compile scripts/vnext_preflight.py scripts/legacy_positions_report.py
+          python3 scripts/test_vnext_release_preflight.py

@@ -1,0 +1,10 @@
+{
+  "format": "hunterix-manual-blacklist-v1",
+  "managedBy": "operator",
+  "tokens": [
+    {"currency": "OCT", "reason": "User-confirmed permanent exclusion 2026-11-16"},
+    {"currency": "SHX", "reason": "User-confirmed permanent exclusion 2026-11-16"},
+    {"currency": "MXI", "reason": "User-confirmed permanent exclusion 2026-11-16"},
+    {"currency": "CORE", "reason": "User-confirmed permanent exclusion 2026-11-16"}
+  ]
+}

@@ -28,6 +28,7 @@
 
 import { XRPLClient } from '../xrpl/client';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
+import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
 import { TelegramAlerter } from '../telegram/alerts';
 import { Database } from '../db/database';
 import { info, warn, debug } from '../utils/logger';
@@ -508,34 +509,25 @@ export class BurstDetector {
           command: 'amm_info',
           asset:  { currency: 'XRP' },
           asset2: { currency: currencyCode, issuer },
+          ledger_index: 'validated',
         });
 
         const amm = res.result?.amm;
         if (!amm) return null; // token has no AMM pool — don't retry
 
-        // XRP side is always a string (drops), token side is always an object
-        let xrpDrops: number;
-        let tokenValue: number;
-        if (typeof amm.amount === 'string' && typeof amm.amount2 === 'object') {
-          // Normal: amount=XRP drops, amount2=token object
-          xrpDrops   = parseInt(amm.amount, 10);
-          tokenValue = parseFloat(amm.amount2?.value || '0');
-        } else if (typeof amm.amount2 === 'string' && typeof amm.amount === 'object') {
-          // Reversed: amount2=XRP drops, amount=token object
-          xrpDrops   = parseInt(amm.amount2, 10);
-          tokenValue = parseFloat(amm.amount?.value || '0');
-        } else {
-          return null; // unexpected shape
+        const parsed=parseXrpIssuedAmm(amm,currencyCode,issuer);
+        if (!parsed) {
+          debug(`[BurstPrice] Rejecting malformed/frozen/wrong issuer pool ${currencyCode}:${issuer}`);
+          return null;
         }
+        return {
+          priceXRP:parsed.priceXRP,poolXRP:parsed.poolXRP,
+          poolTokens:parsed.poolTokens,
+          tradingFee:parsed.tradingFeeUnits / 1000, // percentage for display
+          tradingFeeUnits:parsed.tradingFeeUnits,
+          priceObservedAtMs:Date.now(),
+        };
 
-        if (!xrpDrops || !tokenValue) return null;
-
-        const poolXRP    = xrpDrops / 1_000_000;
-        const priceXRP   = poolXRP / tokenValue;
-        const tradingFee = (amm.trading_fee || 0) / 1000;
-
-        return { priceXRP,poolXRP,poolTokens:tokenValue,tradingFee,
-          tradingFeeUnits:amm.trading_fee || 0,priceObservedAtMs:Date.now() };
       } catch (err: any) {
         if (attempt < 3) {
           debug(`fetchAMMInfo attempt ${attempt} failed for ${rawCurrency}: ${err?.message} — retrying`);

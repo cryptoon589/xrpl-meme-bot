@@ -195,7 +195,9 @@ export class XRPLClient {
       }
       warn(`XRPL WebSocket disconnected (code ${code})`);
       this.isConnected = false;
-      this.scheduleReconnect();
+      // XRPL 1008 / "threshold exceeded" is a rate-limit response.
+      // Five-second retry loops can prolong the ban for the entire IP.
+      this.scheduleReconnect(code === 1008);
     });
 
     // Server info — informational only
@@ -214,10 +216,17 @@ export class XRPLClient {
    * Schedule a single reconnect attempt with exponential backoff.
    * Uses a timer ref so duplicate calls are no-ops.
    */
-  private scheduleReconnect(): void {
+  private scheduleReconnect(rateLimited = false): void {
     if (this.isReconnecting) {
-      debug('Reconnect already scheduled — ignoring duplicate');
-      return;
+      if (!rateLimited) {
+        debug('Reconnect already scheduled — ignoring duplicate');
+        return;
+      }
+      // A 1008 close can follow an ordinary transport event. Escalate an
+      // already pending short retry to the full 120-second server cooldown.
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.isReconnecting = false;
     }
     this.isReconnecting = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -225,7 +234,7 @@ export class XRPLClient {
     this.reconnectAttempts++;
     const backoff = Math.min(this.reconnectDelay * Math.pow(2, Math.min(this.reconnectAttempts - 1, 10)), 60000);
     const jitter  = backoff * 0.2 * (Math.random() - 0.5) * 2;
-    const delay   = Math.max(1000, backoff + jitter); // minimum 1s
+    const delay   = Math.max(rateLimited ? 120_000 : 1000, backoff + jitter);
 
     warn(`XRPL reconnecting in ${Math.round(delay / 1000)}s (attempt ${this.reconnectAttempts})`);
 
@@ -244,8 +253,9 @@ export class XRPLClient {
         if (this.ledgerHandler) await this.subscribeLedger(this.ledgerHandler).catch(e => warn(`Re-subscribe ledger failed: ${e}`));
         if (this.txHandler)     await this.subscribeTransactions(this.txHandler).catch(e => warn(`Re-subscribe tx failed: ${e}`));
       } catch (err) {
-        error(`Reconnect attempt ${this.reconnectAttempts} failed: ${err}`);
-        this.scheduleReconnect();
+        const throttled=/threshold exceeded|rate.limit|slow.down/i.test(String(err));
+        error(`Reconnect attempt ${this.reconnectAttempts} failed (${throttled ? 'rate limited' : 'transport unavailable'})`);
+        this.scheduleReconnect(throttled);
       }
     }, delay);
   }
@@ -308,24 +318,32 @@ export class XRPLClient {
         if (generation !== this.streamGeneration || this.streamStopped) return;
         warn(`XRPL dedicated transaction stream disconnected (code ${code})`);
         this.streamClient = null;
-        this.scheduleStreamReconnect();
+        this.scheduleStreamReconnect(code === 1008);
       });
       await stream.request({ command: 'subscribe', streams: ['transactions'] });
       info('Dedicated XRPL transaction stream subscribed (scanner RPC isolated)');
     } catch (err) {
-      warn(`Dedicated XRPL transaction stream connection failed: ${err}`);
+      const throttled=/threshold exceeded|rate.limit|slow.down/i.test(String(err));
+      warn(`Dedicated XRPL transaction stream connection failed (${throttled ? 'rate limited' : 'transport unavailable'})`);
       if (this.streamClient === stream) this.streamClient = null;
       await stream.disconnect().catch(() => {});
-      if (!this.streamStopped && generation === this.streamGeneration) this.scheduleStreamReconnect();
+      if (!this.streamStopped && generation === this.streamGeneration) this.scheduleStreamReconnect(throttled);
     }
   }
 
-  private scheduleStreamReconnect(): void {
-    if (this.streamStopped || this.streamReconnectTimer) return;
+  private scheduleStreamReconnect(rateLimited = false): void {
+    if (this.streamStopped) return;
+    if (this.streamReconnectTimer) {
+      if (!rateLimited) return;
+      clearTimeout(this.streamReconnectTimer);
+      this.streamReconnectTimer = null; // escalate pending retry to 1008 cooldown
+    }
+    const delay = rateLimited ? 120_000 : 5000;
+    if (rateLimited) warn('XRPL stream 1008 rate limit: waiting at least 120s before reconnecting');
     this.streamReconnectTimer = setTimeout(() => {
       this.streamReconnectTimer = null;
       void this.startDedicatedStream();
-    }, 5000);
+    }, delay);
   }
 
   async forceStreamReconnect(): Promise<void> {

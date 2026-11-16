@@ -1,0 +1,88 @@
+# Hunterix vNext PAPER release candidate — 2026-11-16
+
+STATUS: INTEGRATED AND CI-TESTED; NOT DEPLOYED; NO LIVE TRADING.
+
+This branch stacks on draft PR #6 (which stacks on PR #5, then PR #4), and integrates the separate temporary-loss-quarantine experiment from PR #3. PR #2 is audit-only.
+
+## Improvements integrated
+- Fee-adjusted PAPER accounting, atomic durable cash/inventory, correct partial + full exits, explicit inability to sell when no price is available, restart recovery.
+- Versioned clean PAPER epoch and read-only preservation of original 851-trade recovery dataset / historically four unresolved open or partial PAPER positions.
+- No unvalidated adaptive recommendations; training excludes ghost closes and post-entry scores.
+- Fresh/time-bounded whale data, authenticated and operator-reviewed webhook with original whale wallet history preserved.
+- Corrected burst first-price baseline, real verified AMMCreate and buyer confirmation (no blind new-pool entry), no LP-deposit-as-buy false signals.
+- Reserve-aware PAPER entry, partial exit, full exit and full-size depth costs. Fee-unit/freshness guards. No on-chain execution promises.
+- Single **operator-only permanent blacklist** with no automatic entries, and a separate temporary token+issuer loss quarantine (12h after >=50% losses; 24h after one collapse/unpriceable close; 72h after repeated collapses). Neither one adds entries to the permanent blacklist.
+- Separate PAPER-only PM2 candidate, strict preflight and original recovery DB read-only position report.
+- Compact snapshot retention on the versioned PAPER database; the 18GiB original history is untouched.
+
+## Critical blockers: do NOT cut over yet
+
+1. **The operator has explicitly confirmed the exact permanent blacklist: OCT, SHX, MXI and CORE (Nov 16, 2026).** The reviewed content is committed in `state/manual_token_blacklist.json` with exactly those four tickers, no other asset/issuer exclusions. ARMY, LOVE, XSPECTAR and earlier guessed meme tokens are NOT permanently blacklisted. The permanent list is no longer an open clarification; at deployment the operator must still approve the exact file's SHA256 in `HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256`. This guards against unreviewed changes. Temporary liquidity/no-price/issuer checks must never add permanent bans.
+
+2. The recovery database's four unresolved PAPER positions remain in the original database. The new epoch must NOT import, delete, refund, forcibly close or mark-to-market those positions. The script scripts/legacy_positions_report.py reads their status safely without a fake current price, and the original SQLite is never modified.
+
+3. Avoid changing the current working tree or PM2 process directly: the original server has uncommitted files and active databases. Use a *separate* source tree/worktree. Take a SQLite online backup of the compact recovery DB for token seeding in the staged tree, never plain-copy an active .db without its WAL. The original giant 18GiB data/meme_bot.db must be left untouched.
+
+4. The candidate runs ONLY as a separate vNext PM2 app, after the old hunterix-paper instance has been STOPPED. The new scripts/vnext_paper_entrypoint.sh refuses unsafe MODE, wallet seed, missing/manual blacklist, absent cash checkpoint or inventory, wrong DB, insufficient disk, unapproved operator manifest hash, and any still-running legacy PAPER instance. It requires explicit HUNTERIX_LEGACY_SOURCE_DB_PATH to the original compact recovery DB, NOT the staging backup.
+
+## Safe preparatory commands (read-only; do not start or stop trading)
+
+In a separate staged tree with its own data folder and a new SQLite online backup of the original compact DB:
+
+- python3 scripts/prepare_paper_epoch.py --plan --output data/meme_bot.paper-epoch-20261116-vnext.db
+- python3 scripts/legacy_positions_report.py --db /root/xrpl-meme-bot/data/meme_bot.recovery.db
+
+Only AFTER the user manually approves the exact blacklist and the staged environment has been verified, use the explicit create-only flag for a new simulated 100 XRP benchmark. The create operation refuses an existing filename, copies only token IDs/issuers/currency codes, and never copies trades/positions/cash or learned recommendations.
+
+- python3 scripts/prepare_paper_epoch.py --create --output data/meme_bot.paper-epoch-20261116-vnext.db --bankroll 100
+
+Before any cutover, a read-only preflight with --initial-cutover checks zero prior epoch trades and all legacy positions. A strict PM2-startup preflight additionally checks the 64-character SHA256 fingerprint that the operator approved for the exact manual blacklist file, separate live legacy DB path, safe PAPER env flags, PM2 mutual exclusion and compiled artifacts.
+
+- python3 scripts/vnext_preflight.py --epoch data/meme_bot.paper-epoch-20261116-vnext.db --legacy /root/xrpl-meme-bot/data/meme_bot.recovery.db --manifest state/manual_token_blacklist.json --initial-cutover
+
+The PM2 config ecosystem.vnext.paper.config.cjs requires HUNTERIX_VNEXT_EPOCH_ID, HUNTERIX_LEGACY_SOURCE_DB_PATH, and HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256 in the deploying operator environment. Those fields are NOT filled with guesses and no secrets belong in Git. The startup script reruns fail-closed checks after every reboot or restart. Test against offline synthetic fixtures before the actual cutover.
+
+At a reviewed cutover window: verify compact DB online backup and legacy positions, stop the OLD PAPER PM2 process (do not delete it), start the new PAPER PM2 process (never run both), check health/inventory/daily summary/Telegram, then change the daily reporting cron to the new explicitly named epoch. Rollback means STOP the new PM2 process BEFORE restarting the old one; preserve both histories.
+
+## Known constraints
+
+This is not yet evidence of a profitable strategy. Real AMM executable routing, fee-on-transfer tokens, freeze/authorization and stale-ledger issues can differ materially from the constant-product PAPER estimate. Whale observations are source-gated but not independently proven profitable. No LIVE activation. The historical PAPER sample was loss-making, with severe liquidity collapses and concentrated winners. Forward time-separated profitability, exit reliability and maximum drawdown have to be established before claiming an edge.
+
+Dependency vulnerabilities observed in npm ci logs also require a focused lockfile/dependency review. Never run npm audit fix --force directly on the running VPS.
+
+## Verification
+
+GitHub Actions workflow .github/workflows/vnext-release-candidate.yml compiles, tests accounting/restarts, reserve-aware PAPER trades, burst/AMM launches, whale/webhook security, exact operator blacklist, learning controls, loss quarantine, PM2 entrypoint and full synthetic read-only cutover/rollback guards. No XRPL orders, real Telegram messages, source DB edits or deployed runtime changes are performed by CI.
+
+## Historical chat-history cross-check and operator clarification
+
+A search of past XRPL bot/Hunterix chat history found a general instruction to blacklist known rugs, and an April 2 preference to stop BTC/XRP pair tracking in favor of XRPL-native token/pool discovery. **Neither establishes an exhaustive token blacklist or authorization to exclude every stablecoin/L1/established project permanently.** No direct user message validating OCT/SHX/MXI/CORE as the permanent list was retrieved, despite the May 4 commit's operator-verified description. Treat those symbols as candidates for review, not as already approved bans. Do not auto-migrate them, or XRDOGE/XOGE/XSPECTAR/ARMY/LOVE. Do not convert any no-price, liquidity or issuer risk into a permanent manual blacklist.
+
+## XRP ARMY issuer-exact priority pricing repair
+
+The user expressly requested that ARMY be trade-eligible after its price is fixed. The first implementation also prevents one real issued asset from being tracked twice as 'ARMY' and as its 160-bit hexadecimal representation (including after restart); duplicate historic rows are preserved but ignored for scanning. XRPL.to identifies the widely traded XRP ARMY as issuer `rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC` with issued currency `41524D5900000000000000000000000000000000`, while many other unrelated ARMY tickers exist. Reference: https://xrpl.to/token/rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC-41524D5900000000000000000000000000000000
+
+- `src/market/priorityIssues.ts`: registers this exact existing issued token before AMM preload/monitoring; never calls it a new launch, and it is not a buy signal or exemption from risk checks.
+- `TokenDiscovery.addTrackedToken`: repairs legacy display-only raw currency entries without overwriting an already valid but different 160-bit currency.
+- `AMMPriceFetcher` and burst detector now share the same finite issuer/currency-validated AMM reserve parser. Requests use validated ledger, reject other issuers, frozen pools, invalid fees/reserves, and preserve correct reserve orientation.
+- Failed canonical ARMY lookups retry on a bounded 30-second cadence rather than inheriting a 5-minute generic null cache. Missing quotes still block trades; no fabricated fills.
+- `scripts/test_army_pricing_and_blacklist.js`: synthetic regression for correct AMM price, burst/scanner matching, wrong issuer rejection, raw-code repair, null recovery and the **exactly four** approved permanent bans.
+- `scripts/diagnose_army_price.js`: one-shot read-only XRPL diagnostic from staged vNext checkout after `npm run build`. It will confirm whether that particular VPS RPC actually returns a fresh validated price. The one-shot public XRPL diagnostic **has now passed from GitHub Actions** (2026-11-16 ~15:30 UTC): validated ledger **108370048**, ARMY/XRP price **0.00538926345004 XRP**, XRP reserve **233,626.622953**, ARMY reserve **43,350,380.8301**, reported AMM trading fee **0%**. See https://github.com/cryptoon589/xrpl-meme-bot/actions/runs/43897116435 . This is a valid public-endpoint read-only spot for that exact issue, **not** VPS verification or executable bid/fill. The vNext VPS must still run the same diagnostic using its configured XRPL endpoint before new PAPER trading is enabled.
+
+A published pool and passing mocked tests are **not** proof of an executable XRPL sell quote or a profitable entry.
+
+## VPS stage results and XRPL rate-limit blocker (Nov 16, 2026)
+
+The operator successfully created a separate vNext staging worktree and a WAL-consistent backup of the original compact recovery database. At the actual snapshot there were **851 PAPER rows, 896 tracked tokens and 3 currently unresolved positions**: rCODE (15% remaining), XRPB (40%) and CORE (50%). The prior fourth position no longer appears in the unresolved set; do not invent a close reason. Existing CORE inventory stays archived/reconciled despite CORE being blacklisted for all new trades. No source production DB or PM2 process was changed.
+
+Staged npm ci, TypeScript build, exact four-token blacklist and synthetic ARMY issuer/AMM regression passed. A read-only one-shot XRP ARMY query on the **original bot's XRPL endpoint** failed with `DisconnectedError: websocket was closed, threshold exceeded` and process timeout. XRP Ledger documentation explicitly describes close code 1008 / `threshold exceeded` as server rate limiting: https://xrpl.org/docs/references/http-websocket-apis/api-conventions/rate-limiting . This is a provider/connection/rate-limit failure **not a verified no-price ARMY result**. Shared IP load from running `hunterix-paper` may contribute; this is plausible but not proven.
+
+New vNext repairs (not deployed): AMMPriceFetcher suppresses further AMM/order-book lookups for 120 seconds after overload/disconnect; XRPLClient likewise delays 1008 reconnects of RPC and transaction-stream sockets for at least 120 seconds, including escalation of an already queued short reconnect. The distinct vNext PM2 candidate now applies XRPL_RPC_MAX_INFLIGHT=2 and XRPL_RPC_MAX_PER_SEC=3, and **requires an explicitly selected WSS provider** via `HUNTERIX_VNEXT_XRPL_WS_URL`; it cannot silently reuse the old RPC fallback. The one-shot diagnostic classifies RATE_LIMITED vs RPC_UNAVAILABLE vs NO_POOL and exits cleanly without leaving lingering timers. All are PAPER-only release changes.
+
+Operator's next **read-only** VPS check should use one independent documented Mainnet provider, for example in the isolated staging worktree after updating to the latest release commit:
+
+```bash
+XRPL_WS_URL=wss://xrplcluster.com timeout 30s node scripts/diagnose_army_price.js
+```
+
+XRPL docs list `wss://xrplcluster.com/` as a public Mainnet server: https://xrpl.org/docs/tutorials/public-servers . Public endpoints can rate-limit based on IP and are not guaranteed high-throughput/bot production infrastructure; consider dedicated/purchased RPC before competitive trading. Do not repeatedly retry a throttled provider. Even a successful read-only ARMY AMM quote doesn't certify execution or profitability. **Do not cut over until the chosen VPS endpoint can supply healthy sustained read-only pricing and new PAPER telemetry.**

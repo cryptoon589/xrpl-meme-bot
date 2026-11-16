@@ -42,6 +42,7 @@ import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
 import { OperatorBlacklist } from './risk/operatorBlacklist';
+import { PRIORITY_MONITORED_ISSUES, priorityTrackedToken } from './market/priorityIssues';
 import { isLearningApproved } from './analysis/learningApproval';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
@@ -76,6 +77,11 @@ let hourlySummaryTimer: NodeJS.Timeout | null = null;
 async function main() {
   const config = loadConfig();
   getLogger(config.logLevel);
+
+  // Startup invariant: verify the exact operator-controlled permanent
+  // exclusion list BEFORE opening/writing SQLite or connecting to XRPL.
+  // Never silently substitute hard-coded or inferred exclusions.
+  const manualBlacklist = OperatorBlacklist.load();
 
   info('🚀 Starting XRPL Meme Bot v1.3.0...');
   info(`Mode: ${config.mode}`);
@@ -177,7 +183,6 @@ async function main() {
   // The operator's explicit manual list is the ONLY permanent token blacklist.
   // Missing manifest => startup fails closed, rather than silently guessing
   // what the operator previously chose to blacklist.
-  const manualBlacklist = OperatorBlacklist.load();
   const BURST_TRADE_BLOCKLIST = manualBlacklist.asDecisionSet();
   info(`[Blacklist] Loaded ${manualBlacklist.list().length} operator entries. No automatic token additions.`);
 
@@ -526,6 +531,17 @@ async function main() {
   }
 
   await tokenDiscovery.initialize();
+
+  // Operator-requested priority watch issues. These are existing tokens,
+  // not NEW_LAUNCH discoveries, never auto-traded and never risk-exempt.
+  // Seed BEFORE burst AMM preload and scan startup; name alone is NOT enough
+  // to identify the popular ARMY issuance.
+  for (const issue of PRIORITY_MONITORED_ISSUES) {
+    if (manualBlacklist.isBlocked(issue.currency, issue.issuer, issue.rawCurrency))
+      throw new Error('Priority issued token unexpectedly blocked by manual manifest: '+issue.currency);
+    const added = tokenDiscovery.addTrackedToken(priorityTrackedToken(issue));
+    info(`[PriorityIssue] ${issue.currency} ${issue.issuer.slice(0,11)}… raw=${issue.rawCurrency} ${added ? 'seeded' : 'already tracked'}; regular risk checks apply`);
+  }
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
 
@@ -1574,10 +1590,19 @@ function startPeriodicScan(
  * Disabled unless explicitly opted into PAPER recovery operation.
  */
 function startRecoveryDiskGuard(): void {
+  const path = require('path');
+  const dbPath = process.env.BOT_DB_PATH;
+  const dataDir = path.resolve(process.cwd(), 'data');
+  const paperDbName = dbPath ? path.basename(dbPath) : '';
+  const isGuardedPaperDb = Boolean(dbPath) &&
+    path.dirname(path.resolve(dbPath)) === dataDir &&
+    (paperDbName === 'meme_bot.recovery.db' ||
+     /^meme_bot[.]paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?[.]db$/.test(paperDbName));
+  // Never read/write/guard the legacy original 18GiB meme_bot.db.
   if (process.env.BOT_ENABLE_RECOVERY_DISK_GUARD !== '1' ||
       process.env.MODE !== 'PAPER' ||
       process.env.LIVE_TRADING !== 'false' ||
-      !process.env.BOT_DB_PATH?.endsWith('/data/meme_bot.recovery.db')) return;
+      !isGuardedPaperDb) return;
 
   const fs = require('fs');
   let shuttingDown = false;
