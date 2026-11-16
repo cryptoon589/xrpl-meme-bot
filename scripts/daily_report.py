@@ -149,32 +149,22 @@ def main():
 
     conn.close()
 
-    # --- Live readiness checks ---
-    checks = []
-    wr_ok     = (w7_wr or 0) >= 20
-    knf_ok    = knf_7d <= 15
-    net_ok    = (w7_net or 0) > 0
-    nl_ok     = (nl_t or 0) >= 5 and (nl_wr or 0) > 0
-    ghost_ok  = ghost_7d <= 20
-
-    checks.append(("WR ≥20% (7d)",        wr_ok,    f"{w7_wr}%"))
-    checks.append(("kill_nofollow ≤15 (7d)", knf_ok, f"{knf_7d}x"))
-    checks.append(("Net PnL > 0 (7d)",    net_ok,   f"{'+' if (w7_net or 0)>=0 else ''}{w7_net} XRP"))
-    checks.append(("NEW_LAUNCH ≥5 trades", nl_ok,   f"{nl_t}t WR {nl_wr}%"))
-    checks.append(("Ghosts ≤20 (7d)",     ghost_ok, f"{ghost_7d}x"))
-
+    # This report is not a certification system: win rate thresholds cannot
+    # establish executable post-cost edge or approve live trading.
     readiness = "🔒 NOT CERTIFIED — PAPER ACCOUNTING/EXECUTION AUDIT OPEN"
+    sample_warning = (
+        f"Only {w7_t} closed trades in 7d — insufficient for statistical "
+        "strategy evaluation." if w7_t < 30 else
+        "Historical PAPER outcomes still require fill and accounting validation."
+    )
+    avg_win_str = f"{w7_avgW:+.1f}%" if w7_avgW is not None else "N/A"
+    avg_loss_str = f"{w7_avgL:+.1f}%" if w7_avgL is not None else "N/A"
 
     # --- Build message ---
     profile_lines = '\n'.join(
         f"  {p[0]}: {p[1]}t WR {p[2]}% net {'+' if (p[3] or 0)>=0 else ''}{p[3]} XRP"
         for p in profiles
     ) or "  no data"
-
-    check_lines = '\n'.join(
-        f"  {'✅' if ok else '❌'} {label}: {val}"
-        for label, ok, val in checks
-    )
 
     exit_lines = '\n'.join(
         f"  {r[0] or 'unknown'}: {r[1]}x avg {r[2]}%"
@@ -198,11 +188,14 @@ Trades: {d1_t} | WR: {d1_wr}% | Recorded P&amp;L: {'+' if (d1_net or 0)>=0 else 
 
 <b>Last 7 days (closed in window)</b>
 Trades: {w7_t} | WR: {w7_wr}% | Recorded P&amp;L: {'+' if (w7_net or 0)>=0 else ''}{w7_net} XRP
-AvgW: +{w7_avgW}% | AvgL: {w7_avgL}%
+AvgW: {avg_win_str} | AvgL: {avg_loss_str}
 kill_nofollow: {knf_7d}x | Ghosts: {ghost_7d}x
 
 <b>All-time (excl ghosts)</b>
 Trades: {total_t} | WR: {total_wr}% | Recorded P&amp;L: {'+' if (total_net or 0)>=0 else ''}{total_net} XRP
+
+<b>NEW_LAUNCH history (all-time, non-ghost)</b>
+Trades: {nl_t} | Recorded WR: {nl_wr}% | Recorded P&amp;L: {nl_net} XRP
 
 <b>By Profile (7d)</b>
 {profile_lines}
@@ -214,8 +207,8 @@ Trades: {total_t} | WR: {total_wr}% | Recorded P&amp;L: {'+' if (total_net or 0)
 {shadow_lines}
 
 <b>LIVE trading authorization: {readiness}</b>
-<i>Indicators below are historical and are not deployment approval.</i>
-{check_lines}"""
+<i>{sample_warning}</i>
+<i>No checklist in this report authorizes LIVE trading.</i>"""
 
     if args.dry_run:
         print('[DRY RUN: Telegram not contacted]')
