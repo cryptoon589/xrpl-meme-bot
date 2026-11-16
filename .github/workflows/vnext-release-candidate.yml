@@ -68,6 +68,8 @@ jobs:
           assert.equal(e.BOT_DB_PATH.endsWith('meme_bot.paper-epoch-20261116-ci.db'),true);
           console.log('PASS explicit epoch, approved blacklist and safe PAPER PM2 configuration');
           JS
+      - name: Telegram-only staged credential copy (synthetic secrets, no remote calls)
+        run: node scripts/test_vnext_telegram_env.js
       - name: Syntax of stage-only ARMY endpoint and database safety scripts
         run: |
           node --check scripts/diagnose_army_using_legacy_endpoint.js
