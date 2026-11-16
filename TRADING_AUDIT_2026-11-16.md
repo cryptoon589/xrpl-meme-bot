@@ -51,7 +51,11 @@ By exit: `kill_liq_drop` n=81 **-299.490 XRP** (average -3.697), `trailing_stop_
 
 The audit prints `reconstructed cash=-147.485 XRP` using **all** entry debits, including 199 ghost trades, and stored proceeds; the PAPER code's ghost-close bookkeeping and restart resets do not form a consistent finance ledger. This negative number is **NOT** a demonstrable cash balance or proof of margin debt. The corrected starting cash, all open risk and exact terminal NAV are not identifiable from these schema rows. Shadow-trade resolution unavailable (all four unresolved); historical scores/snapshots absent before Nov 15, so leakage-free replay over May–Nov trade history is not possible from compact DB.
 
-`RuntimeLearning` consumes learned 8% burst TP1 even when `autoApplyReady=false`; mark historical adaptive outputs contaminated until accounting and ghost filtering repaired.
+`RuntimeLearning` consumes learned 8% burst TP1 even when `autoApplyReady=false`; mark historical adaptive outputs contaminated until accounting and ghost filtering repaired. Critically, the auto-learning report analyzed `847` closed records at `13.9%` win rate while the non-ghost forensic sample includes only `648` at `16.8%`: the raw learning sample is not the same economic trade population. Learn only from verified realized trade legs and explain sample filters.
+
+`PaperTrader.checkAllOpenExits` currently invokes `closePosition` at entry price for positions unpriceable for >2 hours; this is not an executable exit. `closePosition` uses modeled proceeds and classifies as a ghost but still updates some trading counters/stats. A real wallet cannot be refunded automatically when an AMM is drained or unreachable. Ghost frequency is therefore a material tail-risk/exitability signal, not an innocuous bookkeeping exclusion.
+
+Follow-up forensic script `scripts/audit_trade_edge_concentration.py` (audit branch) measures by month, profile, winner concentration, 81 liquidity-loss trades, top 12 winners/losers and partial entry-pool fields without changing the database. This is essential before choosing which signals to shadow-only or suppress.
 
 ## P1 — NEXT ENGINEERING PRIORITIES
 
