@@ -177,14 +177,13 @@ export class ActiveDiscovery {
 
     if (this.knownTokens.has(key)) return null;
 
-    // Spam detection
-    if (this.spamIssuers.has(issuer)) return null;
+    // Issuer frequency is an advisory discovery-risk signal, NOT an
+    // automatic permanent blacklist. Qualified tokens remain discoverable.
     const cnt = (this.issuerTokenCount.get(issuer) || 0) + 1;
     this.issuerTokenCount.set(issuer, cnt);
     if (cnt > this.SPAM_THRESHOLD) {
       this.spamIssuers.add(issuer);
-      debug(`Spam issuer detected: ${issuer} (${cnt} tokens)`);
-      return null;
+      debug(`High-frequency issuer observed: ${issuer} (${cnt} tokens). Review liquidity and holder diversity at entry.`);
     }
 
     const token: DiscoveredToken = {
