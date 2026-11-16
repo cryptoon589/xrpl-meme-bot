@@ -19,3 +19,5 @@ jobs:
       - run: npm run build
       - name: PAPER accounting and restart regression — synthetic SQLite only
         run: node scripts/test_paper_accounting_recovery.js
+      - name: Telegram reporting/delivery regression — stub transport, offline
+        run: node scripts/test_telegram_reporting_integrity.js
