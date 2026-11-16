@@ -86,6 +86,10 @@ def main():
                 HUNTERIX_MANUAL_BLOCKLIST_FILE=str(manifest.resolve()),
                 HUNTERIX_LEGACY_SOURCE_DB_PATH=str(legacy.resolve()),
                 HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256=digest,
+                BOT_PAPER_MEME_ONLY='1',
+                HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE=str(ROOT/'state/paper_meme_entry_allowlist.json'),
+                HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256=hashlib.sha256(
+                    (ROOT/'state/paper_meme_entry_allowlist.json').read_bytes()).hexdigest(),
                 XRPL_WS_URL='wss://xrplcluster.com',
                 HUNTERIX_VNEXT_XRPL_WS_URL='wss://xrplcluster.com',
                 BOT_USE_RESERVE_QUOTES='1',BOT_ENABLE_LIQUIDITY_LOSS_GUARD='1',
@@ -98,6 +102,7 @@ def main():
                 '--manifest',manifest,'--strict-startup',env=testEnv)
             check(ready)
             assert 'PASS runtime: operator-reviewed manifest hash' in ready.stdout
+            assert 'PASS runtime: operator-reviewed meme issue hash' in ready.stdout
             print('PASS valid PAPER-only config, exact manual digest, PM2 uniqueness and fresh epoch')
             stagedEnv.write_text('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
                                  '\nTELEGRAM_CHAT_ID=-1001234567890\nTRADING_WALLET_SEED=FAKE\n')
@@ -113,6 +118,8 @@ def main():
                 ('BOT_DB_PATH',str(legacy)),
                 ('BOT_USE_RESERVE_QUOTES','0'),
                 ('BOT_ENABLE_VALIDATED_LEARNING','1'),
+                ('BOT_PAPER_MEME_ONLY','0'),
+                ('HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256','0'*64),
                 ('TRADING_WALLET_SEED','FAKE_SAFETY_TEST_NON_SECRET'),
                 ('TEST_OLD_ONLINE','1'),
             ]:

@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
 DEFAULT_LEGACY = DATA / 'meme_bot.recovery.db'
 DEFAULT_MANIFEST = ROOT / 'state/manual_token_blacklist.json'
+MEME_LIST = ROOT / 'state/paper_meme_entry_allowlist.json'
 EPOCH_RE = re.compile(r'^meme_bot[.]paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?[.]db$')
 ISSUER_RE = re.compile(r'^r[1-9A-HJ-NP-Za-km-z]{24,34}$')
 
@@ -69,6 +70,34 @@ def read_manifest(path):
             raise ValueError('duplicate operator blacklist entry')
         seen.add(key)
     return len(value['tokens']),hashlib.sha256(raw).hexdigest()
+
+
+def check_operator_meme_list():
+    """Verify issue-specific PAPER meme approvals; never alter the four-token blacklist."""
+    if not MEME_LIST.is_file() or MEME_LIST.is_symlink():
+        raise ValueError('missing regular reviewed meme-issue allowlist')
+    raw=MEME_LIST.read_bytes()
+    if len(raw)>65536:
+        raise ValueError('meme-issue allowlist too large')
+    value=json.loads(raw)
+    if not isinstance(value,dict) or value.get('format')!='hunterix-paper-meme-allowlist-v1' or \
+       value.get('managedBy')!='operator' or not isinstance(value.get('tokens'),list) or \
+       len(value['tokens'])>3000:
+        raise ValueError('invalid meme-issue allowlist')
+    entries=value['tokens']
+    seen=set()
+    for item in entries:
+        if not isinstance(item,dict) or not isinstance(item.get('currency'),str) or \
+           not isinstance(item.get('issuer'),str) or not ISSUER_RE.fullmatch(item['issuer']):
+            raise ValueError('invalid meme-issue allowlist entry')
+        currency=item['currency']
+        if not (1<=len(currency)<=40) or not re.fullmatch(r'[A-Za-z0-9]+',currency):
+            raise ValueError('invalid meme-issue currency')
+        key=(currency.upper(),item['issuer'])
+        if key in seen:
+            raise ValueError('duplicate meme-issue approval')
+        seen.add(key)
+    return len(entries),hashlib.sha256(raw).hexdigest()
 
 
 def legacy_state(path):
@@ -145,7 +174,7 @@ def check_staged_telegram_env():
     print('PASS runtime: staged Telegram credentials configured (values hidden, no wallet seed)')
 
 
-def check_runtime(epoch, manifest, legacy, digest):
+def check_runtime(epoch, manifest, legacy, digest, meme_digest):
     expected_db=str(epoch.resolve())
     expected_id=epoch.stem
     xrpl_url=os.environ.get('XRPL_WS_URL','')
@@ -168,6 +197,11 @@ def check_runtime(epoch, manifest, legacy, digest):
           str(Path(os.environ.get('HUNTERIX_MANUAL_BLOCKLIST_FILE','')).resolve())==str(manifest.resolve()),
         'operator-reviewed manifest hash':
           os.environ.get('HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256')==digest,
+        'meme-only PAPER entry policy':os.environ.get('BOT_PAPER_MEME_ONLY')=='1',
+        'approved meme issue file path':
+          os.environ.get('HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE')==str(MEME_LIST.resolve()),
+        'operator-reviewed meme issue hash':
+          os.environ.get('HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256')==meme_digest,
         'reserve-aware PAPER fills':os.environ.get('BOT_USE_RESERVE_QUOTES')=='1',
         'temporary loss guard':os.environ.get('BOT_ENABLE_LIQUIDITY_LOSS_GUARD')=='1',
         'no startup token deletion':os.environ.get('BOT_ENABLE_STARTUP_PRUNE')=='0',
@@ -261,8 +295,16 @@ def main():
         except (ValueError,OSError,UnicodeError) as ex:
             print('NOT READY: staged Telegram settings:',ex)
             passed=False
+    meme_digest=None
     if args.strict_startup and passed:
-        try: check_runtime(epoch,manifest,legacy,digest)
+        try:
+            meme_count,meme_digest=check_operator_meme_list()
+            print('PASS runtime: reviewed exact-issuer meme issue list:',meme_count)
+        except (ValueError,OSError,json.JSONDecodeError) as ex:
+            print('NOT READY: operator meme-entry list:',ex)
+            passed=False
+    if args.strict_startup and passed:
+        try: check_runtime(epoch,manifest,legacy,digest,meme_digest)
         except (ValueError,OSError) as ex:
             print('NOT READY: runtime:',ex)
             passed=False
