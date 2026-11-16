@@ -32,6 +32,11 @@ export class AMMPriceFetcher {
   private cache: Map<string, { price: TokenPrice; fetchedAt: number }> = new Map();
   // Null cache: tokens confirmed to have no price source - skip retrying for 5 min
   private nullCache: Map<string, number> = new Map();
+  // A server-wide disconnect/rate limit is NOT proof that a token has no AMM.
+  // One failing request should temporarily protect *all* quote lookups from
+  // hammering the same server, including order-book fallback requests.
+  private rpcUnavailableUntilMs = 0;
+  private readonly RPC_UNAVAILABLE_BACKOFF_MS = 120_000;
   // FIX #33: tiered price cache TTLs.
   // Open positions need fresh exit prices - 90s stale price on a dumping meme = missed stop.
   // Non-position scanning can tolerate 90s (reduces AMM hammering during discovery).
@@ -66,6 +71,10 @@ export class AMMPriceFetcher {
   async getPrice(currency: string, issuer: string, rawCurrency?: string, bypassNullCache = false, forceFresh = false): Promise<TokenPrice | null> {
     const key = `${currency}:${issuer}`;
     const now = Date.now();
+    if (now < this.rpcUnavailableUntilMs) {
+      // Even forceFresh must not bypass a documented server throttle.
+      return null;
+    }
     // Open positions always bypass null cache - we need a price to manage exit
     const isOpen = this.openPositionKeys.has(key);
     const effectiveBypass = bypassNullCache || isOpen;
@@ -116,6 +125,10 @@ export class AMMPriceFetcher {
         return observed;
       }
     }
+
+    // If amm_info failed because the server disconnected/rate-limited us,
+    // do NOT make more requests through book_offers on the same connection.
+    if (Date.now() < this.rpcUnavailableUntilMs) return null;
 
     // Fall back to order book using the same normalized valid currency.
     const bookPrice = await this.fetchFromOrderBook(apiCurrency, issuer);
@@ -168,11 +181,19 @@ export class AMMPriceFetcher {
       };
 
     } catch (err: any) {
-      // "actNotFound" means no AMM pool exists - normal, not an error
-      if (err?.message?.includes('actNotFound') || err?.message?.includes('Account not found')) {
+      // "actNotFound" means no matching pool — this is not a transport issue.
+      const cause = String(err?.data?.error || err?.result?.error || err?.message || '');
+      if (/actNotFound|Account not found/i.test(cause)) return null;
+      if (/threshold exceeded|rate.limit|slow.down|too busy|overloaded|websocket.*clos|disconnect|not.connected|timeout/i.test(cause)) {
+        const until = Date.now() + this.RPC_UNAVAILABLE_BACKOFF_MS;
+        if (until > this.rpcUnavailableUntilMs) {
+          const newlyUnavailable = Date.now() >= this.rpcUnavailableUntilMs;
+          this.rpcUnavailableUntilMs = until;
+          if (newlyUnavailable) warn('[AMMPrice] XRPL RPC unavailable / rate-limited. Pausing AMM AND book lookups for 120s; not marking any token blacklisted.');
+        }
         return null;
       }
-      debug(`AMM price fetch failed for ${currency}:${issuer}: ${err?.message}`);
+      debug(`AMM price fetch failed for ${currency}:${issuer} (request rejected without usable AMM quote)`);
       return null;
     }
   }
