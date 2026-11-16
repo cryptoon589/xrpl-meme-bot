@@ -51,6 +51,14 @@ Operator executed read-only checks on `logs/combined.log` and root crontab. Resu
 
 Interpretation: Telegram startup test message delivery was logged successfully and six-hour analysis starts have occurred. The cron schedule is installed. **Not yet verified:** per-trade/partial/closed message delivery completeness, individual six-hour report transport acknowledgments, actual Telegram inbox, and `DB_PATH` provided to the cron job. Count of six-hour triggers includes startup five-minute run(s), not necessarily six completed six-hour intervals. The absence of logged send failures is not a delivery guarantee. The daily script defaults to the historic `meme_bot.db` if no DB_PATH is set.
 
+## Cron database configuration result and staged safe fix — 2026-11-16
+
+Operator inspection of the root crontab confirms **one** `daily_report.py` job at `0 8 * * *` (08:00 UTC), no explicit `meme_bot.recovery.db` reference, no obvious `DB_PATH=` crontab assignment, and a reference to `.env`. The contents/export behavior of that `.env` file were not inspected; consequently the exact current effective DB path remains **unconfirmed**. The old report script reads `DB_PATH` or defaults to `/root/xrpl-meme-bot/data/meme_bot.db` (original 18GiB), not PM2's `BOT_DB_PATH`.
+
+To prevent a misleading report even when `.env` points at the original DB, `scripts/daily_report.py` was updated **on audit branch only** to (a) select the recovery DB by default, deliberately ignore legacy `DB_PATH`, and permit only explicitly named `meme_bot.recovery.db` via `DAILY_REPORT_DB_PATH`; (b) open SQLite with `mode=ro` and fail closed if missing; (c) use trade exit timestamps for closed-window reports; (d) remove the fabricated bankroll estimate and unconditional `READY FOR LIVE` label; (e) state that PAPER P&L is unverified; and (f) support `--check-config` and `--dry-run` without sending to Telegram. This is a report-only change: no PM2 restart or strategy edit needed. GitHub Actions regression and synthetic recovery DB tests passed (run 43781766051).
+
+**Important:** The existing cron continues to run whatever version of the script is on the VPS. The safe report patch must be selectively deployed and dry-run tested there. If the cron wrapper uses `DAILY_REPORT_DB_PATH` pointing at the wrong basename, the new report will refuse to send rather than silently read the historical database. No change to crontab was made.
+
 ## Test commands
 \`\`\`bash
 npm run build
