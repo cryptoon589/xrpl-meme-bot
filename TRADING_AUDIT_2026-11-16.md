@@ -46,22 +46,25 @@ PAPER buys/sells use observed spot price times a coarse capped price-impact esti
 ### P1.2 Entry decision size differs from executed PAPER size
 `TradeDecisionEngine.decide` validates `sizeXRP`. Burst path passes this to `tryOpenBurstTrade`, but scored/stream path calls `tryOpenTrade` without passing authoritative TDE size. It runs a different Kelly/conviction formula. Risk/sizing gates can validate one size and simulate another.
 
-### P1.3 Exit latency and data freshness
+### P1.3 New-launch gating contradicts the snipe objective
+`PROFILES.NEW_LAUNCH` sets a minimum 300 XRP pool, `baseSizeXRP=3`, `scalePoolXRP=1000`; the default global `MIN_TRADE_XRP=5` then causes `TradeDecisionEngine.decide` to reject launches below approximately 1,667 XRP in pool reserve, even though the profile explicitly allows 300. Separately, `PaperTrader.tryOpenBurstTrade` hard-rejects any reserve below 500 XRP regardless of the NEW_LAUNCH profile. This makes many genuinely early low-liquidity launches impossible to enter in the advertised NEW_LAUNCH mode. Fix by giving each profile a coherent minimum executable size and measuring liquidity-adjusted expectancy; do not automatically reduce safety gates just to increase trade frequency.
+
+### P1.4 Exit latency and data freshness
 PAPER exits generally run on periodic scans and orphan-position fetches; live trade monitor uses a 30-second interval. A meme can move far beyond TP/SL between observations, and stale quotes may generate optimistic exits. Add prioritized event-triggered position revaluation, quote freshness TTL, and latency histograms (stream→signal→decision→quote→submit→validated).
 
-### P1.4 Coverage not actually 'any' meme token
+### P1.5 Coverage not actually 'any' meme token
 A hot-set cap of ~300 tracked tokens and capped 10-page AMM ledger sweep limit full-market coverage. Separate cheap global event detection from expensive hot scanner: maintain broad indexed universe, dynamically promote unusual activity into a bounded hot set, guarantee open-position priority and evict cold tokens. Explicitly quantify universe coverage.
 
-### P1.5 Exitability and issuer controls
+### P1.6 Exitability and issuer controls
 `src/risk/riskFilters.ts` hardcodes `devDumping: false` and `liquidityRemoved: false`, and does not comprehensively enforce issuer freeze, deep freeze, clawback/transfer fees, wallet concentration or depleted pool trade depth. Fast flipping does not protect against an unable-to-sell token. Add exit simulation and issuer risk checks to *gates*, not retrospective warnings.
 
-### P1.6 Monitoring overclaims 'live PnL'
+### P1.7 Monitoring overclaims 'live PnL'
 `PaperTrader.getOpenPositionsSummary` uses `highestPriceSinceEntry` as a proxy for current price. This can display peak gains as if they are currently realizable. Distinguish high-water mark, fresh current bid/quote and marked-to-liquidation value.
 
-### P1.7 Database history and learning contamination
+### P1.8 Database history and learning contamination
 The compact DB intentionally lacks most old scores/market snapshots; historical backtests from that database do not cover original 18GB training data. Training results should be versioned, timeframe-scoped and linked to code SHA/config so past regimes do not silently dominate.
 
-### P1.8 Public health listener
+### P1.9 Public health listener
 `src/index.ts` uses `healthServer.listen(PORT)`, which listens on all interfaces by default. If the droplet firewall allows TCP/3000, telemetry/validation endpoints may be exposed. Bind to `127.0.0.1` by default and expose through an authenticated/secured proxy only if intentional.
 
 ## Proposed architecture
