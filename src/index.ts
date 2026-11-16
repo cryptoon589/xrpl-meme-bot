@@ -41,6 +41,7 @@ import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
+import { isLearningApproved } from './analysis/learningApproval';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
 import { MissedOpportunityTracker } from './market/missedOpportunityTracker';
@@ -1610,16 +1611,17 @@ function startPeriodicScan(
       message: logText,
     }, config);
 
-    // Auto-apply and hot-reload only if we have enough data
+    // Advisory analytics do not alter active strategy policy by themselves.
     if (recs) {
-      if (recs.autoApplyReady) {
-        info('TradeAnalyzer: auto-apply threshold met - applying recommendations');
+      if (isLearningApproved(recs)) {
+        info('[Learning] Independent epoch OOS approval verified; applying PAPER recommendations');
         const configPath = process.env.CONFIG_PATH || './bot-config.json';
         tradeAnalyzer.applyRecommendations(recs, configPath);
+      } else {
+        info('[Learning] Advisory report only; auto-application blocked');
       }
       tokenScorer.loadLearnedWeights();
       runtimeLearning.reload();
-      info('TradeAnalyzer: scorer weights and runtime learning reloaded');
     }
     info('[BotLog] Bot log sent successfully.');
     } catch (err) {
