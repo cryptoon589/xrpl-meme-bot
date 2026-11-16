@@ -6,7 +6,7 @@ This branch stacks on draft PR #6 (which stacks on PR #5, then PR #4), and integ
 
 ## Improvements integrated
 - Fee-adjusted PAPER accounting, atomic durable cash/inventory, correct partial + full exits, explicit inability to sell when no price is available, restart recovery.
-- Versioned clean PAPER epoch and read-only preservation of original 851-trade recovery dataset / four historically unresolved open or partial PAPER positions.
+- Versioned clean PAPER epoch and read-only preservation of original 851-trade recovery dataset / historically four unresolved open or partial PAPER positions.
 - No unvalidated adaptive recommendations; training excludes ghost closes and post-entry scores.
 - Fresh/time-bounded whale data, authenticated and operator-reviewed webhook with original whale wallet history preserved.
 - Corrected burst first-price baseline, real verified AMMCreate and buyer confirmation (no blind new-pool entry), no LP-deposit-as-buy false signals.
@@ -70,3 +70,19 @@ The user expressly requested that ARMY be trade-eligible after its price is fixe
 - `scripts/diagnose_army_price.js`: one-shot read-only XRPL diagnostic from staged vNext checkout after `npm run build`. It will confirm whether that particular VPS RPC actually returns a fresh validated price. The one-shot public XRPL diagnostic **has now passed from GitHub Actions** (2026-11-16 ~15:30 UTC): validated ledger **108370048**, ARMY/XRP price **0.00538926345004 XRP**, XRP reserve **233,626.622953**, ARMY reserve **43,350,380.8301**, reported AMM trading fee **0%**. See https://github.com/cryptoon589/xrpl-meme-bot/actions/runs/43897116435 . This is a valid public-endpoint read-only spot for that exact issue, **not** VPS verification or executable bid/fill. The vNext VPS must still run the same diagnostic using its configured XRPL endpoint before new PAPER trading is enabled.
 
 A published pool and passing mocked tests are **not** proof of an executable XRPL sell quote or a profitable entry.
+
+## VPS stage results and XRPL rate-limit blocker (Nov 16, 2026)
+
+The operator successfully created a separate vNext staging worktree and a WAL-consistent backup of the original compact recovery database. At the actual snapshot there were **851 PAPER rows, 896 tracked tokens and 3 currently unresolved positions**: rCODE (15% remaining), XRPB (40%) and CORE (50%). The prior fourth position no longer appears in the unresolved set; do not invent a close reason. Existing CORE inventory stays archived/reconciled despite CORE being blacklisted for all new trades. No source production DB or PM2 process was changed.
+
+Staged npm ci, TypeScript build, exact four-token blacklist and synthetic ARMY issuer/AMM regression passed. A read-only one-shot XRP ARMY query on the **original bot's XRPL endpoint** failed with `DisconnectedError: websocket was closed, threshold exceeded` and process timeout. XRP Ledger documentation explicitly describes close code 1008 / `threshold exceeded` as server rate limiting: https://xrpl.org/docs/references/http-websocket-apis/api-conventions/rate-limiting . This is a provider/connection/rate-limit failure **not a verified no-price ARMY result**. Shared IP load from running `hunterix-paper` may contribute; this is plausible but not proven.
+
+New vNext repairs (not deployed): AMMPriceFetcher suppresses further AMM/order-book lookups for 120 seconds after overload/disconnect; XRPLClient likewise delays 1008 reconnects of RPC and transaction-stream sockets for at least 120 seconds, including escalation of an already queued short reconnect. The distinct vNext PM2 candidate now applies XRPL_RPC_MAX_INFLIGHT=2 and XRPL_RPC_MAX_PER_SEC=3, and **requires an explicitly selected WSS provider** via `HUNTERIX_VNEXT_XRPL_WS_URL`; it cannot silently reuse the old RPC fallback. The one-shot diagnostic classifies RATE_LIMITED vs RPC_UNAVAILABLE vs NO_POOL and exits cleanly without leaving lingering timers. All are PAPER-only release changes.
+
+Operator's next **read-only** VPS check should use one independent documented Mainnet provider, for example in the isolated staging worktree after updating to the latest release commit:
+
+```bash
+XRPL_WS_URL=wss://xrplcluster.com timeout 30s node scripts/diagnose_army_price.js
+```
+
+XRPL docs list `wss://xrplcluster.com/` as a public Mainnet server: https://xrpl.org/docs/tutorials/public-servers . Public endpoints can rate-limit based on IP and are not guaranteed high-throughput/bot production infrastructure; consider dedicated/purchased RPC before competitive trading. Do not repeatedly retry a throttled provider. Even a successful read-only ARMY AMM quote doesn't certify execution or profitability. **Do not cut over until the chosen VPS endpoint can supply healthy sustained read-only pricing and new PAPER telemetry.**
