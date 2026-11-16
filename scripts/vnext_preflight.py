@@ -117,6 +117,34 @@ def epoch_state(path, expected_legacy):
         return cash[0],count(db,'tokens'),meta[2],n or 0
 
 
+def check_staged_telegram_env():
+    """Confirm a minimal credential-only staged .env, with no wallet variables.
+
+    Only validates configuration shape; never prints, sends or exposes values.
+    """
+    p=ROOT/'.env'
+    if p.is_symlink() or not p.is_file():
+        raise ValueError('vNext Telegram-only .env missing')
+    if p.stat().st_mode & 0o077:
+        raise ValueError('vNext Telegram-only .env must be owner-only 0600')
+    if p.stat().st_size > 1024:
+        raise ValueError('vNext .env unexpectedly large; do not copy legacy secrets')
+    entries={}
+    for line in p.read_text(encoding='utf8').splitlines():
+        if not line.strip(): continue
+        if '=' not in line: raise ValueError('malformed staged Telegram .env')
+        key,value=line.split('=',1)
+        if key in entries: raise ValueError('duplicate staged Telegram key')
+        entries[key]=value
+    if set(entries)!={'TELEGRAM_BOT_TOKEN','TELEGRAM_CHAT_ID'}:
+        raise ValueError('vNext .env may contain ONLY Telegram bot token and chat id')
+    if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]{35,}',entries['TELEGRAM_BOT_TOKEN']):
+        raise ValueError('staged Telegram token format invalid')
+    if not re.fullmatch(r'-?[0-9]+',entries['TELEGRAM_CHAT_ID']):
+        raise ValueError('staged Telegram chat ID format invalid')
+    print('PASS runtime: staged Telegram credentials configured (values hidden, no wallet seed)')
+
+
 def check_runtime(epoch, manifest, legacy, digest):
     expected_db=str(epoch.resolve())
     expected_id=epoch.stem
@@ -228,6 +256,11 @@ def main():
         # outside the staging folder; never silently use a copied DB.
         print('NOT READY: release must reference original legacy DB outside staging directory')
         passed=False
+    if args.strict_startup and passed:
+        try: check_staged_telegram_env()
+        except (ValueError,OSError,UnicodeError) as ex:
+            print('NOT READY: staged Telegram settings:',ex)
+            passed=False
     if args.strict_startup and passed:
         try: check_runtime(epoch,manifest,legacy,digest)
         except (ValueError,OSError) as ex:
