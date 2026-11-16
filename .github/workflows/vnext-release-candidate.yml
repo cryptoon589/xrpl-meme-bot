@@ -72,6 +72,7 @@ jobs:
         run: |
           node --check scripts/diagnose_army_using_legacy_endpoint.js
           node --check scripts/diagnose_army_price.js
+          node --check scripts/prepare_vnext_telegram_env.js
           python3 -m py_compile scripts/stage_vnext_safely.py scripts/test_vnext_stage.py
       - name: Independent VPS staging and active-WAL online-backup safety fixture
         run: python3 scripts/test_vnext_stage.py
