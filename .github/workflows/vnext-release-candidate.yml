@@ -53,9 +53,13 @@ jobs:
           process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH='/root/legacy-original/data/meme_bot.recovery.db';
           delete require.cache[require.resolve(p)];
           assert.throws(()=>require(p),/Approved operator-manifest SHA256/);
+          process.env.HUNTERIX_VNEXT_XRPL_WS_URL='wss://xrplcluster.com';
           process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256='a'.repeat(64);
           delete require.cache[require.resolve(p)];
           const e=require(p).apps[0].env;
+          assert.equal(e.XRPL_WS_URL,'wss://xrplcluster.com');
+          assert.equal(e.XRPL_RPC_MAX_INFLIGHT,'2');
+          assert.equal(e.XRPL_RPC_MAX_PER_SEC,'3');
           assert.equal(e.MODE,'PAPER');
           assert.equal(e.LIVE_TRADING,'false');
           assert.equal(e.TRADING_WALLET_SEED,'');
