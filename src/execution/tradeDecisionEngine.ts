@@ -146,9 +146,16 @@ export class TradeDecisionEngine {
     // ── 6. Dynamic sizing ──────────────────────────────────────────────────
     const sizeXRP = calcProfileSize(profile, poolXrpReserve, input.bankrollXRP);
 
-    if (sizeXRP < this.config.minTradeXRP) {
+    // A deliberately opt-in PAPER-only small new-launch probe can be smaller
+    // than the generic 5 XRP floor, to respect shallow early pool depth.
+    // This is NOT automatically enabled and has no effect on LIVE mode.
+    const minAllowedXRP = this.config.mode === 'PAPER' &&
+      profile.name === 'NEW_LAUNCH' &&
+      process.env.BOT_ENABLE_SMALL_LAUNCH_PROBES === '1'
+      ? 2 : this.config.minTradeXRP;
+    if (sizeXRP < minAllowedXRP) {
       return reject(sizeXRP, 0,
-        `Size too small: ${sizeXRP.toFixed(2)} XRP < minTradeXRP ${this.config.minTradeXRP}`);
+        `Size too small: ${sizeXRP.toFixed(2)} XRP < minTradeXRP ${minAllowedXRP}`);
     }
 
     if (input.bankrollXRP < sizeXRP) {
