@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import sqlite3
+import argparse
 import statistics
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,8 +56,12 @@ def group(rows, f, title):
         print("  %-28s %s" % (k[:28], pretty(arr)))
 
 def main():
-    if not DB.is_file(): raise SystemExit("Compact DB not found; no changes made")
-    con = sqlite3.connect(DB.resolve().as_uri()+"?mode=ro",uri=True,timeout=8)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--db", type=Path, default=DB)
+    args = parser.parse_args()
+    db_path = args.db
+    if not db_path.is_file(): raise SystemExit("Compact DB not found; no changes made")
+    con = sqlite3.connect(db_path.resolve().as_uri()+"?mode=ro",uri=True,timeout=8)
     con.row_factory=sqlite3.Row
     try:
         assert con.execute("PRAGMA quick_check").fetchone()[0]=="ok"
