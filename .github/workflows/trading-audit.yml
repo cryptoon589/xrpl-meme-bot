@@ -6,6 +6,7 @@ on:
       - audit/trading-integrity-20261116
     paths:
       - 'scripts/audit_trading_integrity.py'
+      - 'scripts/audit_trade_edge_concentration.py'
       - 'scripts/audit_paper_accounting.js'
       - 'scripts/audit_telegram_delivery.js'
       - '.github/workflows/trading-audit.yml'
@@ -22,7 +23,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: python3 -m py_compile scripts/audit_trading_integrity.py
+      - run: python3 -m py_compile scripts/audit_trading_integrity.py scripts/audit_trade_edge_concentration.py
       - name: Disposable PAPER accounting demonstration
         run: node scripts/audit_paper_accounting.js
       - name: Offline Telegram notification audit
@@ -45,3 +46,5 @@ jobs:
           PY
           python3 scripts/audit_trading_integrity.py --db /tmp/hunterix-audit-synthetic.db | tee /tmp/audit-output.txt
           grep -q 'READ-ONLY FORENSIC AUDIT COMPLETE' /tmp/audit-output.txt
+          python3 scripts/audit_trade_edge_concentration.py --db /tmp/hunterix-audit-synthetic.db | tee /tmp/edge-output.txt
+          grep -q 'READ-ONLY EDGE AUDIT COMPLETE' /tmp/edge-output.txt
