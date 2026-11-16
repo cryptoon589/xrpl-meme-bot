@@ -1516,8 +1516,14 @@ function startPeriodicScan(
       });
     } catch { /* non-critical */ }
     const diagMsg = diagnostics.formatHourlySummary();
-    diagnostics.resetHourly();
-    sendAlert(telegramAlerter, db, { type: 'open_positions_update', message: diagMsg }, config);
+    // Different alert type => separate 50-min cooldown from the positions report.
+    // Keep counters if Telegram fails, so the next hourly window can retry.
+    const diagnosticsDelivered = await telegramAlerter.sendAlert({
+      type: 'hourly_diagnostics',
+      message: diagMsg,
+    });
+    if (diagnosticsDelivered) diagnostics.resetHourly();
+    else warn('[Diagnostics] Telegram delivery not confirmed; counters retained');
   }, 3600000);
 
   // FIX #33: shadow backtest resolver — runs every hour, resolves shadow trades >4h old
