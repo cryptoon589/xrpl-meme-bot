@@ -60,6 +60,11 @@ jobs:
           assert.equal(e.BOT_DB_PATH.endsWith('meme_bot.paper-epoch-20261116-ci.db'),true);
           console.log('PASS explicit epoch, approved blacklist and safe PAPER PM2 configuration');
           JS
+      - name: Syntax of stage-only ARMY endpoint and database safety scripts
+        run: |
+          node --check scripts/diagnose_army_using_legacy_endpoint.js
+          node --check scripts/diagnose_army_price.js
+          python3 -m py_compile scripts/stage_vnext_safely.py scripts/test_vnext_stage.py
       - name: Independent VPS staging and active-WAL online-backup safety fixture
         run: python3 scripts/test_vnext_stage.py
       - name: Read-only cutover plan, manual review digest and restart-safety tests
