@@ -1,0 +1,44 @@
+name: Trading audit validation
+
+on:
+  push:
+    branches:
+      - audit/trading-integrity-20261116
+    paths:
+      - 'scripts/audit_trading_integrity.py'
+      - 'scripts/audit_paper_accounting.js'
+      - '.github/workflows/trading-audit.yml'
+  workflow_dispatch:
+
+jobs:
+  audit-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: python3 -m py_compile scripts/audit_trading_integrity.py
+      - name: Disposable PAPER accounting demonstration
+        run: node scripts/audit_paper_accounting.js
+      - name: Synthetic trade history audit
+        run: |
+          python3 - <<'PY'
+          import sqlite3
+          db=sqlite3.connect('/tmp/hunterix-audit-synthetic.db')
+          db.execute('''CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY, status TEXT, token_currency TEXT,
+            token_issuer TEXT, entry_amount_xrp REAL, entry_price_xrp REAL,
+            entry_timestamp INTEGER, exit_timestamp INTEGER, fees_paid REAL,
+            xrp_returned REAL, remaining_position REAL, pnl_xrp REAL,
+            pnl_percent REAL, exit_reason TEXT, entry_reason TEXT,
+            trade_source TEXT, tp1_hit INTEGER)''')
+          db.execute("INSERT INTO paper_trades VALUES (1,'closed','AUDIT','issuer',5,1,1794780000000,1794780100000,.04,6,0,1,20,'take_profit_2','[BURST] audit','burst',1)")
+          db.commit()
+          db.close()
+          PY
+          python3 scripts/audit_trading_integrity.py --db /tmp/hunterix-audit-synthetic.db | tee /tmp/audit-output.txt
+          grep -q 'READ-ONLY FORENSIC AUDIT COMPLETE' /tmp/audit-output.txt
