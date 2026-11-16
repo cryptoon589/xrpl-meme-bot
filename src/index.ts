@@ -1259,8 +1259,10 @@ function startPeriodicScan(
       // (tokens that got pruned from the scan list but still have open trades)
       if (paperTrader && paperTrader.getOpenPositions().length > 0) {
         const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
-          const p = await ammPriceFetcher.getPrice(currency, issuer, rawCurrency);
-          return p?.priceXRP ?? null;
+          const p = await ammPriceFetcher.getPrice(
+            currency,issuer,rawCurrency,true,process.env.BOT_USE_RESERVE_QUOTES === '1'
+          );
+          return p ?? null;
         });
         for (const ct of orphanClosed) {
           totalTrades++;
