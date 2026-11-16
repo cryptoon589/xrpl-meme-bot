@@ -7,6 +7,10 @@ const epoch=process.env.HUNTERIX_VNEXT_EPOCH_ID || '';
 if(!/^meme_bot[.]paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?$/.test(epoch)){
   throw new Error('vNext epoch ID absent/invalid: set HUNTERIX_VNEXT_EPOCH_ID first');
 }
+if(!process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH ||
+    !path.isAbsolute(process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH)){
+  throw new Error('Absolute path to original legacy recovery database required');
+}
 if(!/^[0-9a-f]{64}$/i.test(process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256 || '')){
   throw new Error('Approved operator-manifest SHA256 required before staging PM2');
 }
@@ -24,6 +28,7 @@ module.exports={
       BOT_DB_PATH:path.join(root,'data',epoch+'.db'),
       BOT_PAPER_EPOCH_ID:epoch,
       HUNTERIX_MANUAL_BLOCKLIST_FILE:path.join(root,'state','manual_token_blacklist.json'),
+      HUNTERIX_LEGACY_SOURCE_DB_PATH:process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH,
       HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256:process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256,
       BOT_USE_RESERVE_QUOTES:'1',
       BOT_ENABLE_LIQUIDITY_LOSS_GUARD:'1',
