@@ -183,8 +183,11 @@ export class PaperTrader {
     // Fallback: internal velocity-based formula for cases where TDE size not passed.
     const isNewLaunch = (snapshot as any).isNewLaunch === true;
     const hardCap = isNewLaunch ? 10 : 25;
+    const entryMinimum = isNewLaunch &&
+      process.env.BOT_ENABLE_SMALL_LAUNCH_PROBES === '1'
+      ? 2 : this.config.minTradeXRP;
     const tradeSizeXRP = tdeSizeXRP != null
-      ? Math.min(Math.max(tdeSizeXRP, this.config.minTradeXRP), hardCap)
+      ? Math.min(Math.max(tdeSizeXRP, entryMinimum), hardCap)
       : Math.min(
           this.config.minTradeXRP * velocityMultiplier * liquidityMultiplier * reentryMultiplier,
           hardCap
