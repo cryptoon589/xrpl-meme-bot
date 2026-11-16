@@ -1,0 +1,50 @@
+name: PAPER epoch and adaptive-learning isolation
+
+on:
+  push:
+    branches:
+      - feature/paper-epoch-learning-20261116
+  workflow_dispatch:
+
+jobs:
+  paper-epoch-and-learning:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Existing accounting regression
+        run: node scripts/test_paper_accounting_recovery.js
+      - name: Forward adaptive learning gate
+        run: node scripts/test_learning_gate.js
+      - name: Clean PAPER epoch; source immutable and existing destination protected
+        run: python3 scripts/test_paper_epoch.py
+      - name: New epoch boots as clean PAPER-only account
+        run: |
+          node - <<'JS'
+          const assert = require('node:assert/strict');
+          const path = require('node:path');
+          const { Database } = require('./dist/db/database');
+          const { PaperTrader } = require('./dist/paper/paperTrader');
+          const db = new Database(path.resolve('data/meme_bot.paper-epoch-20261116-ci.db'));
+          try {
+            assert.equal(db.getTokenCount(), 2);
+            const config = {
+              mode:'PAPER',startingBankrollXRP:100,minTradeXRP:5,
+              maxTradeXRP:25,maxOpenTrades:5,maxDailyLossXRP:30,
+            };
+            const trader = new PaperTrader(config,db);
+            assert.equal(trader.getState().cashReconciled,true);
+            assert.equal(trader.getState().bankrollXRP,100);
+            assert.equal(trader.getState().openPositions,0);
+            assert.equal(db.getPaperCashState(),100);
+            console.log('PASS new PAPER epoch boots with catalog and clean 100 XRP checkpoint, no inherited trade or position');
+          } finally { db.close(); }
+          JS
+      - name: Remove disposable test epoch
+        if: always()
+        run: rm -f data/meme_bot.paper-epoch-20261116-ci.db data/meme_bot.paper-epoch-20261116-ci.db-wal data/meme_bot.paper-epoch-20261116-ci.db-shm
