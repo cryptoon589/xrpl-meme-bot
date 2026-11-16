@@ -636,12 +636,11 @@ export class PaperTrader {
 
         // TP1 — partial exit per profile
         if (!trade.tp1Hit && pnlPercent >= burstTp1 && trade.remainingPosition > 0) {
-          this.partialClose(key, currentPrice, burstTp1Sell, `tp1_+${burstTp1}pct`, snapshot);
-          trade.tp1Hit = true;
-          this.db.updatePaperTrade(trade);
-          tradeEvents.push(this.snapshotTrade(trade));
+          if (this.partialClose(key, currentPrice, burstTp1Sell, `tp1_+${burstTp1}pct`, snapshot)) {
+            tradeEvents.push(this.snapshotTrade(trade));
+          } else continue;
          // FIX #36: fire runner re-entry callback — index.ts decides whether to re-enter
-         if (this.onTP1Hit) {
+         if (trade.tp1Hit && this.onTP1Hit) {
            const _poolXRP = (snapshot as any)?.poolXrpReserve ?? ((snapshot as any)?.liquidityXRP ?? 0) / 2;
            this.onTP1Hit(trade.tokenCurrency, trade.tokenIssuer, trade.rawCurrency ?? trade.tokenCurrency, currentPrice, _poolXRP);
          }
@@ -651,10 +650,9 @@ export class PaperTrader {
         if (!trade.tp2Hit && pnlPercent >= burstTp2 && trade.remainingPosition > 0) {
           if (burstRunner > 0) {
             // Sell TP2 chunk, leave runner for trailing stop
-            this.partialClose(key, currentPrice, burstTp2Sell, `tp2_+${burstTp2}pct`, snapshot);
-            trade.tp2Hit = true;
-            this.db.updatePaperTrade(trade);
-            tradeEvents.push(this.snapshotTrade(trade));
+            if (this.partialClose(key, currentPrice, burstTp2Sell, `tp2_+${burstTp2}pct`, snapshot)) {
+              tradeEvents.push(this.snapshotTrade(trade));
+            } else continue;
           } else {
             // No runner — close all remaining
             keysToClose.push({ key, reason: 'take_profit_2' });
@@ -739,20 +737,18 @@ export class PaperTrader {
 
       // TP1: profile-driven partial exit
       if (!trade.tp1Hit && pnlPercent >= scoredTp1 && trade.remainingPosition > 0) {
-        this.partialClose(key, currentPrice, scoredTp1Sell, 'take_profit_1', snapshot);
-        trade.tp1Hit = true;
-        this.db.updatePaperTrade(trade);
-        tradeEvents.push(this.snapshotTrade(trade));
+        if (this.partialClose(key, currentPrice, scoredTp1Sell, 'take_profit_1', snapshot)) {
+          tradeEvents.push(this.snapshotTrade(trade));
+        } else continue;
       }
 
       // TP2: profile-driven partial exit, leave runner for trailing stop
       if (!trade.tp2Hit && pnlPercent >= scoredTp2 && trade.remainingPosition > 0) {
         if (scoredRunner > 0) {
           // Sell TP2 chunk, leave runner for trailing stop
-          this.partialClose(key, currentPrice, scoredTp2Sell, 'take_profit_2', snapshot);
-          trade.tp2Hit = true;
-          this.db.updatePaperTrade(trade);
-          tradeEvents.push(this.snapshotTrade(trade));
+          if (this.partialClose(key, currentPrice, scoredTp2Sell, 'take_profit_2', snapshot)) {
+            tradeEvents.push(this.snapshotTrade(trade));
+          } else continue;
         } else {
           // No runner — close all remaining
           keysToClose.push({ key, reason: 'take_profit_2' });
