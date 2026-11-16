@@ -99,9 +99,21 @@ def epoch_state(path, expected_legacy):
         if meta is None or meta[0] != path.stem or meta[1] != expected_legacy.name:
             raise ValueError('epoch metadata does not match intended source')
         n=count(db,'paper_trades')
-        if n not in (None,0):
-            raise ValueError('epoch already contains trading history; cannot treat as clean cutover baseline')
-        return cash[0],count(db,'tokens'),meta[2]
+        if n:
+            # A restart of an already-running PAPER epoch MUST preserve valid
+            # existing positions; do not require trade history to be empty.
+            # However, an existing open/partial row without persisted inventory
+            # means restart recovery is unverified and must be stopped.
+            if count(db,'paper_inventory') is None:
+                raise ValueError('epoch has trades but no persistent inventory table')
+            missing=db.execute('''
+                SELECT COUNT(*) FROM paper_trades pt
+                LEFT JOIN paper_inventory pi ON pi.trade_id = pt.id
+                WHERE pt.status IN ('open','partial') AND pi.trade_id IS NULL
+            ''').fetchone()[0]
+            if missing:
+                raise ValueError('unreconciled active PAPER position inventory: '+str(missing))
+        return cash[0],count(db,'tokens'),meta[2],n or 0
 
 
 def check_runtime(epoch, manifest, digest):
@@ -153,6 +165,8 @@ def main():
     p.add_argument('--legacy',type=Path,default=DEFAULT_LEGACY)
     p.add_argument('--manifest',type=Path,default=DEFAULT_MANIFEST)
     p.add_argument('--strict-startup',action='store_true')
+    p.add_argument('--initial-cutover',action='store_true',
+                   help='require no trades in new epoch before first deployment')
     args=p.parse_args()
     epoch=args.epoch.expanduser().resolve()
     manifest=args.manifest.expanduser().resolve()
@@ -182,12 +196,16 @@ def main():
         passed=False
         digest=None
     try:
-        cash,tokens,excluded=epoch_state(epoch,legacy)
-        print('Fresh PAPER starting cash:',cash,'XRP | catalog tokens:',tokens)
+        cash,tokens,excluded,trades_so_far=epoch_state(epoch,legacy)
+        print('Spendable PAPER cash checkpoint:',cash,'XRP | catalog tokens:',tokens)
+        print('New epoch trade records:',trades_so_far)
+        if args.initial_cutover and trades_so_far != 0:
+            print('NOT READY: initial cutover requires zero prior epoch trades')
+            passed=False
         print('Epoch metadata recorded legacy unresolved positions:',excluded)
         if positions is not None and len(positions)!=excluded:
             print('REVIEW: legacy open-position count changed since epoch creation.')
-            passed=False
+            if args.initial_cutover: passed=False
     except (ValueError,OSError,sqlite3.Error) as ex:
         print('NOT READY: clean PAPER epoch:',ex)
         passed=False
