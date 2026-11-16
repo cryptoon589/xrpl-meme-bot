@@ -21,6 +21,8 @@ jobs:
         run: node scripts/test_manual_blacklist.js
       - name: Stale vs fresh whale wallet signal
         run: node scripts/test_whale_signal_integrity.js
+      - name: Authenticated top trader webhook security and provenance
+        run: node scripts/test_top_trader_webhook_security.js
       - name: Burst, first price baseline and confirmed AMM launch
         run: node scripts/test_burst_launch_integrity.js
       - name: Reject proposed or unsuccessful AMMCreate as fake new launch
