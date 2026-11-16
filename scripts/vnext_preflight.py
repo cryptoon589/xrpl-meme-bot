@@ -33,7 +33,7 @@ def conn_ro(path):
 
 
 def count(c, name):
-    if name not in {'paper_trades', 'tokens', 'paper_cash_state', 'paper_epoch_metadata'}:
+    if name not in {'paper_trades', 'tokens', 'paper_cash_state', 'paper_epoch_metadata', 'paper_inventory'}:
         raise ValueError('unexpected table')
     has = c.execute(
         'SELECT 1 FROM sqlite_master WHERE type="table" AND name=?', (name,)
