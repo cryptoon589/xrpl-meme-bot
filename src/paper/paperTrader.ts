@@ -71,6 +71,53 @@ export class PaperTrader {
   private snapshotTrade(trade: PaperTrade): PaperTrade {
     return { ...trade };
   }
+  /**
+   * Optional PAPER-only loss guard; reconstructs restrictions from existing,
+   * immutable closed-trade history on every entry attempt so PM2 restarts do
+   * not erase cooldowns. No blacklist based on ticker alone: use currency+issuer.
+   *
+   * This is a risk-policy experiment, not an empirically optimized threshold.
+   * It is deliberately disabled until BOT_ENABLE_LIQUIDITY_LOSS_GUARD=1.
+   */
+  private getLossReentryBlockReason(currency: string, issuer: string): string | null {
+    if (this.config.mode !== 'PAPER' ||
+        process.env.BOT_ENABLE_LIQUIDITY_LOSS_GUARD !== '1') return null;
+
+    const recent = this.db.getRecentClosedTrades(currency, issuer, 32);
+    const now = Date.now();
+    const HOUR = 60 * 60 * 1000;
+    const valid = recent.filter(t =>
+      t.exitTimestamp != null &&
+      Number.isFinite(t.exitTimestamp) &&
+      t.exitTimestamp <= now &&
+      t.exitTimestamp > now - 7 * 24 * HOUR);
+    const collapses = valid.filter(t => t.exitReason === 'kill_liq_drop');
+    const latestCollapse = collapses[0];
+
+    // Multiple exits with collapsing liquidity indicate repeated market failure.
+    if (collapses.length >= 2 &&
+        latestCollapse?.exitTimestamp &&
+        now - latestCollapse.exitTimestamp < 72 * HOUR) {
+      return 'multiple_liquidity_collapses_72h';
+    }
+    const latest = valid[0];
+    if (!latest || latest.exitTimestamp == null) return null;
+    const sinceExit = now - latest.exitTimestamp;
+    if (latest.exitReason === 'kill_liq_drop' && sinceExit < 24 * HOUR)
+      return 'liquidity_collapse_24h';
+    if (latest.exitReason === 'force_close_no_price' && sinceExit < 24 * HOUR)
+      return 'unpriceable_position_24h';
+    // For catastrophic outcomes use a separate guard even if the exit reason
+    // was a standard stop or time stop. The accounting bug is tiny relative
+    // to the 50%-of-principal threshold.
+    if (latest.entryAmountXRP > 0 &&
+        latest.pnlXRP != null &&
+        latest.pnlXRP <= -0.5 * latest.entryAmountXRP &&
+        sinceExit < 12 * HOUR)
+      return 'catastrophic_loss_12h';
+    return null;
+  }
+
 
   constructor(config: BotConfig, db: Database) {
     this.config = config;
@@ -141,6 +188,14 @@ export class PaperTrader {
     }
     if (this.db.hasOpenTradeForToken(token.currency, token.issuer)) {
       warn(`Blocked duplicate burst trade for ${key}`);
+      return null;
+    }
+
+    // Persisted PAPER risk guard survives restarts and prevents repeated
+    // attempts to trade drained or repeatedly collapsing pools.
+    const burstLossBlock = this.getLossReentryBlockReason(token.currency, token.issuer);
+    if (burstLossBlock) {
+      debug(`Burst entry blocked: ${key} reason=${burstLossBlock}`);
       return null;
     }
 
@@ -301,6 +356,12 @@ export class PaperTrader {
       warn(`Blocked duplicate trade for ${key} — already open in DB`);
       // Sync in-memory state from DB to avoid future misses
       this.loadOpenPositionFromDB(token.currency, token.issuer);
+      return null;
+    }
+
+    const scoredLossBlock = this.getLossReentryBlockReason(token.currency, token.issuer);
+    if (scoredLossBlock) {
+      debug(`Scored/stream entry blocked: ${key} reason=${scoredLossBlock}`);
       return null;
     }
 
