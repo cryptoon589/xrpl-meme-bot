@@ -64,7 +64,7 @@ def main():
         fd=os.open(stagedEnv,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
         with os.fdopen(fd,'w',encoding='utf8') as f:
             f.write('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
-                    '\\nTELEGRAM_CHAT_ID=-1001234567890\\n')
+                    '\nTELEGRAM_CHAT_ID=-1001234567890\n')
         try:
             check(run(PREP,'--create','--source',legacy,'--output',EPOCH,env=env))
             check(run(PRE,'--epoch',EPOCH,'--legacy',legacy,
@@ -100,11 +100,11 @@ def main():
             assert 'PASS runtime: operator-reviewed manifest hash' in ready.stdout
             print('PASS valid PAPER-only config, exact manual digest, PM2 uniqueness and fresh epoch')
             stagedEnv.write_text('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
-                                 '\\nTELEGRAM_CHAT_ID=-1001234567890\\nTRADING_WALLET_SEED=FAKE\\n')
+                                 '\nTELEGRAM_CHAT_ID=-1001234567890\nTRADING_WALLET_SEED=FAKE\n')
             assert run(PRE,'--epoch',EPOCH,'--legacy',legacy,
                 '--manifest',manifest,'--strict-startup',env=testEnv).returncode==2
             stagedEnv.write_text('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
-                                 '\\nTELEGRAM_CHAT_ID=-1001234567890\\n')
+                                 '\nTELEGRAM_CHAT_ID=-1001234567890\n')
             print('PASS accidental legacy wallet seed in staged .env refused')
 
             for field, bad in [
