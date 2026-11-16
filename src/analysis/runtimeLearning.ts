@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { debug, info } from '../utils/logger';
 import { TradeRecommendations } from './tradeAnalyzer';
+import { isLearningApproved } from './learningApproval';
 
 const RECOMMENDATIONS_PATH = path.join(process.cwd(), 'state', 'recommendations.json');
 const RELOAD_MS = 15 * 60 * 1000;
@@ -53,7 +54,7 @@ export class RuntimeLearning {
   isGoodTradingHour(): boolean {
     this.maybeReload();
     // Only block hours if pause is enabled AND we have enough trades to trust the data
-    if (!this.recs?.tradingPauseEnabled || (this.recs.tradesAnalyzed < 50) || (this.recs.overallWinRate < 20)) return true;
+    if (!isLearningApproved(this.recs) || !this.recs?.tradingPauseEnabled) return true;
     const hour = new Date().getUTCHours();
     const isWorstHour = this.recs.worstHours.includes(hour);
     if (isWorstHour) {
@@ -68,7 +69,7 @@ export class RuntimeLearning {
    */
   getPullbackThreshold(): number {
     this.maybeReload();
-    return this.recs?.entryPullbackPct ?? 0;
+    return isLearningApproved(this.recs) ? (this.recs?.entryPullbackPct ?? 0) : 0;
   }
 
   /**
@@ -77,7 +78,7 @@ export class RuntimeLearning {
    */
   getConfirmBars(): number {
     this.maybeReload();
-    return this.recs?.entryConfirmBars ?? 0;
+    return isLearningApproved(this.recs) ? (this.recs?.entryConfirmBars ?? 0) : 0;
   }
 
   /**
@@ -87,7 +88,7 @@ export class RuntimeLearning {
    */
   getTpTargets(profile: 'burst' | 'scored'): { tp1: number; tp2: number } {
     this.maybeReload();
-    if (!this.recs) {
+    if (!isLearningApproved(this.recs) || !this.recs) {
       // Defaults match current paperTrader hardcoded values
       return profile === 'burst' ? { tp1: 15, tp2: 30 } : { tp1: 10, tp2: 20 };
     }
