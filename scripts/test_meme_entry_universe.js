@@ -7,6 +7,7 @@ const crypto=require('node:crypto');
 const path=require('node:path');
 const {paperMemeEntryDecision}=require('../dist/risk/memeEntryUniverse');
 const {TradeDecisionEngine}=require('../dist/execution/tradeDecisionEngine');
+const {PaperTrader}=require('../dist/paper/paperTrader');
 
 const file=path.resolve('state/paper_meme_entry_allowlist.json');
 process.env.BOT_PAPER_MEME_ONLY='1';
@@ -37,6 +38,16 @@ process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256=correctHash;
 delete process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE;
 assert.equal(allow('ARMY',issuer,code),false,'missing file path fails closed');
 process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE=file;
+
+// All direct PaperTrader PAPER open paths must reject before any sizing,
+// database mutation or open-position lookups; exits are unaffected.
+const paper=Object.create(PaperTrader.prototype);
+paper.config={mode:'PAPER'};
+paper.cashReconciled=true;
+paper.getPoolXrpReserve=()=>{throw Error('non-meme burst advanced beyond universe guard')};
+const forbidden={currency:'USDC',issuer,rawCurrency:'USDC'};
+assert.equal(paper.tryOpenBurstTrade(forbidden,null,'test'),null);
+assert.equal(paper.tryOpenTrade(forbidden,null,70,'test'),null);
 
 // TDE's PAPER entry path rejects unknown issues before examining price/risk.
 const cfg={mode:'PAPER',maxOpenTrades:5,maxDailyLossXRP:30,minTradeXRP:5,
