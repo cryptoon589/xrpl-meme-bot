@@ -1437,7 +1437,7 @@ function startPeriodicScan(
     // Fetch live prices for all open positions in parallel
     const livePriceResults = await Promise.allSettled(
       openPositions.map((pos: any) =>
-        ammPriceFetcher.getPrice(pos.tokenCurrency, pos.tokenIssuer)
+        ammPriceFetcher.getPrice(pos.tokenCurrency, pos.tokenIssuer, pos.rawCurrency)
           .then((r: any) => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: r?.priceXRP ?? null }))
           .catch(() => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: null }))
       )
@@ -1451,8 +1451,8 @@ function startPeriodicScan(
       `💼 <b>OPEN POSITIONS</b>`,
       `<i>${new Date().toUTCString()}</i>`,
       ``,
-      `<b>Bankroll:</b>  ${state.bankrollXRP.toFixed(2)} XRP`,
-      `<b>Daily P&L:</b> ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP`,
+      `<b>Cash:</b> ${state.cashReconciled ? state.bankrollXRP.toFixed(2) + ' XRP (ledger checkpoint)' : 'UNRECONCILED — legacy history'}`,
+      `<b>Daily P&amp;L:</b> ${state.cashReconciled ? (state.dailyPnL >= 0 ? '+' : '') + state.dailyPnL.toFixed(2) + ' XRP (simulated)' : 'not audited'}`,
       `<b>Open:</b>      ${db.getOpenPositionCount()} open | ${db.getPartialPositionCount()} partial${openPositions.length !== 1 ? 's' : ''}`,
     ];
     lines.push('');
@@ -1473,33 +1473,34 @@ function startPeriodicScan(
           ? `${Math.floor(ageMs / 3600000)}h ${Math.round((ageMs % 3600000) / 60000)}m`
           : `${Math.round(ageMs / 60000)}m`;
 
-        // Use fresh AMM price for P&L; fall back to in-memory best
+        // The only permissible mark comes from a recent fetched spot price.
+        // Never substitute historical highs or the entry price for a quote.
+        // Inventory from historical unreconciled data is deliberately NOT
+        // presented as earned/available profit.
         const posKey    = `${pos.tokenCurrency}:${pos.tokenIssuer}`;
         const livePrice = priceMap.get(posKey) ?? null;
-        const livePct   = livePrice != null && pos.entryPriceXRP > 0
-          ? ((livePrice - pos.entryPriceXRP) / pos.entryPriceXRP) * 100
-          : pos.livePnlPct;
-        const livePnl   = livePct != null
-          ? (livePct / 100) * pos.entryAmountXRP * ((pos.remainingPosition ?? 100) / 100)
-          : pos.livePnlXRP;
-
-        const pnlStr    = livePnl != null
-          ? `${livePnl >= 0 ? '+' : ''}${livePnl.toFixed(2)} XRP (${livePct != null ? (livePct >= 0 ? '+' : '') + livePct.toFixed(1) + '%' : '?'})`
-          : 'pending price';
-        const pnlIcon   = (livePnl ?? 0) >= 0 ? '🟢' : '🔴';
+        const mark = livePrice && livePrice > 0
+          ? paperTrader.getIndicativeOpenMark(pos.tokenCurrency, pos.tokenIssuer, livePrice)
+          : null;
+        const pnlStr = mark
+          ? `${mark.pnlXRP >= 0 ? '+' : ''}${mark.pnlXRP.toFixed(2)} XRP (${mark.pnlPercent >= 0 ? '+' : ''}${mark.pnlPercent.toFixed(1)}%)`
+          : 'N/A (no audited inventory + current quote)';
+        const pnlIcon = mark ? (mark.pnlXRP >= 0 ? '🟢' : '🔴') : '⚪';
         const typeIcon  = pos.isBurst ? '🚀' : '📈';
-        const priceTag  = livePrice != null ? ` @ ${fmtP(livePrice)}` : '';
+        const priceTag  = livePrice != null && livePrice > 0
+          ? ` | recent spot: ${fmtP(livePrice)}` : ' | spot unavailable';
 
         lines.push(
           `${typeIcon} <b>${ticker}</b>${priceTag}`,
           `  Entry: ${fmtP(pos.entryPriceXRP)} | Size: ${pos.entryAmountXRP.toFixed(2)} XRP`,
-          `  Age: ${ageStr} | ${pnlIcon} P&L: ${pnlStr}`,
+          `  Age: ${ageStr} | ${pnlIcon} Indicative open P&amp;L: ${pnlStr}`,
           `  Remaining: ${pos.remainingPosition ?? 100}% | TP1: ${pos.tp1Hit ? '✅' : '⬜'} TP2: ${pos.tp2Hit ? '✅' : '⬜'}`,
           '',
         );
       }
     }
 
+    lines.push('<i>Spot marks are NOT executable XRPL sell quotes. Historical inventory and cash remain unreconciled until audited.</i>');
     await telegramAlerter.sendAlert({
       type: 'open_positions_update',
       message: lines.join('\n'),
@@ -1544,7 +1545,7 @@ function startPeriodicScan(
       `BOT LOG - ${new Date().toUTCString()}`,
       ``,
       `PORTFOLIO`,
-      state ? `Bankroll: ${state.bankrollXRP.toFixed(2)} XRP | Daily P&L: ${state.dailyPnL >= 0 ? '+' : ''}${state.dailyPnL.toFixed(2)} XRP | Open: ${state.openPositions}` : 'N/A',
+      state ? `Cash: ${state.cashReconciled ? state.bankrollXRP.toFixed(2) + ' XRP (PAPER checkpoint)' : 'UNRECONCILED'} | Daily P&L: ${state.cashReconciled ? state.dailyPnL.toFixed(2) + ' XRP' : 'not audited'} | Open: ${state.openPositions}` : 'N/A',
       ``,
       `TRADE HISTORY`,
       (() => { const t = db.getTotalClosedTradeCount(); const w = db.getWinningTradeCountSince(999*24*3600*1000); const wr = t > 0 ? ((w/t)*100).toFixed(1) : 'N/A'; return `Trades: ${t} | Win rate: ${wr}% (all-time, incl ghosts)`; })(),
