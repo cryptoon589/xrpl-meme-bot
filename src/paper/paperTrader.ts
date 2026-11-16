@@ -1330,6 +1330,7 @@ export class PaperTrader {
   getOpenPositionsSummary(): Array<{
     tokenCurrency: string;
     tokenIssuer: string;
+    rawCurrency?: string;
     entryPriceXRP: number;
     entryAmountXRP: number;
     entryTimestamp: number;
@@ -1347,6 +1348,7 @@ export class PaperTrader {
       return {
         tokenCurrency:    trade.tokenCurrency,
         tokenIssuer:      trade.tokenIssuer,
+        rawCurrency:     trade.rawCurrency,
         entryPriceXRP:    trade.entryPriceXRP,
         entryAmountXRP:   trade.entryAmountXRP,
         entryTimestamp:   trade.entryTimestamp,
