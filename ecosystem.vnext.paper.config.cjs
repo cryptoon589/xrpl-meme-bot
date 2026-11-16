@@ -38,6 +38,10 @@ module.exports={
       BOT_ENABLE_OBSERVATION_RETENTION:'1',
       BOT_ENABLE_RECOVERY_DISK_GUARD:'1',
       XRPL_SEPARATE_STREAM:'1',
+      // Public XRPL services may close WebSockets with 1008 / threshold exceeded.
+      // Conservative per-process request pacing; tune from diagnostic evidence.
+      XRPL_RPC_MAX_INFLIGHT:'2',
+      XRPL_RPC_MAX_PER_SEC:'3',
       XRPL_BOOK_CACHE_MS:'2000',
       XRPL_DIAG_METRICS:'1',
       SCAN_BATCH_SIZE:'10',
