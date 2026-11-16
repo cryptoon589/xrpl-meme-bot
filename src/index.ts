@@ -152,6 +152,14 @@ async function main() {
   // Load whale data from DB and wire into scorer
   whaleTracker.load(db);
   whaleTracker.loadTopTradersFromFile();
+  // Existing wallet addresses remain in the registry for reference.
+  // Live trade boosts require fresh, sourced observations. The webhook's
+  // top_traders_import.json can change without a PM2 restart; reload
+  // periodically and automatically expire stale reputation claims.
+  setInterval(() => {
+    const fresh = whaleTracker.loadTopTradersFromFile();
+    if (fresh) whaleTracker.save(db);
+  }, 5 * 60 * 1000);
   tokenScorer.setWhaleTracker(whaleTracker);
   tokenScorer.setSocialDetector(socialDetector);
 
