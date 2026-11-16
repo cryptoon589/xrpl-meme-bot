@@ -56,6 +56,15 @@ def main():
         }))
         digest=hashlib.sha256(manifest.read_bytes()).hexdigest()
         env=dict(os.environ,HUNTERIX_TEST_SOURCE_OVERRIDE='1')
+        # Fixture only: synthetic nonworking Telegram credentials. No actual
+        # Telegram request and no overwrite of a developer's staged .env.
+        stagedEnv=ROOT/'.env'
+        if stagedEnv.exists() or stagedEnv.is_symlink():
+            raise RuntimeError('CI fixture refuses existing .env')
+        fd=os.open(stagedEnv,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        with os.fdopen(fd,'w',encoding='utf8') as f:
+            f.write('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
+                    '\\nTELEGRAM_CHAT_ID=-1001234567890\\n')
         try:
             check(run(PREP,'--create','--source',legacy,'--output',EPOCH,env=env))
             check(run(PRE,'--epoch',EPOCH,'--legacy',legacy,
@@ -90,6 +99,13 @@ def main():
             check(ready)
             assert 'PASS runtime: operator-reviewed manifest hash' in ready.stdout
             print('PASS valid PAPER-only config, exact manual digest, PM2 uniqueness and fresh epoch')
+            stagedEnv.write_text('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
+                                 '\\nTELEGRAM_CHAT_ID=-1001234567890\\nTRADING_WALLET_SEED=FAKE\\n')
+            assert run(PRE,'--epoch',EPOCH,'--legacy',legacy,
+                '--manifest',manifest,'--strict-startup',env=testEnv).returncode==2
+            stagedEnv.write_text('TELEGRAM_BOT_TOKEN=123456:'+'T'*35+
+                                 '\\nTELEGRAM_CHAT_ID=-1001234567890\\n')
+            print('PASS accidental legacy wallet seed in staged .env refused')
 
             for field, bad in [
                 ('HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256','0'*64),
@@ -134,6 +150,7 @@ def main():
                 '--manifest',manifest,'--initial-cutover',env=testEnv).returncode==2
             print('PASS later PAPER restarts accepted with durable inventory; incomplete inventory/first-cutover reuse refused')
         finally:
+            stagedEnv.unlink(missing_ok=True)
             for suffix in ('','-wal','-shm'):
                 p=Path(str(EPOCH)+suffix)
                 if p.exists():
