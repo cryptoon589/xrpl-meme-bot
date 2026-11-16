@@ -45,6 +45,12 @@ No production files or server process modified. Test \`node scripts/audit_telegr
 - Inspect \`crontab -l\` and \`systemctl list-timers --all\` to confirm any daily_report.py schedule and use of BOT_DB_PATH. Do not change cron during audit.
 - Reconcile actual received Telegram messages against recorded trade leg IDs and timestamps.
 
+## VPS observation — operator logs, 2026-11-16
+
+Operator executed read-only checks on `logs/combined.log` and root crontab. Results: `Telegram test message sent` appeared **16** times; `Telegram send failed` appeared **0** times; `6h analysis triggered` appeared **6** times; exactly **one** `daily_report.py` cron entry was found.
+
+Interpretation: Telegram startup test message delivery was logged successfully and six-hour analysis starts have occurred. The cron schedule is installed. **Not yet verified:** per-trade/partial/closed message delivery completeness, individual six-hour report transport acknowledgments, actual Telegram inbox, and `DB_PATH` provided to the cron job. Count of six-hour triggers includes startup five-minute run(s), not necessarily six completed six-hour intervals. The absence of logged send failures is not a delivery guarantee. The daily script defaults to the historic `meme_bot.db` if no DB_PATH is set.
+
 ## Test commands
 \`\`\`bash
 npm run build
