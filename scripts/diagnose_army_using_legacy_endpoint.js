@@ -61,4 +61,7 @@ if (test.error) {
   console.error('ARMY RPC diagnostic could not finish (no transactions sent):',test.error.code || 'UNKNOWN');
   process.exit(2);
 }
-process.exit(test.status===0?0:2);
+if(test.status===3) {
+  console.error('The original configured provider appears rate-limited. Do not repeatedly probe it; test an independent endpoint instead.');
+}
+process.exit(test.status===0?0:(test.status===3?3:2));
