@@ -11,6 +11,7 @@ import { info, warn, debug } from '../utils/logger';
 import { BuyPressureTracker } from '../market/buyPressureTracker';
 import { TradeProfileName, PROFILES } from '../execution/tradeProfiles';
 import { AMMPriceFetcher } from '../market/ammPriceFetcher';
+import { closedEconomicPnl, indicativeOpenPnl, partialRealizedPnl, reconstructedRemainingTokens } from './paperAccounting';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -37,6 +38,7 @@ export class PaperTrader {
   private db: Database;
   private positionSizer: PositionSizer;
   private bankrollXRP: number;
+  private cashReconciled: boolean = false;
   private openPositions: Map<string, OpenPosition> = new Map();
   private lastCloseTime: Map<string, number> = new Map();
   private dailyPnL: number = 0;
@@ -79,7 +81,7 @@ export class PaperTrader {
     this.bankrollXRP = config.startingBankrollXRP;
     this.lastResetDate = this.getCurrentDate();
 
-    // Load existing state from DB
+    // Load existing state from DB; historical DBs remain unreconciled.
     this.loadState();
   }
 
@@ -110,6 +112,10 @@ export class PaperTrader {
     tdeSizeXRP?: number
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
+    if (!this.cashReconciled) {
+      warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
+      return null;
+    }
 
     // Require minimum XRP-side pool reserve, not total TVL.
     const poolXrpReserve = this.getPoolXrpReserve(snapshot);
@@ -216,7 +222,10 @@ export class PaperTrader {
       remainingPosition: 100,
     };
 
-    this.bankrollXRP -= tradeSizeXRP + fees;
+    const cashAfterEntry = this.bankrollXRP - tradeSizeXRP - fees;
+    // All three records must commit before changing memory.
+    this.db.commitPaperMutation(trade, cashAfterEntry, tokensBought, 'entry');
+    this.bankrollXRP = cashAfterEntry;
 
     this.openPositions.set(key, {
       trade,
@@ -238,7 +247,7 @@ export class PaperTrader {
       tp2Pct: tpTargets?.tp2,
     });
 
-    this.db.savePaperTrade(trade);
+    // Entry and inventory are already committed atomically.
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
     const displayName = token.currency.length === 40
@@ -261,6 +270,10 @@ export class PaperTrader {
     // Check mode
     if (this.config.mode !== 'PAPER') {
       debug('Paper trading disabled (mode is not PAPER)');
+      return null;
+    }
+    if (!this.cashReconciled) {
+      warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
     }
 
@@ -400,8 +413,10 @@ export class PaperTrader {
       remainingPosition: 100,
     };
 
-    // Deduct from bankroll
-    this.bankrollXRP -= tradeSizeXRP + fees;
+    // Deduct only after a durable, atomic paper entry checkpoint.
+    const cashAfterEntry = this.bankrollXRP - tradeSizeXRP - fees;
+    this.db.commitPaperMutation(trade, cashAfterEntry, tokensBought, 'entry');
+    this.bankrollXRP = cashAfterEntry;
 
     const kellySize = sizeRecommendation.sizeXRP;
     const clampNote = kellySize < this.config.minTradeXRP
@@ -433,8 +448,7 @@ export class PaperTrader {
       tp2Pct: tpTargets?.tp2,
     });
 
-    // Save to DB
-    this.db.savePaperTrade(trade);
+    // The entry, cash and exact token count were saved above.
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
 
@@ -802,9 +816,7 @@ export class PaperTrader {
       if (closed) {
         tradeEvents.push(this.snapshotTrade(closed));
       } else {
-        // Fallback to the pre-close reference if the position disappeared unexpectedly.
-        const ref = closingTrades.find(t => `${t.tokenCurrency}:${t.tokenIssuer}` === key);
-        if (ref) tradeEvents.push(this.snapshotTrade(ref));
+        warn(`[PAPER] No confirmed simulated close for ${key}; suppressing close event`);
       }
     }
 
@@ -839,83 +851,60 @@ export class PaperTrader {
     const position = this.openPositions.get(key);
     if (!position) return null;
 
-    const trade = position.trade;
-    const tokensToSell = position.tokensHeld * (trade.remainingPosition / 100);
-
-    // force_close_no_price: no real trade occurred — return entry cost, zero fees/slippage
-    // FIX #26: Also treat zero-price exits as ghosts to prevent fantasy PnL calculations.
-    // FIX #29: BUT if partial proceeds already exist (TP1 hit), don't ghost-close —
-    // the position has real money. Zero exit price here means AMM temporarily unavailable;
-    // use entry price as fallback so PnL reflects only the partial proceeds already banked.
-    const hasPartialProceeds = (trade.xrpReturned ?? 0) > 0;
-    const isGhostClose = (reason === 'force_close_no_price' || exitPrice <= 0) && !hasPartialProceeds;
-
-    // FIX #29: If exit price is zero/invalid but partial proceeds exist, use entry price
-    // as fallback for the remaining runner. This gives a conservative 0% on the runner
-    // rather than wiping the real TP1 proceeds already banked.
-    const safeExitPrice = (exitPrice <= 0 && hasPartialProceeds) ? trade.entryPriceXRP : exitPrice;
-
-    // FIX #25: Estimate slippage based on trade value relative to liquidity
-    const tradeValueXRP = tokensToSell * safeExitPrice;
-    const slippage = isGhostClose ? 0 : this.estimateSlippage(tradeValueXRP, snapshot);
-
-    const effectiveExitPrice = safeExitPrice * (1 - slippage);
-    const proceeds = tokensToSell * effectiveExitPrice;
-    const fees = isGhostClose ? 0 : proceeds * 0.003;
-    const netProceeds = proceeds - fees;
-
-    // PnL is net proceeds minus the portion of entry cost for this position
-    const entryCostForPosition = trade.entryAmountXRP * (trade.remainingPosition / 100);
-    const pnlXRP = netProceeds - entryCostForPosition;
-    const pnlPercent = entryCostForPosition > 0 ? (pnlXRP / entryCostForPosition) * 100 : 0;
-
-    // Update trade
-    trade.exitPriceXRP = safeExitPrice > 0 ? safeExitPrice : exitPrice;
-    trade.exitTimestamp = Date.now();
-    trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
-    trade.status = 'closed';
-    // xrpReturned accumulates ALL proceeds (partial + final)
-    trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
-    // pnlXRP = total returned - total invested (accurate across all legs)
-    trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
-    trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
-    // FIX #26: If this was promoted to a ghost close due to zero price, override reason
-    const effectiveReason = isGhostClose && reason !== 'force_close_no_price' ? 'force_close_no_price' : reason;
-    trade.exitReason = this.normalizeExitReason(effectiveReason, trade.pnlXRP);
-    trade.feesPaid += fees;
-    trade.remainingPosition = 0;
-
-    // Return proceeds to bankroll
-    this.bankrollXRP += netProceeds;
-    // Ghost closes (force_close_no_price) return the full entry cost — don't count
-    // them as real losses against the daily limit. The position never actually traded.
-    if (!isGhostClose) {
-      this.dailyPnL += pnlXRP;
-      this.tradesToday++;
+    // An unavailable AMM is NOT a fill at entry price. Preserve inventory.
+    if (!(exitPrice > 0) || reason === 'force_close_no_price') {
+      warn(`[PAPER] Unpriceable ${key}: no executable simulated close; position retained`);
+      return null;
     }
+    const trade = position.trade;
+    // tokensHeld is ALREADY the unsold inventory, including any partial exits.
+    const tokensToSell = position.tokensHeld;
+    if (!Number.isFinite(tokensToSell) || tokensToSell < 0)
+      throw new Error('[PAPER] Invalid remaining token inventory');
 
-    // Remove from open positions and unregister from price fetcher
+    const slippage = this.estimateSlippage(tokensToSell * exitPrice, snapshot);
+    const grossProceeds = tokensToSell * exitPrice * (1 - slippage);
+    const fees = grossProceeds * 0.003;
+    const netProceeds = grossProceeds - fees;
+    // Daily P&L is booked per executed leg; do not re-count earlier TP legs.
+    const remainingCost = trade.entryAmountXRP * (1 + 0.003) * (trade.remainingPosition / 100);
+    const legPnlXRP = netProceeds - remainingCost;
+
+    const updated: PaperTrade = {
+      ...trade,
+      exitPriceXRP: exitPrice,
+      exitTimestamp: Date.now(),
+      exitScore: snapshot ? this.getScoreFromSnapshot(snapshot) : null,
+      status: 'closed',
+      remainingPosition: 0,
+      xrpReturned: (trade.xrpReturned || 0) + netProceeds,
+      feesPaid: trade.feesPaid + fees,
+    };
+    updated.pnlXRP = parseFloat(closedEconomicPnl(updated).toFixed(6));
+    updated.pnlPercent = parseFloat((updated.pnlXRP / updated.entryAmountXRP * 100).toFixed(2));
+    updated.exitReason = this.normalizeExitReason(reason, updated.pnlXRP);
+    const newCash = this.bankrollXRP + netProceeds;
+
+    // Durable trade/inventory/cash checkpoint BEFORE any in-memory changes.
+    this.db.commitPaperMutation(updated, newCash, 0, 'update');
+    Object.assign(trade, updated);
+    position.tokensHeld = 0;
+    this.bankrollXRP = newCash;
+    this.dailyPnL += legPnlXRP;
+    this.tradesToday++;
     this.openPositions.delete(key);
     this.ammPriceFetcher?.unregisterOpenPosition(trade.tokenCurrency, trade.tokenIssuer);
     this.lastCloseTime.set(key, Date.now());
     this.recordProfileStat(position, trade);
 
-    // Save to DB
-    this.db.updatePaperTrade(trade);
-
-    // Update trading stats for Kelly Criterion
     this.totalTrades++;
-    const finalPnlXRP = trade.pnlXRP ?? pnlXRP;
-    const finalPnlPercent = trade.pnlPercent ?? pnlPercent;
-    if (finalPnlXRP > 0) {
+    if ((trade.pnlXRP ?? 0) > 0) {
       this.winningTrades++;
-      this.totalWinAmount += finalPnlXRP;
+      this.totalWinAmount += trade.pnlXRP!;
     } else {
-      this.totalLossAmount += Math.abs(finalPnlXRP);
+      this.totalLossAmount += Math.abs(trade.pnlXRP ?? 0);
     }
-
-    const action = finalPnlXRP >= 0 ? '✅' : '❌';
-    info(`${action} Paper trade CLOSED: ${trade.tokenCurrency} | PnL: ${finalPnlXRP.toFixed(4)} XRP (${finalPnlPercent.toFixed(2)}%) | Reason: ${trade.exitReason}`);
+    info(`${(trade.pnlXRP ?? 0) >= 0 ? '✅' : '❌'} Paper trade CLOSED: ${trade.tokenCurrency} | Fee-adjusted PnL: ${trade.pnlXRP!.toFixed(4)} XRP | Reason: ${trade.exitReason}`);
     return trade;
   }
 
@@ -931,81 +920,70 @@ export class PaperTrader {
   private partialClose(
     key: string,
     exitPrice: number,
-    percentOfOriginal: number,   // % of ORIGINAL position (not remaining)
+    percentOfOriginal: number,
     reason: string,
     snapshot: MarketSnapshot | null
   ): void {
     const position = this.openPositions.get(key);
-    if (!position) return;
-
+    if (!position || !(exitPrice > 0)) return;
     const trade = position.trade;
-
-    // Clamp to what's actually remaining
     const actualPct = Math.min(percentOfOriginal, trade.remainingPosition);
     if (actualPct <= 0) return;
 
-    // FIX #33: tokens to sell derived from live position.tokensHeld, not entry math.
-    // entryAmountXRP / entryPriceXRP ignored slippage on entry, so original token count
-    // was slightly off. Use the actual tracked tokensHeld scaled by fraction being sold.
-    // actualPct is % of original; convert to % of remaining for a clean proportional sell.
-    const remainingBefore = trade.remainingPosition; // % of original still held
-    const fractionOfRemaining = remainingBefore > 0 ? actualPct / remainingBefore : 0;
-    const tokensToSell = position.tokensHeld * fractionOfRemaining;
-
-    // Slippage on trade value vs pool XRP reserve
-    const tradeValueXRP = tokensToSell * exitPrice;
-    const slippage = this.estimateSlippage(tradeValueXRP, snapshot);
-
-    const effectiveExitPrice = exitPrice * (1 - slippage);
-    const proceeds = tokensToSell * effectiveExitPrice;
+    const fractionRemaining = actualPct / trade.remainingPosition;
+    const tokensToSell = position.tokensHeld * fractionRemaining;
+    const nextTokensHeld = Math.max(0, position.tokensHeld - tokensToSell);
+    const slippage = this.estimateSlippage(tokensToSell * exitPrice, snapshot);
+    const proceeds = tokensToSell * exitPrice * (1 - slippage);
     const fees = proceeds * 0.003;
     const netProceeds = proceeds - fees;
-
-    // Cost basis for the portion being sold = proportional to original entry cost
-    const costBasisSold = trade.entryAmountXRP * (actualPct / 100);
+    const costBasisSold = trade.entryAmountXRP * (1 + 0.003) * (actualPct / 100);
     const legPnlXRP = netProceeds - costBasisSold;
+    const nextRemaining = Math.max(0, trade.remainingPosition - actualPct);
 
-    // Update in-memory token tracking
-    position.tokensHeld -= tokensToSell;
+    const updated: PaperTrade = {
+      ...trade,
+      feesPaid: trade.feesPaid + fees,
+      xrpReturned: (trade.xrpReturned || 0) + netProceeds,
+      remainingPosition: nextRemaining,
+      lastPartialExitPriceXRP: exitPrice,
+      lastPartialReason: reason,
+      lastPartialSoldPercent: actualPct,
+      lastPartialPnlXRP: parseFloat(legPnlXRP.toFixed(6)),
+      lastPartialPnlPercent: parseFloat((legPnlXRP / costBasisSold * 100).toFixed(2)),
+      lastPartialXrpReturned: parseFloat(netProceeds.toFixed(6)),
+      status: nextRemaining === 0 ? 'closed' : 'partial',
+      // Persist TP milestones atomically with their economic sale.
+      tp1Hit: trade.tp1Hit || reason.startsWith('tp1_') || reason === 'take_profit_1',
+      tp2Hit: trade.tp2Hit || reason.startsWith('tp2_') || reason === 'take_profit_2',
+    };
+    // Realized earnings on sold inventory only. Never treat open inventory as a full loss.
+    updated.pnlXRP = parseFloat((nextRemaining === 0 ?
+      closedEconomicPnl(updated) : partialRealizedPnl(updated)).toFixed(6));
+    updated.pnlPercent = parseFloat((updated.pnlXRP /
+      (nextRemaining === 0 ? updated.entryAmountXRP : updated.entryAmountXRP * ((100 - nextRemaining) / 100)) * 100).toFixed(2));
 
-    // Update trade record
-    trade.feesPaid += fees;
-    trade.xrpReturned = (trade.xrpReturned || 0) + netProceeds;
-    trade.remainingPosition = Math.max(0, trade.remainingPosition - actualPct);
-    // Cumulative PnL = total returned - total invested
-    trade.pnlXRP = parseFloat((trade.xrpReturned - trade.entryAmountXRP).toFixed(6));
-    trade.pnlPercent = parseFloat(((trade.pnlXRP / trade.entryAmountXRP) * 100).toFixed(2));
-    trade.lastPartialExitPriceXRP = exitPrice;
-    trade.lastPartialReason = reason;
-    trade.lastPartialSoldPercent = actualPct;
-    trade.lastPartialPnlXRP = parseFloat(legPnlXRP.toFixed(6));
-    trade.lastPartialPnlPercent = parseFloat((costBasisSold > 0 ? (legPnlXRP / costBasisSold) * 100 : 0).toFixed(2));
-    trade.lastPartialXrpReturned = parseFloat(netProceeds.toFixed(6));
-
-    // If fully closed, mark as closed
-    if (trade.remainingPosition <= 0) {
-      trade.exitPriceXRP = exitPrice;
-      trade.exitTimestamp = Date.now();
-      trade.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
-      trade.exitReason = this.normalizeExitReason(reason, trade.pnlXRP ?? 0);
-      trade.status = 'closed';
+    if (nextRemaining === 0) {
+      updated.exitPriceXRP = exitPrice;
+      updated.exitTimestamp = Date.now();
+      updated.exitScore = snapshot ? this.getScoreFromSnapshot(snapshot) : null;
+      updated.exitReason = this.normalizeExitReason(reason, updated.pnlXRP);
+    }
+    const newCash = this.bankrollXRP + netProceeds;
+    this.db.commitPaperMutation(updated, newCash, nextTokensHeld, 'update');
+    Object.assign(trade, updated);
+    position.tokensHeld = nextTokensHeld;
+    position.remainingPercent = nextRemaining;
+    this.bankrollXRP = newCash;
+    this.dailyPnL += legPnlXRP;
+    this.tradesToday++;
+    if (nextRemaining === 0) {
       this.openPositions.delete(key);
       this.ammPriceFetcher?.unregisterOpenPosition(trade.tokenCurrency, trade.tokenIssuer);
       this.lastCloseTime.set(key, Date.now());
       this.recordProfileStat(position, trade);
-    } else {
-      trade.status = 'partial';
     }
-
-    // Return proceeds to bankroll
-    this.bankrollXRP += netProceeds;
-    this.dailyPnL += legPnlXRP;
-    this.tradesToday++;
-
-    // Save to DB
-    this.db.updatePaperTrade(trade);
-
-    info(`📊 Partial close: ${trade.tokenCurrency} | Sold ${actualPct}% of original | PnL leg: ${legPnlXRP.toFixed(4)} XRP | Remaining: ${trade.remainingPosition}%`);
+    info(`📊 Partial close: ${trade.tokenCurrency} | Sold ${actualPct}% of original | Fee-adjusted leg PnL: ${legPnlXRP.toFixed(4)} XRP | Remaining: ${nextRemaining}%`);
   }
 
   /**
@@ -1042,9 +1020,11 @@ export class PaperTrader {
 
     if (newCriticalFlags.length > 0) {
       warn(`🚨 Emergency exit triggered for ${key}: ${newCriticalFlags.join(', ')}`);
-      const exitPrice = snapshot?.priceXRP || trade.entryPriceXRP * 0.9;
-      this.closePosition(key, exitPrice, `emergency_${newCriticalFlags.join(',')}`, snapshot);
-      return trade;
+      if (!(snapshot?.priceXRP && snapshot.priceXRP > 0)) {
+        warn(`[PAPER] Critical risk on ${key} but no sell price. Retaining unpriceable inventory; NO invented -10% execution.`);
+        return null;
+      }
+      return this.closePosition(key, snapshot.priceXRP, `emergency_${newCriticalFlags.join(',')}`, snapshot);
     }
 
     // Concentrated supply detected mid-trade: tighten stop to -8% instead of exiting.
@@ -1063,22 +1043,16 @@ export class PaperTrader {
    */
   emergencyExitAll(reason: string, snapshots: Map<string, MarketSnapshot>): PaperTrade[] {
     const closedTrades: PaperTrade[] = [];
-    const keysToClose: string[] = [];
-
-    for (const [key, position] of this.openPositions.entries()) {
+    for (const [key] of this.openPositions.entries()) {
       const snapshot = snapshots.get(key);
-      const exitPrice = snapshot?.priceXRP || position.entryPriceXRP * 0.9; // Default to -10% if no price
-
-      this.closePosition(key, exitPrice, `emergency_${reason}`, snapshot || null);
-      closedTrades.push(position.trade);
-      keysToClose.push(key);
+      // An empty price feed is NOT permission to fabricate a stop-loss fill.
+      if (!(snapshot?.priceXRP && snapshot.priceXRP > 0)) {
+        warn(`[PAPER] Emergency exit requested but ${key} is unpriceable; retaining inventory and marking risk unresolved`);
+        continue;
+      }
+      const closed = this.closePosition(key, snapshot.priceXRP, `emergency_${reason}`, snapshot);
+      if (closed) closedTrades.push(closed);
     }
-
-    // Clean up after iteration
-    for (const key of keysToClose) {
-      this.openPositions.delete(key);
-    }
-
     return closedTrades;
   }
 
@@ -1171,7 +1145,7 @@ export class PaperTrader {
     const openTrades = this.db.getOpenTrades();
     const trade = openTrades.find(t => t.tokenCurrency === currency && t.tokenIssuer === issuer);
     if (!trade) return;
-    const tokensHeld = trade.entryAmountXRP / trade.entryPriceXRP;
+    const tokensHeld = this.db.getPaperInventory(trade.id) ?? reconstructedRemainingTokens(trade);
     this.openPositions.set(key, {
       trade,
       entryPriceXRP: trade.entryPriceXRP,
@@ -1194,28 +1168,23 @@ export class PaperTrader {
    * FIX #2: Only use the most recent summary to avoid double-counting historical PnL
    */
   private loadState(): void {
-    // Load bankroll from the MOST RECENT daily summary only
-    const summaries = this.db.getRecentSummaries(1);
-    if (summaries.length > 0) {
-      // Bankroll = starting + all historical PnL up to yesterday
-      const latestSummary = summaries[0];
-      const computedBankroll = this.config.startingBankrollXRP + latestSummary.totalPnLXRP;
-      // Sanity clamp: if DB has corrupted PnL (e.g. drops stored as XRP),
-      // cap bankroll at 100× starting to prevent absurd values
-      const MAX_SANE_BANKROLL = this.config.startingBankrollXRP * 100;
-      if (computedBankroll > MAX_SANE_BANKROLL || computedBankroll < 0) {
-        warn(`Bankroll from DB (${computedBankroll.toFixed(2)} XRP) looks corrupted — resetting to starting bankroll`);
-        this.bankrollXRP = this.config.startingBankrollXRP;
-      } else {
-        this.bankrollXRP = computedBankroll;
-      }
+    // A fresh, empty PAPER database gets a durable starting-cash checkpoint.
+    // Existing 851-trade recovery data is NEVER guessed or silently validated.
+    const verifiedCash = this.db.ensureFreshPaperCashState(this.config.startingBankrollXRP);
+    this.cashReconciled = verifiedCash !== null;
+    this.bankrollXRP = verifiedCash ?? this.config.startingBankrollXRP;
+    if (!this.cashReconciled) {
+      warn('[PAPER] Historical database has NO reconciled cash checkpoint. ' +
+           'New entries are blocked. Existing positions remain manageable; ' +
+           'reported bankroll is NOT verified.');
     }
-
-    // Load open positions
-    const openTrades = this.db.getOpenTrades();
-    for (const trade of openTrades) {
+    for (const trade of this.db.getOpenTrades()) {
       const key = `${trade.tokenCurrency}:${trade.tokenIssuer}`;
-      const tokensHeld = trade.entryAmountXRP / trade.entryPriceXRP;
+      const persisted = this.db.getPaperInventory(trade.id);
+      const tokensHeld = persisted ?? reconstructedRemainingTokens(trade);
+      if (persisted === null) {
+        warn(`[PAPER] Legacy inventory reconstructed for ${trade.tokenCurrency} from entry slip and remaining fraction; not independently verified`);
+      }
       this.openPositions.set(key, {
         trade,
         entryPriceXRP: trade.entryPriceXRP,
@@ -1225,21 +1194,17 @@ export class PaperTrader {
         entryRiskFlags: [],
         lastRiskCheck: Date.now(),
         priceHistory: [trade.entryPriceXRP],
-        // Loaded from DB = already past hold time; set openedAt far in the past
         openedAt: trade.entryTimestamp || 0,
         tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
-        profileName: (trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
+        profileName: (trade.tradeProfile === 'NEW_LAUNCH' ? 'NEW_LAUNCH' :
+          trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
         lastBuySeenAt: trade.entryTimestamp || 0,
         liquidityAtEntry: 0,
       });
     }
-
-    info(`Loaded ${this.openPositions.size} open positions, bankroll: ${this.bankrollXRP.toFixed(2)} XRP`);
+    info(`Loaded ${this.openPositions.size} open positions; cash checkpoint ${this.cashReconciled ? this.bankrollXRP.toFixed(4) + ' XRP' : 'UNRECONCILED'}`);
   }
 
-  /**
-   * Get current state
-   */
   /**
    * Check exits for ALL open positions using a live price fetcher.
    * Called every scan cycle to catch orphaned positions (tokens pruned from scan list).
@@ -1290,8 +1255,7 @@ export class PaperTrader {
           // Only force-close after 2h with zero price AND no partial proceeds.
           // Log clearly so operator can see which tokens have broken AMMs.
           warn(`[NoPrice] Force-closing ${trade.tokenCurrency} — no AMM price for ${(ageMs/60000).toFixed(0)}min. Possible broken/drained AMM.`);
-          this.closePosition(key, trade.entryPriceXRP, 'force_close_no_price', null);
-          allClosed.push(trade);
+          warn(`[PAPER] Retaining unpriceable ${trade.tokenCurrency}: no simulated fill or bankroll refund. Manual reconciliation required.`);
         } else {
           debug(`[NoPrice] ${trade.tokenCurrency} waiting for price (${(ageMs/60000).toFixed(0)}min / ${(UNPRICEABLE_TIMEOUT_MS/60000).toFixed(0)}min timeout)`);
         }
@@ -1317,13 +1281,9 @@ export class PaperTrader {
    * that were opened before the blocklist was added.
    */
   forceCloseByToken(currency: string, reason: string): PaperTrade | null {
-    for (const [key, position] of this.openPositions.entries()) {
-      if (position.trade.tokenCurrency === currency) {
-        this.closePosition(key, position.trade.entryPriceXRP, reason, null);
-        info(`Force-closed ${currency}: ${reason}`);
-        return position.trade;
-      }
-    }
+    // Blocklist/cleanup requests without a price are not executable trades.
+    // Keep positions visible instead of refunding the entry cost by fiat.
+    warn(`[PAPER] Refusing fabricated manual close of ${currency} (${reason}). Position retained for price/quote reconciliation.`);
     return null;
   }
 
@@ -1338,6 +1298,7 @@ export class PaperTrader {
 
   getState(): {
     bankrollXRP: number;
+    cashReconciled: boolean;
     openPositions: number;
     dailyPnL: number;
     tradesToday: number;
@@ -1345,6 +1306,7 @@ export class PaperTrader {
     this.checkDailyReset();
     return {
       bankrollXRP: parseFloat(this.bankrollXRP.toFixed(4)),
+      cashReconciled: this.cashReconciled,
       openPositions: this.openPositions.size,
       dailyPnL: parseFloat(this.dailyPnL.toFixed(4)),
       tradesToday: this.tradesToday,
@@ -1365,6 +1327,7 @@ export class PaperTrader {
   getOpenPositionsSummary(): Array<{
     tokenCurrency: string;
     tokenIssuer: string;
+    rawCurrency?: string;
     entryPriceXRP: number;
     entryAmountXRP: number;
     entryTimestamp: number;
@@ -1377,18 +1340,12 @@ export class PaperTrader {
   }> {
     return Array.from(this.openPositions.values()).map(pos => {
       const trade = pos.trade;
-      // Use highest price seen as proxy for live price (conservative — actual live would need snapshot)
-      const livePrice   = pos.highestPriceSinceEntry; // best available without a fresh snapshot
-      const currentPnl  = livePrice > 0 && trade.entryPriceXRP > 0
-        ? ((livePrice - trade.entryPriceXRP) / trade.entryPriceXRP) * 100
-        : null;
-      const pnlXRP      = currentPnl != null
-        ? (currentPnl / 100) * trade.entryAmountXRP * (trade.remainingPosition / 100)
-        : null;
-
+      // No actual observed/current quote was supplied here. Do not fill in a
+      // fictional green profit from the highest price observed in the past.
       return {
         tokenCurrency:    trade.tokenCurrency,
         tokenIssuer:      trade.tokenIssuer,
+        rawCurrency:     trade.rawCurrency,
         entryPriceXRP:    trade.entryPriceXRP,
         entryAmountXRP:   trade.entryAmountXRP,
         entryTimestamp:   trade.entryTimestamp,
@@ -1396,10 +1353,20 @@ export class PaperTrader {
         tp1Hit:           trade.tp1Hit,
         tp2Hit:           trade.tp2Hit,
         isBurst:          pos.tradeProfile === 'burst',
-        livePnlXRP:       pnlXRP != null ? parseFloat(pnlXRP.toFixed(4)) : null,
-        livePnlPct:       currentPnl != null ? parseFloat(currentPnl.toFixed(2)) : null,
+        livePnlXRP:       null,
+        livePnlPct:       null,
       };
     });
+  }
+
+  /** Unsold PAPER inventory marked at a caller-provided recent spot quote.
+   * This is only indicative; no XRPL sell quote or market impact guarantee.
+   */
+  getIndicativeOpenMark(currency: string, issuer: string, spotPriceXRP: number):
+    { pnlXRP: number; pnlPercent: number } | null {
+    const position = this.openPositions.get(`${currency}:${issuer}`);
+    if (!position || !this.cashReconciled) return null;
+    return indicativeOpenPnl(position.trade, position.tokensHeld, spotPriceXRP);
   }
 
   /**
