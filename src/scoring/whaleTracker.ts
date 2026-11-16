@@ -219,43 +219,60 @@ export class WhaleTracker {
    * sources (FirstLedger) update the whale registry without a code deploy.
    */
   loadTopTradersFromFile(): number {
-    // Revoke previously active stats on each reload; never keep expired
-    // wallet reputation active after file loss or invalid source data.
+    // All active performance claims expire on every refresh. Historical
+    // operator-selected wallet IDs and PAPER observations remain untouched.
     this.activeExternal.clear();
-    try {
-      const statePath = path.join(process.cwd(), 'state', 'top_traders_import.json');
-      if (!fs.existsSync(statePath)) return 0;
-      const data = JSON.parse(fs.readFileSync(statePath, 'utf8')) as {
-        importedAt: number; source?: string;
-        traders: Array<{ address: string; winRatePct: number;
-          volumeXrp: number; positionsOpen?: number }>;
-      };
-      const now = Date.now();
-      if (!Number.isFinite(data.importedAt) ||
-          data.importedAt > now + 60000 ||
-          now - data.importedAt > this.EXTERNAL_FRESHNESS_MS) {
-        info('[WhaleTracker] Imported wallet file is stale or future-dated; preserving records but withholding trading boosts');
-        return 0;
+    const stateDir = path.join(process.cwd(), 'state');
+    const sources = [
+      // Retain historic hand-imported FirstLedger radar wallet records.
+      { path: path.join(stateDir, 'top_traders_import.json'), manual: true },
+      // Authenticated operator review is a separate file; it never overwrites
+      // the historic hand-imported wallet IDs.
+      { path: path.join(stateDir, 'top_traders_webhook.json'), manual: false },
+    ];
+    const now=Date.now();
+    let imported=0;
+    for (const src of sources) {
+      try {
+        if (!fs.existsSync(src.path)) continue;
+        const st=fs.lstatSync(src.path);
+        if (!st.isFile() || st.isSymbolicLink()) continue;
+        const data=JSON.parse(fs.readFileSync(src.path,'utf8')) as {
+          importedAt: number; observedAt?: number | null;
+          source?: string; approvedForSignals?: boolean;
+          traders: Array<{ address: string; winRatePct: number;
+            volumeXrp: number; positionsOpen?: number }>;
+        };
+        const sourceAccepted=src.manual
+          ? ['firstledger_radar','firstledger_radar_top20'].includes(data.source || '')
+          : data.source === 'operator_reviewed_webhook' &&
+            data.approvedForSignals === true;
+        // Reuploading an old performance snapshot must not refresh its
+        // legitimacy. Authenticated operator webhooks require an explicit
+        // observedAt; legacy imported historical records use original date.
+        const observedAt=src.manual ? data.importedAt : data.observedAt;
+        if (!sourceAccepted || !Number.isFinite(observedAt) ||
+            observedAt! > now + 60000 ||
+            now-observedAt! > this.EXTERNAL_FRESHNESS_MS ||
+            !Array.isArray(data.traders)) {
+          debug('[WhaleTracker] Source omitted from live boosts: '+path.basename(src.path));
+          continue;
+        }
+        for (const t of data.traders) {
+          if (!t || !this.XRPL_ADDRESS.test(t.address || '') ||
+              !Number.isFinite(t.winRatePct) || t.winRatePct < 60 || t.winRatePct > 100 ||
+              !Number.isFinite(t.volumeXrp) || t.volumeXrp < 1000) continue;
+          this.importTopTrader(t.address,t.winRatePct,t.volumeXrp,t.positionsOpen || 0);
+          this.activeExternal.set(t.address,{
+            winRatePct:t.winRatePct,volumeXrp:t.volumeXrp,importedAt:observedAt!
+          });
+          imported++;
+        }
+      } catch (err) {
+        debug('[WhaleTracker] External trader stats unavailable: '+path.basename(src.path));
       }
-      // Only explicitly sourced trader imports can enable an active signal.
-      if (!['firstledger_radar','firstledger_radar_top20'].includes(data.source || '') ||
-          !Array.isArray(data.traders)) return 0;
-      let imported=0;
-      for (const t of data.traders) {
-        if (!t || !this.XRPL_ADDRESS.test(t.address || '') ||
-            !Number.isFinite(t.winRatePct) || t.winRatePct < 60 || t.winRatePct > 100 ||
-            !Number.isFinite(t.volumeXrp) || t.volumeXrp < 1000) continue;
-        this.importTopTrader(t.address,t.winRatePct,t.volumeXrp,t.positionsOpen || 0);
-        this.activeExternal.set(t.address,{
-          winRatePct:t.winRatePct,volumeXrp:t.volumeXrp,importedAt:data.importedAt
-        });
-        imported++;
-      }
-      if (imported) info(`[WhaleTracker] Active recent imported wallets: ${imported}; historical registry preserved`);
-      return imported;
-    } catch (err) {
-      debug(`[WhaleTracker] No usable fresh external wallet import: ${err}`);
-      return 0;
     }
+    if (imported>0) info('[WhaleTracker] Recently observed, source-gated wallet statistics: '+imported);
+    return imported;
   }
 }
