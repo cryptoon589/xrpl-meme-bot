@@ -33,6 +33,14 @@ export interface MarketSnapshot {
   liquidityXRP: number | null;
   /** XRP side of the AMM reserve — used for slippage and sizing. Separate from TVL. */
   poolXrpReserve?: number;
+  /** Full AMM token reserve used only for timestamped PAPER execution estimates. */
+  poolTokens?: number;
+  /** XRPL AMM fee in integer 1/100000 units, 0..1000 (not percent). */
+  tradingFeeUnits?: number;
+  /** Original ledger AMM observation time; cached data retains this timestamp. */
+  priceObservedAtMs?: number;
+  /** AMM quote provenance; order-book prices cannot be treated as AMM reserves. */
+  priceSource?: 'amm' | 'orderbook';
   buyVolume5m: number;
   sellVolume5m: number;
   buyCount5m: number;
