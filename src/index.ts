@@ -1590,10 +1590,19 @@ function startPeriodicScan(
  * Disabled unless explicitly opted into PAPER recovery operation.
  */
 function startRecoveryDiskGuard(): void {
+  const path = require('path');
+  const dbPath = process.env.BOT_DB_PATH;
+  const dataDir = path.resolve(process.cwd(), 'data');
+  const paperDbName = dbPath ? path.basename(dbPath) : '';
+  const isGuardedPaperDb = Boolean(dbPath) &&
+    path.dirname(path.resolve(dbPath)) === dataDir &&
+    (paperDbName === 'meme_bot.recovery.db' ||
+     /^meme_bot[.]paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?[.]db$/.test(paperDbName));
+  // Never read/write/guard the legacy original 18GiB meme_bot.db.
   if (process.env.BOT_ENABLE_RECOVERY_DISK_GUARD !== '1' ||
       process.env.MODE !== 'PAPER' ||
       process.env.LIVE_TRADING !== 'false' ||
-      !process.env.BOT_DB_PATH?.endsWith('/data/meme_bot.recovery.db')) return;
+      !isGuardedPaperDb) return;
 
   const fs = require('fs');
   let shuttingDown = false;
