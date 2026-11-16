@@ -24,9 +24,13 @@ try {
   assert.equal(list.isBlocked('CORE','rAny'),false);
   assert.equal(list.isBlocked('RLUSD','rAny'),false);
   assert.equal(list.isBlocked('OCT','rAny'),false);
+  assert.equal(list.isBlocked('ARMY','rAny'),false, 'ARMY is eligible once its AMM price is available');
+  assert.equal(list.isBlocked('LOVE','rAny'),false, 'LOVE is eligible once its AMM price is available');
   assert.equal(list.isBlocked('BANK','rAny'),false);
   assert.ok(list.asDecisionSet().has('ISSUERONLY:rKfcfA5bLsELJfbkjKRqc5kAzrd22esfy'));
   assert.ok(!list.asDecisionSet().has('CORE'));
+  assert.ok(!list.asDecisionSet().has('ARMY'));
+  assert.ok(!list.asDecisionSet().has('LOVE'));
   assert.equal(fs.readFileSync(file,'utf8'),original,'load cannot rewrite operator file');
   fs.writeFileSync(file,JSON.stringify({...manifest,managedBy:'automatic'}));
   assert.throws(()=>OperatorBlacklist.load(file),/schema/);
