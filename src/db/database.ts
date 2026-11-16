@@ -497,6 +497,67 @@ export class Database {
     }
   }
 
+  /**
+   * Verified only for brand-new PAPER databases with no historical trades.
+   * Never infer a baseline from legacy P&L, daily summaries, or ghost closes.
+   */
+  getPaperCashState(): number | null {
+    const row = this.db.prepare('SELECT bankroll_xrp AS cash FROM paper_cash_state WHERE singleton_id = 1').get() as { cash: number } | undefined;
+    return row && Number.isFinite(row.cash) && row.cash >= 0 ? row.cash : null;
+  }
+
+  ensureFreshPaperCashState(startingBankrollXRP: number): number | null {
+    return this.db.transaction(() => {
+      const existing = this.getPaperCashState();
+      if (existing !== null) return existing;
+      const total = this.db.prepare('SELECT COUNT(*) AS n FROM paper_trades').get() as { n: number };
+      if (total.n !== 0) return null; // legacy: no automatic, unverified bootstrap
+      if (!Number.isFinite(startingBankrollXRP) || startingBankrollXRP <= 0)
+        throw new Error('Invalid starting PAPER bankroll');
+      this.db.prepare('INSERT INTO paper_cash_state(singleton_id, bankroll_xrp, updated_at) VALUES (1, ?, ?)').run(
+        startingBankrollXRP, Date.now());
+      return startingBankrollXRP;
+    })();
+  }
+
+  getPaperInventory(tradeId: number | undefined): number | null {
+    if (!tradeId) return null;
+    const row = this.db.prepare('SELECT tokens_held AS tokens FROM paper_inventory WHERE trade_id = ?').get(tradeId) as { tokens: number } | undefined;
+    return row && Number.isFinite(row.tokens) && row.tokens >= 0 ? row.tokens : null;
+  }
+
+  /**
+   * Atomic economic checkpoint: trade row + remaining tokens + spendable cash.
+   * If an operation fails, SQLite rolls all writes back; callers must only
+   * update in-memory cash/positions AFTER this method returns.
+   */
+  commitPaperMutation(trade: PaperTrade, cashXRP: number, tokensHeld: number, kind: 'entry' | 'update'): void {
+    if (!Number.isFinite(tokensHeld) || tokensHeld < 0)
+      throw new Error('Invalid PAPER remaining token quantity');
+    this.db.transaction(() => {
+      const persistedCash = this.getPaperCashState();
+      if (kind === 'entry' && persistedCash === null)
+        throw new Error('PAPER cash baseline unreconciled: refusing entry');
+      if (kind === 'entry') this.savePaperTrade(trade);
+      else this.updatePaperTrade(trade);
+      if (!trade.id) throw new Error('PAPER mutation missing persisted trade ID');
+      this.db.prepare(`
+        INSERT INTO paper_inventory(trade_id, tokens_held, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(trade_id) DO UPDATE SET tokens_held=excluded.tokens_held, updated_at=excluded.updated_at
+      `).run(trade.id, tokensHeld, Date.now());
+      if (persistedCash !== null) {
+        if (!Number.isFinite(cashXRP) || cashXRP < 0)
+          throw new Error('Invalid PAPER cash checkpoint');
+        const result = this.db.prepare(`
+          UPDATE paper_cash_state SET bankroll_xrp=?, updated_at=? WHERE singleton_id=1
+        `).run(cashXRP, Date.now());
+        if (result.changes !== 1) throw new Error('PAPER cash checkpoint update failed');
+      }
+      // For historical DBs, update trade and inventory only; never write
+      // fabricated cash or silently verify the legacy baseline.
+    })();
+  }
+
   // ==================== PAPER TRADES ====================
 
   savePaperTrade(trade: PaperTrade): void {
@@ -543,6 +604,7 @@ export class Database {
       trade.id = Number(result.id);
     } catch (err) {
       warn(`Error saving paper trade: ${err}`);
+      throw err; // required for transaction rollback
     }
   }
 
@@ -578,6 +640,7 @@ export class Database {
       ]);
     } catch (err) {
       warn(`Error updating paper trade: ${err}`);
+      throw err; // required for transaction rollback
     }
   }
 
