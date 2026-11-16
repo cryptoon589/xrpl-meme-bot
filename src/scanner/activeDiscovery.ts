@@ -34,29 +34,8 @@ export class ActiveDiscovery {
   private issuerTokenCount: Map<string, number> = new Map();
   private readonly SPAM_THRESHOLD = 8;
 
-  // Currency codes that are NOT meme tokens (ascii and hex forms)
-  private readonly STABLECOINS = new Set([
-    // ASCII 3-char codes
-    'USD', 'EUR', 'BTC', 'ETH', 'USDT', 'USDC', 'RLUSD', 'CNY', 'GBP', 'JPY', 'SOLO',
-    // Established non-meme tokens (large caps / ecosystem tokens)
-    'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO',
-    // Hex-encoded versions of the above (40-char, all XRPL hex currencies)
-    '524C555344000000000000000000000000000000', // RLUSD
-    '5553440000000000000000000000000000000000', // USD
-    '5553444300000000000000000000000000000000', // USDC (fixed: was 42 chars)
-    '5553445400000000000000000000000000000000', // USDT
-    '4555520000000000000000000000000000000000', // EUR
-    '4254430000000000000000000000000000000000', // BTC
-    '4554480000000000000000000000000000000000', // ETH
-    '5841480000000000000000000000000000000000', // XAH
-    '584C4D0000000000000000000000000000000000', // XLM
-    '5347420000000000000000000000000000000000', // SGB
-    '464C520000000000000000000000000000000000', // FLR
-    '534F4C4F00000000000000000000000000000000', // SOLO
-    '4556520000000000000000000000000000000000', // EVR
-    '4353430000000000000000000000000000000000', // CSC
-    '44524F0000000000000000000000000000000000', // DRO
-  ]);
+  // No hard-coded asset blacklist. Issuer spam remains a temporary
+  // discovery quality signal, not a permanent token exclusion.
 
   /**
    * Decode hex-encoded currency to ASCII if possible
@@ -85,6 +64,12 @@ export class ActiveDiscovery {
   processLiveTx(tx: any): DiscoveredToken | null {
     const t = tx.tx_json || tx.tx || tx.transaction;
     if (!t) return null;
+
+    // AMMCreate/new-token classification requires a validated successful ledger
+    // transaction; proposed or failed transactions are not launches.
+    if (tx.validated === false || (tx.engine_result &&
+        tx.engine_result !== 'tesSUCCESS') ||
+        (tx.meta?.TransactionResult && tx.meta.TransactionResult !== 'tesSUCCESS')) return null;
 
     const txType = t.TransactionType;
     const meta = tx.meta;
@@ -131,7 +116,6 @@ export class ActiveDiscovery {
     }
 
     if (!currency || !issuer || !rawCurrency) return null;
-    if (this.STABLECOINS.has(currency)) return null;
 
     return this.registerToken(currency, rawCurrency, issuer, 'amm_pool');
   }
@@ -155,7 +139,6 @@ export class ActiveDiscovery {
     }
 
     if (!currency || !issuer || !rawCurrency) return null;
-    if (this.STABLECOINS.has(currency)) return null;
 
     return this.registerToken(currency, rawCurrency, issuer, 'offer_create');
   }
@@ -165,7 +148,6 @@ export class ActiveDiscovery {
     if (!amount || typeof amount === 'string') return null;
     const rawCurrency = amount.currency;
     const currency = this.decodeCurrency(rawCurrency);
-    if (this.STABLECOINS.has(currency)) return null;
 
     return this.registerToken(currency, rawCurrency, amount.issuer, 'token_payment');
   }
@@ -175,7 +157,6 @@ export class ActiveDiscovery {
     if (!limit || typeof limit !== 'object') return null;
     const rawCurrency = limit.currency;
     const currency = this.decodeCurrency(rawCurrency);
-    if (this.STABLECOINS.has(currency)) return null;
     if (limit.issuer === t.Account) return null;
 
     return this.registerToken(currency, rawCurrency, limit.issuer, 'token_payment');
@@ -339,7 +320,6 @@ export class ActiveDiscovery {
           }
 
           if (!currency || !issuer || !rawCurrency) continue;
-          if (this.STABLECOINS.has(currency)) continue;
           if (this.knownAMMs.has(`${currency}:${issuer}`)) continue;
 
           this.knownAMMs.add(`${currency}:${issuer}`);
