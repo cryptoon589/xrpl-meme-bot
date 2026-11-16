@@ -23,6 +23,8 @@ jobs:
         run: node scripts/test_whale_signal_integrity.js
       - name: Burst, first price baseline and confirmed AMM launch
         run: node scripts/test_burst_launch_integrity.js
+      - name: Reject proposed or unsuccessful AMMCreate as fake new launch
+        run: node scripts/test_validated_launch.js
       - name: Opt-in reserve-aware PAPER execution regression
         run: node scripts/test_reserve_paper_execution.js
       - name: Prior PAPER accounting and fee regressions
