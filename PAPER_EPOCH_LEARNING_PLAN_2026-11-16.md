@@ -35,6 +35,16 @@ The corrected `scripts/daily_report.py` from the Telegram audit is included and 
 
 **Do not change cron to the new epoch until a controlled cutover**: the currently installed daily cron still targets the recovery DB by default. Credentials must remain out of logs and repository.
 
+## Reserve-aware AMM PAPER valuation improvement
+
+`src/paper/ammExecutionQuote.ts` now contains independently tested full-reserve constant-product buy/sell estimates. The XRPL AMM fee `trading_fee` is correctly interpreted as an integer in units of **1/100,000** (0..1000 gives 0%-1%). No 10% artificial limit applies to the **reporting quote**: in a drained pool, selling the original token quantity can have >50% impact. All calculations use the current XRP and token reserves, not a past high-water mark or spot price multiplied by arbitrary trade size.
+
+`AMMPriceFetcher` now tags newly obtained AMM/book quote observations with `observedAtMs`, preserved through caching. The Telegram hourly open-position display only estimates post-size AMM sale proceeds if the actual reserve quote was observed within **15 seconds** and PAPER cash is reconciled. A pure spot price, book fallback, or stale observation returns N/A instead of pretending a profitable exit. The display includes a simulated 0.3% extra execution overhead *separately* from the XRPL AMM trading fee, and labels quotes **non-executable**. Real token transfer fees, issuer freeze/authorization, cross-book routing, ledger latency and full transaction fill are **not** verified.
+
+**Critically, the existing PAPER fill/exit algorithm still uses its simplified slippage model and 10% cap.** This phase improves reporting and provides the pure calculation module for the next engine refactor; it does **not** yet make stored PAPER P&L or strategy profitability executable. The next mandatory work is to pipe fresh pool-token reserves and fee units into all entry/exit decision paths and replace the optimistic fill assumptions with guarded reserve-aware estimates, including no-price failure handling.
+
+CI regression `scripts/test_amm_sell_quotes.js` verifies fee scaling, full-size price impact, reserve-bounded XRP output and invalid input protection, without any network calls. Official reference: https://xrpl.org/docs/references/http-websocket-apis/public-api-methods/path-and-order-book-methods/amm_info and https://xrpl.org/docs/concepts/tokens/decentralized-exchange/automated-market-makers .
+
 ## Tests, residual risks and deployment gate
 CI: `.github/workflows/paper-epoch-learning.yml`. Tested using disposable databases and mock/offline operations. No live network, Telegram or on-chain transactions.
 
