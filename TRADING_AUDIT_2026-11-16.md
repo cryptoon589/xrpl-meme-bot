@@ -35,8 +35,23 @@ Open paths debit `entryAmountXRP + 0.003 * entryAmountXRP`; `xrpReturned` alread
 ### P0.6 Executable quotes versus simulated price
 PAPER buys/sells use observed spot price times a coarse capped price-impact estimate (max 10%). It does not verify actual quote-route min-out, fillable quantities, issuer transfer fee, missed/partial fill or price update at ledger inclusion. Closing a no-price position at entry-price fallback is not equivalent to a sell: if liquidity disappears, genuine realized losses may be far worse.
 
-### P0.7 Backtesting look-ahead and concurrency errors
+### P0.7 Learning readiness flag is not honored by runtime TP targets
+`state/recommendations.json` from the forensic run says `autoApplyReady=false`, `tradesAnalyzed=847`, `overallWinRate=13.9%`, and `burstTp1Percent=8`. `RuntimeLearning.getTpTargets()` consumes those TP levels whenever the file exists, **without checking `autoApplyReady`**. `src/index.ts` calls `runtimeLearning.reload()` after every analysis regardless of approval and passes the returned targets into PAPER trades. `autoApplyReady` only gates `TradeAnalyzer.applyRecommendations()`, not these runtime parameters. Learned TP policy can therefore change despite failing the documented readiness gate. Freeze adaptive TP changes behind a separate opt-in and versioned forward-validation, including after restart.
+
+### P0.8 Backtesting look-ahead and concurrency errors
 `src/backtest/backtestEngine.ts` selects the closest snapshot within ±5min (which may be *after* the scored signal), assumes ideal TP/SL fills even across price gaps, and computes P&L without fees/slippage. It deletes `openPositions` inside the same score-record loop as soon as it projects the future exit, so max-concurrent-position handling does not represent time correctly. Results cannot validate an executable edge.
+
+## Empirical PAPER forensic findings, 2026-11-16 00:21 UTC
+
+Read-only production recovery DB output supplied by operator. 851 rows total: 847 closed, one open, three partial. Of 847 closed, 199 `force_close_no_price` ghost rows (23.5%); 648 reconstructable non-ghost closes. **Reconstructed trade P&L on this subset: -127.448 XRP; win rate 16.8%; profit factor 0.75.** This is a historical estimate, not an audited executable-live return. 648/648 reconstructed P&Ls differ from saved `pnl_xrp` by >0.001 XRP, with total -11.490 XRP difference (largely entry-fee accounting assumptions; do not edit historical rows). Only three closed trades in latest 30 days (+4.689 XRP) — no basis for claiming a new profitable regime.
+
+By entry source: burst n=295 +121.148 XRP, PF 1.72, median -0.185 XRP; stream n=195 -29.710; momentum n=106 **-212.047 XRP** (median -1.401); scored n=31 -13.570; unknown n=21 +6.730. Burst's positive net with negative median implies winner concentration / high variance; quantify before retaining or scaling.
+
+By exit: `kill_liq_drop` n=81 **-299.490 XRP** (average -3.697), `trailing_stop_profit` n=56 +271.844, `kill_no_followthrough` n=157 -38.040, `time_stop_loss` n=122 -20.760, `stop_loss` n=40 -36.048. Liquidity-collapse failures overwhelm large trailing winners. Need identify market regimes, pool reserve at entry, specific tokens, time-to-collapse and actual exitability; do not simply remove the exit rule (that could worsen loss).
+
+The audit prints `reconstructed cash=-147.485 XRP` using **all** entry debits, including 199 ghost trades, and stored proceeds; the PAPER code's ghost-close bookkeeping and restart resets do not form a consistent finance ledger. This negative number is **NOT** a demonstrable cash balance or proof of margin debt. The corrected starting cash, all open risk and exact terminal NAV are not identifiable from these schema rows. Shadow-trade resolution unavailable (all four unresolved); historical scores/snapshots absent before Nov 15, so leakage-free replay over May–Nov trade history is not possible from compact DB.
+
+`RuntimeLearning` consumes learned 8% burst TP1 even when `autoApplyReady=false`; mark historical adaptive outputs contaminated until accounting and ghost filtering repaired.
 
 ## P1 — NEXT ENGINEERING PRIORITIES
 
