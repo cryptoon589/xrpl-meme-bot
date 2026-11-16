@@ -59,6 +59,14 @@ To prevent a misleading report even when `.env` points at the original DB, `scri
 
 **Important:** The existing cron continues to run whatever version of the script is on the VPS. The safe report patch must be selectively deployed and dry-run tested there. If the cron wrapper uses `DAILY_REPORT_DB_PATH` pointing at the wrong basename, the new report will refuse to send rather than silently read the historical database. No change to crontab was made.
 
+## Live dry-run verified and misleading green checks removed — Nov 16 2026
+
+Operator successfully installed the report-only update on VPS: `--check-config` returned active `/root/xrpl-meme-bot/data/meme_bot.recovery.db` exists, with `Legacy DB_PATH ignored: False`. Interactive-shell Telegram token/chat values were **both absent**, which does not prove cron lacks values, because the cron job references `.env`. `--dry-run` read 648 non-ghost closed trades, recorded net **−115.96 XRP**, last 7d 3 closes and recorded **+4.73 XRP**. The separate economic estimate was −127.448 XRP and +4.689 XRP respectively, so recorded figures retain known fee/accounting bias. No Telegram message was sent in dry run.
+
+The first updated report correctly labeled **NOT CERTIFIED** but still displayed 5 green heuristic checks and incorrectly passed `NEW_LAUNCH >=5 trades` using **19 historical all-time** trades. The **subsequent audit-branch correction** removes all pseudo-certification checklist marks, labels NEW_LAUNCH history as *all-time*, adds a warning for samples under 30 trades in 7d, and prints N/A instead of None% when no winners/losers. This later correction is CI-tested, **but not yet deployed to VPS**. GitHub Actions run 43782643418 completed successfully.
+
+An interactive Python invocation under the current shell will not send Telegram messages because its Telegram environment values are absent. For the scheduled 08:00 UTC job, credential *export* from `.env` still needs to be checked without exposing token or chat IDs; never paste secrets.
+
 ## Test commands
 \`\`\`bash
 npm run build
