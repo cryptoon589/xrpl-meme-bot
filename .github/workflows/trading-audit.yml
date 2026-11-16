@@ -7,6 +7,7 @@ on:
     paths:
       - 'scripts/audit_trading_integrity.py'
       - 'scripts/audit_trade_edge_concentration.py'
+      - 'scripts/daily_report.py'
       - 'scripts/audit_paper_accounting.js'
       - 'scripts/audit_telegram_delivery.js'
       - '.github/workflows/trading-audit.yml'
@@ -23,11 +24,35 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
-      - run: python3 -m py_compile scripts/audit_trading_integrity.py scripts/audit_trade_edge_concentration.py
+      - run: python3 -m py_compile scripts/audit_trading_integrity.py scripts/audit_trade_edge_concentration.py scripts/daily_report.py
       - name: Disposable PAPER accounting demonstration
         run: node scripts/audit_paper_accounting.js
       - name: Offline Telegram notification audit
         run: node scripts/audit_telegram_delivery.js
+      - name: Daily PAPER report isolated recovery DB smoke
+        run: |
+          mkdir -p /tmp/hunterix-report-audit
+          python3 - <<'PY'
+          import sqlite3
+          db = sqlite3.connect('/tmp/hunterix-report-audit/meme_bot.recovery.db')
+          db.execute('''CREATE TABLE paper_trades (
+            id INTEGER PRIMARY KEY,
+            status TEXT, entry_timestamp INTEGER, exit_timestamp INTEGER,
+            entry_amount_xrp REAL, pnl_xrp REAL, pnl_percent REAL,
+            exit_reason TEXT, trade_profile TEXT)''')
+          db.execute("INSERT INTO paper_trades VALUES (1,'closed',1794780000000,1794780100000,5,1,20,'trailing_stop_profit','BURST_SCALP')")
+          db.commit()
+          db.close()
+          PY
+          DAILY_REPORT_DB_PATH=/tmp/hunterix-report-audit/meme_bot.recovery.db DB_PATH=/tmp/legacy.db \
+            python3 scripts/daily_report.py --dry-run > /tmp/daily-report-audit.txt
+          grep -q 'Legacy DB_PATH ignored: True' /tmp/daily-report-audit.txt
+          grep -q 'PAPER ONLY' /tmp/daily-report-audit.txt
+          grep -q 'Bankroll:</b> not audited' /tmp/daily-report-audit.txt
+          grep -q 'NOT CERTIFIED' /tmp/daily-report-audit.txt
+          grep -q 'DRY RUN: Telegram not contacted' /tmp/daily-report-audit.txt
+          if grep -q 'READY FOR LIVE' /tmp/daily-report-audit.txt; then exit 1; fi
+          if DAILY_REPORT_DB_PATH=/tmp/legacy.db python3 scripts/daily_report.py --check-config; then exit 1; fi
       - name: Synthetic trade history audit
         run: |
           python3 - <<'PY'
