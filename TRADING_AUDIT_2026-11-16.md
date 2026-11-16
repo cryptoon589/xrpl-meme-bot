@@ -29,10 +29,13 @@ Open paths debit `entryAmountXRP + 0.003 * entryAmountXRP`; `xrpReturned` alread
 ### P0.4 LIVE executor loses positions on reboot
 `src/execution/tradeExecutor.ts` uses an in-memory Map without a persisted, reconciled on-ledger position journal. On restart, live XRP token balances can remain while risk-monitoring state vanishes. No live execution until wallet/trustline reconciliation, durable fill ledger and idempotent restart reconciliation exist.
 
-### P0.5 Executable quotes versus simulated price
+### P0.5 LIVE entries are not wired correctly
+`src/index.ts` registers `burstDetector.onBurst` only inside `if (paperTrader)`; in LIVE mode `paperTrader` is null. The scored LIVE branch does call `tradeExecutor.openTrade`, but its TDE input passes `walletXrpBalance: undefined`. `TradeDecisionEngine.runLivePreflight` interprets that as 0 and rejects every positive-size live entry requiring an XRP buffer. Hence the advertised snipe/momentum live routes are not release-ready even if MODE=LIVE is configured. Fix wiring, use fresh real wallet balances, verify with end-to-end testnet and account reconciliation before activating any live seed.
+
+### P0.6 Executable quotes versus simulated price
 PAPER buys/sells use observed spot price times a coarse capped price-impact estimate (max 10%). It does not verify actual quote-route min-out, fillable quantities, issuer transfer fee, missed/partial fill or price update at ledger inclusion. Closing a no-price position at entry-price fallback is not equivalent to a sell: if liquidity disappears, genuine realized losses may be far worse.
 
-### P0.6 Backtesting look-ahead and concurrency errors
+### P0.7 Backtesting look-ahead and concurrency errors
 `src/backtest/backtestEngine.ts` selects the closest snapshot within ±5min (which may be *after* the scored signal), assumes ideal TP/SL fills even across price gaps, and computes P&L without fees/slippage. It deletes `openPositions` inside the same score-record loop as soon as it projects the future exit, so max-concurrent-position handling does not represent time correctly. Results cannot validate an executable edge.
 
 ## P1 — NEXT ENGINEERING PRIORITIES
