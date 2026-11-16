@@ -42,7 +42,7 @@ jobs:
           node - <<'JS'
           const assert=require('node:assert/strict');
           const p='./ecosystem.vnext.paper.config.cjs';
-          assert.throws(()=>require(p),/epoch ID absent/invalid/);
+          assert.throws(()=>require(p),/epoch ID absent/);
           process.env.HUNTERIX_VNEXT_EPOCH_ID='meme_bot.paper-epoch-20261116-ci';
           delete require.cache[require.resolve(p)];
           assert.throws(()=>require(p),/Approved operator-manifest SHA256/);
