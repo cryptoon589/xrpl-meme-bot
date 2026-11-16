@@ -6,6 +6,11 @@
       "currency": "41524D5900000000000000000000000000000000",
       "issuer": "rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC",
       "reason": "Existing exact-issuer XRP ARMY priority issue; review before deployment"
+    },
+    {
+      "currency": "44524F5000000000000000000000000000000000",
+      "issuer": "rszenFJoDdiGjyezQc8pME9KWDQH43Tswh",
+      "reason": "Official XRP DROP meme coin; verified issuer and currency; review before deployment"
     }
   ]
 }
