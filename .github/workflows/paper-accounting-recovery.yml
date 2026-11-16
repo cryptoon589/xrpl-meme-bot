@@ -1,0 +1,21 @@
+name: PAPER accounting and reporting integrity
+
+on:
+  push:
+    branches:
+      - fix/paper-accounting-reporting-20261116
+  workflow_dispatch:
+
+jobs:
+  offline-accounting-recovery:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: PAPER accounting and restart regression — synthetic SQLite only
+        run: node scripts/test_paper_accounting_recovery.js
