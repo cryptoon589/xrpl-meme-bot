@@ -14,6 +14,13 @@ if(!process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH ||
 if(!/^[0-9a-f]{64}$/i.test(process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256 || '')){
   throw new Error('Approved operator-manifest SHA256 required before staging PM2');
 }
+const endpoint=process.env.HUNTERIX_VNEXT_XRPL_WS_URL || '';
+let parsedEndpoint;
+try { parsedEndpoint=new URL(endpoint); }
+catch { throw new Error('Explicit vNext XRPL WebSocket URL required (not old fallback)'); }
+if (parsedEndpoint.protocol!=='wss:' || parsedEndpoint.username || parsedEndpoint.password) {
+  throw new Error('vNext XRPL endpoint must be an encrypted, credential-free wss:// URL');
+}
 module.exports={
   apps:[{
     name:'hunterix-vnext-paper',
@@ -25,6 +32,8 @@ module.exports={
     max_memory_restart:'550M',kill_timeout:15000,
     env:{
       MODE:'PAPER',LIVE_TRADING:'false',TRADING_WALLET_SEED:'',
+      XRPL_WS_URL:endpoint,
+      HUNTERIX_VNEXT_XRPL_WS_URL:endpoint,
       BOT_DB_PATH:path.join(root,'data',epoch+'.db'),
       BOT_PAPER_EPOCH_ID:epoch,
       HUNTERIX_MANUAL_BLOCKLIST_FILE:path.join(root,'state','manual_token_blacklist.json'),
