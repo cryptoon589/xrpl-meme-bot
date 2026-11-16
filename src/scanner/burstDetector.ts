@@ -62,35 +62,16 @@ interface TokenState {
   firstSeenAt: number;         // timestamp when token was first registered
 }
 
-// Currency codes that are NOT meme tokens
-const STABLECOINS = new Set([
-  // ASCII codes
-  'USD', 'EUR', 'BTC', 'ETH', 'USDT', 'USDC', 'RLUSD', 'CNY', 'GBP', 'JPY', 'SOLO',
-  'XRP', 'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO',
-  // Hex-encoded (40-char)
-  '524C555344000000000000000000000000000000', // RLUSD
-  '5553440000000000000000000000000000000000', // USD
-  '5553444300000000000000000000000000000000', // USDC (fixed)
-  '5553445400000000000000000000000000000000', // USDT
-  '4555520000000000000000000000000000000000', // EUR
-  '4254430000000000000000000000000000000000', // BTC
-  '4554480000000000000000000000000000000000', // ETH
-  '5841480000000000000000000000000000000000', // XAH
-  '584C4D0000000000000000000000000000000000', // XLM
-  '5347420000000000000000000000000000000000', // SGB
-  '464C520000000000000000000000000000000000', // FLR
-  '534F4C4F00000000000000000000000000000000', // SOLO
-  '4556520000000000000000000000000000000000', // EVR
-  '4353430000000000000000000000000000000000', // CSC
-  '44524F0000000000000000000000000000000000', // DRO
-]);
+// No hidden built-in blacklist. Only an explicit operator list can suppress
+// a token; other signals are temporary market/entry eligibility checks.
 
 export class BurstDetector {
   private tokens: Map<string, TokenState> = new Map(); // key = "rawCurrency:issuer"
   /** ammAccount → key (rawCurrency:issuer) — populated lazily */
   private ammToToken: Map<string, string> = new Map();
   /** key → first seen timestamp — used for age-aware cooldown */
-  private tokenFirstSeen: Map<string, number> = new Map();
+  private confirmedLaunchAt: Map<string, number> = new Map();
+  public isManuallyBlocked?: (currency: string, issuer: string, rawCurrency?: string) => boolean;
   private xrplClient: XRPLClient;
   private alerter: TelegramAlerter;
   private db: Database;
@@ -102,7 +83,9 @@ export class BurstDetector {
     poolXRP: number,
     priceXRP: number,
     tokenAgeMs: number,    // ms since token was first seen by the detector
-    baselinePrice: number | null  // price at FIRST burst alert (null if this IS the first)
+    baselinePrice: number | null, // price at FIRST burst alert
+    reserveQuote?: {poolTokens:number;tradingFeeUnits:number;
+      priceObservedAtMs:number;priceSource:'amm'}
   ) => void;
 
   constructor(xrplClient: XRPLClient, alerter: TelegramAlerter, db: Database) {
@@ -124,8 +107,10 @@ export class BurstDetector {
    */
   registerNewLaunch(rawCurrency: string, issuer: string, displayName: string): void {
     const key = `${rawCurrency}:${issuer}`;
-    if (this.tokens.has(key)) return; // already known
-    if (STABLECOINS.has(rawCurrency) || STABLECOINS.has(displayName)) return;
+    // Only this AMMCreate-derived callback can assign an actual launch age.
+    // Mere first discovery or preload is NOT evidence a token was launched now.
+    if (!this.confirmedLaunchAt.has(key)) this.confirmedLaunchAt.set(key, Date.now());
+    if (this.tokens.has(key)) return;
     this.tokens.set(key, {
       rawCurrency, issuer,
       displayName: displayName || rawCurrency,
@@ -154,7 +139,6 @@ export class BurstDetector {
         const rawCurrency = normalizeIssuedCurrency(token.rawCurrency || token.currency);
         if (!rawCurrency) return;
         const key = `${rawCurrency}:${token.issuer}`;
-        if (STABLECOINS.has(token.currency) || STABLECOINS.has(rawCurrency)) return;
         if (Array.from(this.ammToToken.values()).includes(key)) return; // AMM account already registered
         // Init state so recordBuy can work immediately
         if (!this.tokens.has(key)) {
@@ -185,6 +169,12 @@ export class BurstDetector {
     const t    = tx.tx_json || tx.tx || tx.transaction;
     const meta = tx.meta;
     if (!t || !meta || (tx.engine_result ?? meta.TransactionResult) !== 'tesSUCCESS') return;
+
+    // Liquidity deposits/withdrawals are NOT buys or sells. Excluding them
+    // prevents LP management from fabricating early buy pressure.
+    if (!['OfferCreate', 'Payment'].includes(t.TransactionType)) {
+      return;
+    }
 
     // PRIMARY: scan metadata for XRP flowing INTO any known AMM pool account.
     // This catches OfferCreate, Payment, AMMDeposit, and any future tx types.
@@ -221,6 +211,7 @@ export class BurstDetector {
 
       const state = this.tokens.get(key);
       if (!state) continue;
+      if (this.isManuallyBlocked?.(state.displayName,state.issuer,state.rawCurrency)) continue;
 
       const wallet = t.Account || 'unknown';
       const isSell = xrpDelta < 0; // XRP out of AMM = someone sold token for XRP
@@ -253,7 +244,7 @@ export class BurstDetector {
     }
 
     if (!rawCurrency || !issuer) return;
-    if (STABLECOINS.has(rawCurrency) || rawCurrency === 'XRP') return;
+    if (rawCurrency === 'XRP') return;
     this.ensureAmmRegistered(rawCurrency, issuer);
   }
 
@@ -265,14 +256,14 @@ export class BurstDetector {
     const delivered = meta?.DeliveredAmount || meta?.delivered_amount;
     if (delivered && typeof delivered === 'object' && delivered.currency !== 'XRP') {
       const { currency, issuer } = delivered;
-      if (!STABLECOINS.has(currency)) this.ensureAmmRegistered(currency, issuer);
+      this.ensureAmmRegistered(currency, issuer);
       return;
     }
     // Token in SendMax = token→XRP payment (seller side)
     const sendMax = t.SendMax;
     if (sendMax && typeof sendMax === 'object' && sendMax.currency !== 'XRP') {
       const { currency, issuer } = sendMax;
-      if (!STABLECOINS.has(currency)) this.ensureAmmRegistered(currency, issuer);
+      this.ensureAmmRegistered(currency, issuer);
     }
   }
 
@@ -294,7 +285,6 @@ export class BurstDetector {
       lastTrade: nowTs,
       firstSeenAt: nowTs,
     });
-    if (!this.tokenFirstSeen.has(key)) this.tokenFirstSeen.set(key, nowTs);
 
     // Async: fetch AMM pool account and register it
     this.fetchAMMAccount(rawCurrency, issuer).then(ammAccount => {
@@ -337,6 +327,7 @@ export class BurstDetector {
     if (!this.tokens.has(key)) return;
 
     const state = this.tokens.get(key)!;
+    if (this.isManuallyBlocked?.(state.displayName,state.issuer,state.rawCurrency)) return;
     state.lastTrade = now;
 
     // Add event (buy or sell)
@@ -350,7 +341,8 @@ export class BurstDetector {
     if (isSell) return;
 
     // Age-aware cooldown: new tokens (< 24h) get shorter cooldown to catch re-bursts
-    const tokenAgeMs = now - (this.tokenFirstSeen.get(key) || now);
+    const createdAt = this.confirmedLaunchAt.get(key);
+    const tokenAgeMs = createdAt == null ? Number.POSITIVE_INFINITY : now - createdAt;
     const effectiveCooldown = tokenAgeMs < 24 * 60 * 60 * 1000
       ? 5 * 60 * 1000   // 5 min for tokens < 24h old
       : ALERT_COOLDOWN_MS; // 20 min for older tokens
@@ -408,7 +400,8 @@ export class BurstDetector {
 
       // Skip illiquid pools (MIN_POOL_XRP is the XRP side only; TVL = poolXRP * 2)
       // New tokens (< 1h old) get a lower minimum pool threshold (150 XRP) to catch early launches
-      const tokenAgeMs = Date.now() - (state.firstSeenAt ?? Date.now());
+      const launchedAt = this.confirmedLaunchAt.get(key);
+      const tokenAgeMs = launchedAt == null ? Number.POSITIVE_INFINITY : Date.now() - launchedAt;
       const effectiveMinPool = tokenAgeMs < 60 * 60 * 1000 ? 300 : MIN_POOL_XRP;
       if (ammInfo.poolXRP < effectiveMinPool) {
         debug(`Burst on ${state.displayName} ignored — pool too small (${ammInfo.poolXRP.toFixed(0)} XRP one-side < ${effectiveMinPool})`);
@@ -417,7 +410,7 @@ export class BurstDetector {
 
       if (ammInfo) {
         state.poolXRP      = ammInfo.poolXRP;
-        state.baselinePrice = ammInfo.priceXRP;
+        // Never reset the first burst price on subsequent bursts.
       }
 
       const poolXRP   = ammInfo?.poolXRP   ?? null;
@@ -468,7 +461,8 @@ export class BurstDetector {
       // Pass TVL, token age, and baseline price so index.ts can use NEW_LAUNCH profile
       // and pump check.
       if (this.onBurst && poolXRP && priceXRP) {
-        const tokenAgeMs = Date.now() - (state.firstSeenAt ?? Date.now());
+        const launchedAt = this.confirmedLaunchAt.get(key);
+        const tokenAgeMs = launchedAt == null ? Number.POSITIVE_INFINITY : Date.now() - launchedAt;
         // baselinePrice is the price at the FIRST burst alert.
         // Set it now if this is the first alert for this token.
         const isFirstBurst = state.baselinePrice === null;
@@ -477,7 +471,12 @@ export class BurstDetector {
           state.displayName, state.issuer, state.rawCurrency,
           poolXRP * 2, priceXRP,
           tokenAgeMs,
-          isFirstBurst ? null : state.baselinePrice  // null = this IS the first burst
+          isFirstBurst ? null : state.baselinePrice,
+          ammInfo.poolTokens != null && ammInfo.tradingFeeUnits != null &&
+            ammInfo.priceObservedAtMs != null
+            ? {poolTokens:ammInfo.poolTokens,tradingFeeUnits:ammInfo.tradingFeeUnits,
+               priceObservedAtMs:ammInfo.priceObservedAtMs,priceSource:'amm'}
+            : undefined
         );
       }
 
@@ -492,7 +491,8 @@ export class BurstDetector {
   private async fetchAMMInfo(
     rawCurrency: string,
     issuer: string
-  ): Promise<{ priceXRP: number; poolXRP: number; tradingFee: number } | null> {
+  ): Promise<{ priceXRP: number; poolXRP: number; poolTokens: number;
+    tradingFee: number; tradingFeeUnits: number; priceObservedAtMs: number } | null> {
     const currencyCode = normalizeIssuedCurrency(rawCurrency);
     if (!currencyCode) return null;
     // Try up to 3 times with 1s delay between attempts (WebSocket may be reconnecting)
@@ -534,7 +534,8 @@ export class BurstDetector {
         const priceXRP   = poolXRP / tokenValue;
         const tradingFee = (amm.trading_fee || 0) / 1000;
 
-        return { priceXRP, poolXRP, tradingFee };
+        return { priceXRP,poolXRP,poolTokens:tokenValue,tradingFee,
+          tradingFeeUnits:amm.trading_fee || 0,priceObservedAtMs:Date.now() };
       } catch (err: any) {
         if (attempt < 3) {
           debug(`fetchAMMInfo attempt ${attempt} failed for ${rawCurrency}: ${err?.message} — retrying`);

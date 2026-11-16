@@ -41,6 +41,7 @@ import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
+import { OperatorBlacklist } from './risk/operatorBlacklist';
 import { isLearningApproved } from './analysis/learningApproval';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
@@ -151,6 +152,14 @@ async function main() {
   // Load whale data from DB and wire into scorer
   whaleTracker.load(db);
   whaleTracker.loadTopTradersFromFile();
+  // Existing wallet addresses remain in the registry for reference.
+  // Live trade boosts require fresh, sourced observations. The webhook's
+  // top_traders_import.json can change without a PM2 restart; reload
+  // periodically and automatically expire stale reputation claims.
+  setInterval(() => {
+    const fresh = whaleTracker.loadTopTradersFromFile();
+    if (fresh) whaleTracker.save(db);
+  }, 5 * 60 * 1000);
   tokenScorer.setWhaleTracker(whaleTracker);
   tokenScorer.setSocialDetector(socialDetector);
 
@@ -165,32 +174,13 @@ async function main() {
   const telegramAlerter = new TelegramAlerter(config);
   const burstDetector = new BurstDetector(xrplClient, telegramAlerter, db);
 
-  // Tokens that should never be burst-traded (native chain tokens, stablecoins, etc.)
-  // Includes both ASCII names AND hex-encoded equivalents
-  const BURST_TRADE_BLOCKLIST = new Set([
-    // ASCII names
-    'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
+  // The operator's explicit manual list is the ONLY permanent token blacklist.
+  // Missing manifest => startup fails closed, rather than silently guessing
+  // what the operator previously chose to blacklist.
+  const manualBlacklist = OperatorBlacklist.load();
+  const BURST_TRADE_BLOCKLIST = manualBlacklist.asDecisionSet();
+  info(`[Blacklist] Loaded ${manualBlacklist.list().length} operator entries. No automatic token additions.`);
 
-    'USDT', 'USDC', 'RLUSD', 'USD', 'BTC', 'ETH', 'XRP', 'EUR',
-    // Hex-encoded equivalents (40-char, right-padded with 00s)
-    '524C555344000000000000000000000000000000', // RLUSD
-    '5553440000000000000000000000000000000000', // USD
-    '5553444300000000000000000000000000000000', // USDC
-    '5553445400000000000000000000000000000000', // USDT
-    '4555520000000000000000000000000000000000', // EUR
-    '4254430000000000000000000000000000000000', // BTC
-    '4554480000000000000000000000000000000000', // ETH
-    '5841480000000000000000000000000000000000', // XAH
-    '584C4D0000000000000000000000000000000000', // XLM
-    '5347420000000000000000000000000000000000', // SGB
-    '464C520000000000000000000000000000000000', // FLR
-    '534F4C4F00000000000000000000000000000000', // SOLO
-    '4556520000000000000000000000000000000000', // EVR
-    '4353430000000000000000000000000000000000', // CSC
-    '44524F0000000000000000000000000000000000', // DRO
-  ]);
-
-  // Helper: decode 40-char hex currency to ASCII (for blocklist checks)
   const decodeCurrency = (raw: string): string => {
     if (raw.length !== 40) return raw;
     try {
@@ -199,18 +189,20 @@ async function main() {
       return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : raw;
     } catch { return raw; }
   };
+  const isBlocklistedToken = (currency: string, issuer: string, raw?: string): boolean =>
+    manualBlacklist.isBlocked(currency, issuer, raw);
 
-  const isBlocklistedToken = (currency: string): boolean =>
-    BURST_TRADE_BLOCKLIST.has(currency) || BURST_TRADE_BLOCKLIST.has(decodeCurrency(currency));
+  burstDetector.isManuallyBlocked = (currency, issuer, raw) =>
+    manualBlacklist.isBlocked(currency, issuer, raw);
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
-    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP, tokenAgeMs, baselinePrice) => {
+    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP, tokenAgeMs, baselinePrice, reserveQuote) => {
       diagnostics.increment('burstCandidatesSeen');
       diagnostics.recordSignal({ token: decodeCurrency(rawCurrency || currency), issuer, source: 'burst', reason: 'burst_detected', priceAtSignal: priceXRP, poolXrpReserve: poolTVL / 2, rawCurrency });
       // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
       const poolXrpReserve = poolTVL / 2;
-      if (isBlocklistedToken(currency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
+      if (isBlocklistedToken(currency, issuer, rawCurrency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
       const burstKey = `${currency}:${issuer}`;
       // Skip tokens that were recently force-closed for no-price
       const noPriceCooldownTs = noPriceCooldowns.get(burstKey);
@@ -254,6 +246,7 @@ async function main() {
         whaleWinRate: bestWhaleWR,   // passed into TDE for threshold lowering
         isNewLaunch,                 // hint for TDE profile selection
         tokenAgeMs,
+        ...reserveQuote,
       };
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
 
@@ -409,7 +402,7 @@ async function main() {
       // Decode hex currency immediately — all downstream keys use decoded form
       const displayCurrency = decodeCurrency(currency);
       const momentumKey = `${displayCurrency}:${issuer}`;
-      if (isBlocklistedToken(currency)) return;
+      if (isBlocklistedToken(displayCurrency, issuer, currency)) return;
       // noPriceCooldown check (was missing from stream path — burst+scored had it)
       const npStreamTs = noPriceCooldowns.get(momentumKey);
       if (npStreamTs && Date.now() - npStreamTs < NO_PRICE_COOLDOWN_MS) {
@@ -425,7 +418,8 @@ async function main() {
 
       diagnostics.increment('streamMomentumCandidatesSeen');
       diagnostics.recordSignal({ token: displayCurrency, issuer, source: 'stream', reason: 'momentum_detected', priceAtSignal: snap.buyVolumeXRP, poolXrpReserve: null, buyVolumeXRP: snap.buyVolumeXRP, uniqueBuyers: snap.uniqueBuyers });
-      ammPriceFetcher.getPrice(currency, issuer).then(async ammPrice => {
+      ammPriceFetcher.getPrice(currency, issuer, currency, true,
+        process.env.BOT_USE_RESERVE_QUOTES === '1').then(async ammPrice => {
         if (!ammPrice?.priceXRP) { tradeLocks.delete(momentumKey); return; }
 
         // Check whale presence in stream buyers
@@ -437,6 +431,8 @@ async function main() {
           tokenCurrency: currency, tokenIssuer: issuer,
           priceXRP: ammPrice.priceXRP, liquidityXRP: ammPrice.liquidityXRP,
           poolXrpReserve: ammPrice.poolXRP,
+          poolTokens:ammPrice.poolTokens,tradingFeeUnits:ammPrice.tradingFee,
+          priceObservedAtMs:ammPrice.observedAtMs,priceSource:ammPrice.source,
           buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
           uniqueBuyers5m: snap.uniqueBuyers, buySellRatio: snap.buySellRatio,
           newWalletBuys: snap.newWalletBuys, buyVolumeXRP: snap.buyVolumeXRP,
@@ -498,16 +494,11 @@ async function main() {
     };
   }
 
-  // On startup: force-close any positions in blocklisted tokens
-  // (opened before the blocklist was added, e.g. XAH, 666, LOX)
+  // Never liquidate PAPER inventory because a ticker appears in a blacklist.
+  // Manual token entries reject only NEW opportunities; existing positions
+  // need an explicit user-directed price-supported exit.
   if (paperTrader) {
-    for (const token of BURST_TRADE_BLOCKLIST) {
-      const closed = paperTrader.forceCloseByToken(token, 'blocklisted_token_cleanup');
-      if (closed) {
-        warn(`Startup cleanup: force-closed blocklisted position ${token}`);
-      }
-    }
-    // Log open positions restored from DB — do NOT force-close them.
+  // Log open positions restored from DB — do NOT force-close them.
     // The 2h force-close here was silently wiping active positions on every restart.
     // The orphan checker (checkAllOpenExits) handles exits with live prices each scan cycle.
     const startupOpenPositions = paperTrader.getOpenPositionsSummary();
@@ -562,74 +553,14 @@ async function main() {
     if (discovered) {
       const tracked = activeDiscovery.toTrackedToken(discovered);
       tokenDiscovery.addTrackedToken(tracked);
-      // FIX #35: AMMCreate → immediate burst attempt.
-      // New pool detected live — register with burstDetector immediately
-      // so it tracks buys from tx #1, then attempt a burst entry if pool
-      // has enough XRP. This catches launches at second 0, not scan minute.
-      if (discovered.source === 'amm_pool' && paperTrader && ammPriceFetcher) {
-        const liq = discovered.liquidityXRP ?? 0;
-        const poolXRP = liq / 2;
-        if (poolXRP >= 300) {
-          // Register with burstDetector so it watches buys immediately
-          burstDetector.registerNewLaunch(discovered.rawCurrency, discovered.issuer, discovered.currency);
-          // Attempt burst entry after short delay — give amm_info time to propagate
-          setTimeout(async () => {
-            try {
-              const livePrice = await ammPriceFetcher.getPrice(
-                discovered.rawCurrency, discovered.issuer, discovered.rawCurrency, true
-              );
-              if (!livePrice || livePrice.priceXRP <= 0 || livePrice.poolXRP < 300) return;
-              const launchKey = `${discovered.currency}:${discovered.issuer}`;
-              if (paperTrader.hasOpenPosition(discovered.currency, discovered.issuer)) return;
-              if (tradeLocks.has(launchKey)) return;
-              tradeLocks.add(launchKey);
-              info(`[NewLaunch] AMMCreate detected: ${discovered.currency} pool=${livePrice.poolXRP.toFixed(0)} XRP — attempting entry`);
-              const launchSnapshot: any = {
-                tokenCurrency: discovered.currency, tokenIssuer: discovered.issuer,
-                priceXRP: livePrice.priceXRP, liquidityXRP: livePrice.liquidityXRP,
-                poolXrpReserve: livePrice.poolXRP,
-                buyCount5m: 0, sellCount5m: 0, isNewLaunch: true, tokenAgeMs: 0,
-              };
-              const launchToken = { currency: discovered.currency, issuer: discovered.issuer, rawCurrency: discovered.rawCurrency, lastUpdated: Date.now() } as any;
-              const launchTp = runtimeLearning.getTpTargets('burst');
-              tradeDecisionEngine.decide({
-                currency: discovered.currency, issuer: discovered.issuer, rawCurrency: discovered.rawCurrency,
-                snapshot: launchSnapshot, signalType: 'burst', signalScore: 0,
-                bankrollXRP: paperTrader.getState().bankrollXRP,
-                openPositions: paperTrader.getOpenPositionsSummary().length,
-                dailyPnL: paperTrader.getState().dailyPnL,
-                openPositionKeys: new Set(paperTrader.getOpenPositionsSummary().map(p => `${p.tokenCurrency}:${p.tokenIssuer}`)),
-                blocklist: BURST_TRADE_BLOCKLIST,
-              }).then(decision => {
-                tradeLocks.delete(launchKey);
-                if (decision.outcome === 'REJECTED') {
-                  debug(`[NewLaunch] TDE rejected ${discovered.currency}: ${decision.rejectReason}`);
-                  return;
-                }
-                const trade = paperTrader.tryOpenBurstTrade(
-                  launchToken, launchSnapshot,
-                  `[NEW_LAUNCH] AMMCreate pool=${livePrice.poolXRP.toFixed(0)} XRP`,
-                  launchTp, decision.sizeXRP
-                );
-                if (trade) {
-                  trade.tradeProfile = 'NEW_LAUNCH';
-                  trade.tradeSource = 'burst';
-                  db.updatePaperTrade(trade);
-                  paperTrader.setPositionProfile(discovered.currency, discovered.issuer, 'NEW_LAUNCH' as any);
-                  diagnostics.markTradeOpened(trade.tokenCurrency, trade.tokenIssuer, 'burst');
-                  setTimeout(() => sendAlert(telegramAlerter, db, {
-                    type: 'paper_trade_opened',
-                    tokenCurrency: discovered.currency, tokenIssuer: discovered.issuer,
-                    paperTrade: trade, tradeProfileName: 'NEW_LAUNCH', tradeSource: 'burst',
-                    poolXrpReserve: livePrice.poolXRP, slippage: decision.slippage,
-                    decisionSizeXRP: decision.sizeXRP,
-                    message: `🆕 New launch entry (AMMCreate): ${discovered.currency}`,
-                  }, config), 0);
-                }
-              }).catch(err => { warn(`[NewLaunch] TDE error: ${err}`); tradeLocks.delete(launchKey); });
-            } catch (err) { warn(`[NewLaunch] entry error: ${err}`); }
-          }, 3000); // 3s delay for amm_info to propagate
-        }
+      // AMMCreate proves a new pool exists, NOT that buyers have arrived.
+      // Register immediately for first-trade burst monitoring, but no blind
+      // market entry. Distinct verified buys must arrive afterward.
+      if (discovered.source === 'amm_pool') {
+        burstDetector.registerNewLaunch(
+          discovered.rawCurrency, discovered.issuer, discovered.currency
+        );
+        info(`[NewLaunch] Watching verified AMMCreate for ${discovered.currency}; no entry before buyer confirmation`);
       }
     }
 
@@ -704,7 +635,7 @@ async function main() {
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
     whaleTracker, liveValidator, socialDetector, runtimeLearning, multiTimeframeScorer,
-    missedOpportunityTracker, tradeDecisionEngine, BURST_TRADE_BLOCKLIST
+    missedOpportunityTracker, tradeDecisionEngine, BURST_TRADE_BLOCKLIST, manualBlacklist
   );
 
   startHealthCheck(xrplClient, buyPressureTracker, paperTrader);
@@ -914,7 +845,8 @@ function startPeriodicScan(
   multiTimeframeScorer: MultiTimeframeScorer,
   missedOpportunityTracker: import('./market/missedOpportunityTracker').MissedOpportunityTracker,
   tradeDecisionEngine: import('./execution/tradeDecisionEngine').TradeDecisionEngine,
-  BURST_TRADE_BLOCKLIST: Set<string>
+  BURST_TRADE_BLOCKLIST: Set<string>,
+  manualBlacklist: OperatorBlacklist
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.SCAN_BATCH_SIZE || '10', 10) || 10)); // Configurable scanner concurrency
@@ -971,7 +903,7 @@ function startPeriodicScan(
           batch.map(async (token) => {
             try {
               if (tokenDiscovery.isSpamIssuer(token.issuer)) {
-                return { token, skipped: true };
+                debug(`[Discovery] High-frequency issuer ${token.issuer}; preserve eligibility and evaluate actual token risk`);
               }
 
               const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
@@ -1006,6 +938,10 @@ function startPeriodicScan(
               if (!snapshot) return { token, snapshot: null };
 
               // Fix 3: Inject new wallet data into snapshot for scorer
+              (snapshot as any).poolTokens = ammPrice?.poolTokens;
+              (snapshot as any).tradingFeeUnits = ammPrice?.tradingFee;
+              (snapshot as any).priceObservedAtMs = ammPrice?.observedAtMs;
+              (snapshot as any).priceSource = ammPrice?.source;
               (snapshot as any).newWalletBuys = pressure.newWalletBuys;
               (snapshot as any).newWalletPercent = pressure.newWalletPercent;
               (snapshot as any).buySellRatio = pressure.buySellRatio;
@@ -1047,7 +983,7 @@ function startPeriodicScan(
         // QUICK WIN #5: Batch DB writes in transaction
         db.transaction(() => {
           for (const result of results) {
-            if (result.status !== 'fulfilled' || !result.value || result.value.skipped) continue;
+            if (result.status !== 'fulfilled' || !result.value) continue;
             const { token, snapshot, risks, score } = result.value;
             if (!snapshot || !risks || !score) continue;
 
@@ -1082,39 +1018,11 @@ function startPeriodicScan(
             };
             const signalCount = Object.values(signals).filter(Boolean).length;
 
-            // Decode hex currency to its ASCII name for blocklist checks.
-            // token.currency may be raw hex (e.g. 524C5553440000...) or decoded name (e.g. RLUSD).
-            // Normalising here means one blocklist entry covers both forms.
-            const decodedAlertCurrency = (() => {
-              if (token.currency.length !== 40) return token.currency;
-              try {
-                const stripped = token.currency.replace(/00+$/, '');
-                const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-                return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : token.currency;
-              } catch { return token.currency; }
-            })();
-
-            // Established/stablecoin tokens — never alert regardless of score or momentum
-            const ALERT_BLOCKLIST = new Set([
-              // Fiat / stablecoins
-              'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
-              // L1 / ecosystem tokens
-              'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-              // Confirmed established XRPL projects (operator-verified)
-              'OCT', 'SHX', 'MXI', 'CORE',
-            ]);
-            // Also filter brand-impersonation hex tokens (e.g. "ARK Invest XRP ETF", "Deutsche Bank")
-            const BRAND_KEYWORDS = [
-              'invest', 'etf', 'bank', 'financial', 'finance', 'capital', 'fund', 'asset',
-              'deutsche', 'blackrock', 'vanguard', 'fidelity', 'grayscale', 'nasdaq', 'nyse',
-              'federal', 'reserve', 'treasury', 'sec ', 'cftc', 'imf', 'swift',
-              'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
-            ];
-            const isBrandImpersonation = (() => {
-              const lower = decodedAlertCurrency.toLowerCase();
-              return BRAND_KEYWORDS.some(kw => lower.includes(kw));
-            })();
-            const isBlocklisted = ALERT_BLOCKLIST.has(decodedAlertCurrency) || isBrandImpersonation;
+            // No preinstalled stablecoin, ecosystem, brand or keyword blacklist.
+            // Only the operator's exact manually chosen entries are blocked.
+            const isBlocklisted = manualBlacklist.isBlocked(
+              token.currency, token.issuer, token.rawCurrency
+            );
 
             // Minimum wallet breadth gate: require at least 2 unique buyers in the
             // live window before alerting. Stops single-wallet manipulation from
@@ -1255,7 +1163,8 @@ function startPeriodicScan(
         // FIX #34: Pre-entry live AMM check — snapshot up to 90s stale.
         // Abort if AMM gone or pool drained >60% since scan.
         const _live = await ammPriceFetcher.getPrice(
-          token.rawCurrency || token.currency, token.issuer, token.rawCurrency, true
+          token.rawCurrency || token.currency, token.issuer, token.rawCurrency, true,
+          process.env.BOT_USE_RESERVE_QUOTES === '1'
         );
         if (!_live || _live.priceXRP <= 0) {
           warn(`[PreEntry] ${token.currency} — no live AMM price, aborting scored entry`);
@@ -1272,7 +1181,9 @@ function startPeriodicScan(
         const burstTpM = runtimeLearning.getTpTargets('burst');
         const trade = paperTrader.tryOpenBurstTrade(
           token,
-          { ...snapshot, priceXRP: _live.priceXRP, poolXrpReserve: _live.poolXRP },
+          { ...snapshot, priceXRP: _live.priceXRP, poolXrpReserve: _live.poolXRP,
+             poolTokens:_live.poolTokens,tradingFeeUnits:_live.tradingFee,
+             priceObservedAtMs:_live.observedAtMs,priceSource:_live.source },
           `[MOMENTUM] ${entryReason} | profile: ${decision.profile.name}`,
           burstTpM, decision.sizeXRP
         );
@@ -1356,8 +1267,10 @@ function startPeriodicScan(
       // (tokens that got pruned from the scan list but still have open trades)
       if (paperTrader && paperTrader.getOpenPositions().length > 0) {
         const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
-          const p = await ammPriceFetcher.getPrice(currency, issuer, rawCurrency);
-          return p?.priceXRP ?? null;
+          const p = await ammPriceFetcher.getPrice(
+            currency,issuer,rawCurrency,true,process.env.BOT_USE_RESERVE_QUOTES === '1'
+          );
+          return p ?? null;
         });
         for (const ct of orphanClosed) {
           totalTrades++;

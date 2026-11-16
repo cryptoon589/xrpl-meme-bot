@@ -26,6 +26,7 @@ import {
   estimateRoundTripLossPct,
 } from './tradeProfiles';
 import { diagnostics } from '../diagnostics/diagnostics';
+import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -84,7 +85,11 @@ export class TradeDecisionEngine {
 
     // ── 1. Blocklist checks ────────────────────────────────────────────────
     const decodedCurrency = this.decodeCurrency(input.rawCurrency || input.currency);
-    if (input.blocklist.has(input.currency) || input.blocklist.has(decodedCurrency)) {
+    const exact = [input.currency, decodedCurrency, input.rawCurrency || ''];
+    const tokens = new Set(exact.map(x => x.toUpperCase()));
+    const blocked = [...tokens].some(x =>
+      input.blocklist.has(x) || input.blocklist.has(x + ':' + input.issuer));
+    if (blocked) {
       return reject(0, 0, `Token blocklisted: ${input.currency}`);
     }
 
@@ -141,9 +146,16 @@ export class TradeDecisionEngine {
     // ── 6. Dynamic sizing ──────────────────────────────────────────────────
     const sizeXRP = calcProfileSize(profile, poolXrpReserve, input.bankrollXRP);
 
-    if (sizeXRP < this.config.minTradeXRP) {
+    // A deliberately opt-in PAPER-only small new-launch probe can be smaller
+    // than the generic 5 XRP floor, to respect shallow early pool depth.
+    // This is NOT automatically enabled and has no effect on LIVE mode.
+    const minAllowedXRP = this.config.mode === 'PAPER' &&
+      profile.name === 'NEW_LAUNCH' &&
+      process.env.BOT_ENABLE_SMALL_LAUNCH_PROBES === '1'
+      ? 2 : this.config.minTradeXRP;
+    if (sizeXRP < minAllowedXRP) {
       return reject(sizeXRP, 0,
-        `Size too small: ${sizeXRP.toFixed(2)} XRP < minTradeXRP ${this.config.minTradeXRP}`);
+        `Size too small: ${sizeXRP.toFixed(2)} XRP < minTradeXRP ${minAllowedXRP}`);
     }
 
     if (input.bankrollXRP < sizeXRP) {
@@ -152,14 +164,27 @@ export class TradeDecisionEngine {
     }
 
     // ── 7. Slippage check (uses poolXrpReserve, not TVL) ──────────────────
-    const slippage = sizeXRP / (poolXrpReserve + sizeXRP); // CPMM formula
+    // Opt-in PAPER experiment: full-pool token + XRP reserves and fee units,
+    // timestamped AMM quote only. Absent/stale reserve data is a temporary
+    // rejection, NEVER a new token blacklist entry.
+    const useDepthQuotes = this.config.mode === 'PAPER' &&
+      process.env.BOT_USE_RESERVE_QUOTES === '1';
+    const depthQuote = useDepthQuotes
+      ? quotePaperRoundTrip(sizeXRP,input.snapshot as any) : null;
+    if (useDepthQuotes && !depthQuote) {
+      return reject(sizeXRP,0,'No fresh complete AMM reserves for PAPER execution');
+    }
+    const slippage = depthQuote
+      ? depthQuote.entryImpactPct/100
+      : sizeXRP / (poolXrpReserve + sizeXRP); // legacy model when feature off
     if (slippage > profile.maxSlippage) {
       return reject(sizeXRP, slippage,
         `Slippage too high: ${(slippage * 100).toFixed(2)}% > ${(profile.maxSlippage * 100).toFixed(1)}%`);
     }
 
     // ── 8. Round-trip loss check ───────────────────────────────────────────
-    const roundTripLossPct = estimateRoundTripLossPct(slippage);
+    const roundTripLossPct = depthQuote
+      ? depthQuote.roundTripLossPct : estimateRoundTripLossPct(slippage);
     if (roundTripLossPct > profile.maxRoundTripLossPct) {
       return reject(sizeXRP, slippage,
         `Round-trip loss too high: ${roundTripLossPct.toFixed(2)}% > ${profile.maxRoundTripLossPct}%`);

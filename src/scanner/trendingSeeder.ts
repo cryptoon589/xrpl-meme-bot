@@ -36,19 +36,8 @@ const XRPLMETA_BASE = 'https://s1.xrplmeta.org';
 const FETCH_LIMIT   = 50;   // tokens per sort mode
 const MIN_TAKERS    = 5;    // require at least 5 unique traders to avoid wash bots
 
-// Tokens to ignore (stablecoins, L1s, established projects)
-const SEED_BLOCKLIST = new Set([
-  'USD', 'USDC', 'USDT', 'RLUSD', 'EUR', 'BTC', 'ETH', 'CNY', 'GBP', 'JPY', 'AUD', 'CAD',
-  'XAH', 'XLM', 'SGB', 'FLR', 'EVR', 'CSC', 'DRO', 'SOLO',
-  'OCT', 'SHX', 'MXI', 'CORE',
-]);
-
-// Brand-impersonation keywords — filter hex tokens whose decoded name contains these
-const BRAND_KEYWORDS = [
-  'invest', 'etf', 'bank', 'financial', 'finance', 'capital', 'fund', 'asset',
-  'deutsche', 'blackrock', 'vanguard', 'fidelity', 'grayscale', 'nasdaq', 'nyse',
-  'federal', 'reserve', 'treasury', 'coinbase', 'binance', 'kraken', 'bitfinex', 'robinhood',
-];
+// Discovery never creates a blacklist or silently excludes tokens by keyword.
+// Individual entry decisions still require liquidity, momentum and risk gates.
 
 export class TrendingSeeder {
   private intervalMs: number;
@@ -102,16 +91,9 @@ export class TrendingSeeder {
           const key = `${currency}:${issuer}`;
           if (seen.has(key)) continue; // already from another sort mode
 
-          // Blocklist check
-          if (SEED_BLOCKLIST.has(currency)) continue;
-
           // Decode name
           const name = this.decodeName(t);
           if (!name) continue;
-
-          // Brand-impersonation filter
-          const lower = name.toLowerCase();
-          if (BRAND_KEYWORDS.some(kw => lower.includes(kw))) continue;
 
           const metrics  = t.metrics || {};
           const takers   = Number(metrics.takers_24h   || 0);
