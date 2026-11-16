@@ -61,7 +61,7 @@ export class AMMPriceFetcher {
    * Tries AMM first, falls back to order book.
    * bypassNullCache: force a live fetch even if token is null-cached (used for open positions).
    */
-  async getPrice(currency: string, issuer: string, rawCurrency?: string, bypassNullCache = false): Promise<TokenPrice | null> {
+  async getPrice(currency: string, issuer: string, rawCurrency?: string, bypassNullCache = false, forceFresh = false): Promise<TokenPrice | null> {
     const key = `${currency}:${issuer}`;
     const now = Date.now();
     // Open positions always bypass null cache - we need a price to manage exit
@@ -71,7 +71,7 @@ export class AMMPriceFetcher {
     // FIX #33: use shorter TTL for open positions — exit accuracy matters more than scan efficiency.
     const cacheTtl = isOpen ? this.OPEN_POS_CACHE_TTL_MS : this.CACHE_TTL_MS;
     const cached = this.cache.get(key);
-    if (cached && now - cached.fetchedAt < cacheTtl) {
+    if (!forceFresh && cached && now - cached.fetchedAt < cacheTtl) {
       return cached.price;
     }
 
