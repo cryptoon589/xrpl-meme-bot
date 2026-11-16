@@ -83,7 +83,9 @@ export class BurstDetector {
     poolXRP: number,
     priceXRP: number,
     tokenAgeMs: number,    // ms since token was first seen by the detector
-    baselinePrice: number | null  // price at FIRST burst alert (null if this IS the first)
+    baselinePrice: number | null, // price at FIRST burst alert
+    reserveQuote?: {poolTokens:number;tradingFeeUnits:number;
+      priceObservedAtMs:number;priceSource:'amm'}
   ) => void;
 
   constructor(xrplClient: XRPLClient, alerter: TelegramAlerter, db: Database) {
@@ -469,7 +471,12 @@ export class BurstDetector {
           state.displayName, state.issuer, state.rawCurrency,
           poolXRP * 2, priceXRP,
           tokenAgeMs,
-          isFirstBurst ? null : state.baselinePrice  // null = this IS the first burst
+          isFirstBurst ? null : state.baselinePrice,
+          ammInfo.poolTokens != null && ammInfo.tradingFeeUnits != null &&
+            ammInfo.priceObservedAtMs != null
+            ? {poolTokens:ammInfo.poolTokens,tradingFeeUnits:ammInfo.tradingFeeUnits,
+               priceObservedAtMs:ammInfo.priceObservedAtMs,priceSource:'amm'}
+            : undefined
         );
       }
 
@@ -484,7 +491,8 @@ export class BurstDetector {
   private async fetchAMMInfo(
     rawCurrency: string,
     issuer: string
-  ): Promise<{ priceXRP: number; poolXRP: number; tradingFee: number } | null> {
+  ): Promise<{ priceXRP: number; poolXRP: number; poolTokens: number;
+    tradingFee: number; tradingFeeUnits: number; priceObservedAtMs: number } | null> {
     const currencyCode = normalizeIssuedCurrency(rawCurrency);
     if (!currencyCode) return null;
     // Try up to 3 times with 1s delay between attempts (WebSocket may be reconnecting)
@@ -526,7 +534,8 @@ export class BurstDetector {
         const priceXRP   = poolXRP / tokenValue;
         const tradingFee = (amm.trading_fee || 0) / 1000;
 
-        return { priceXRP, poolXRP, tradingFee };
+        return { priceXRP,poolXRP,poolTokens:tokenValue,tradingFee,
+          tradingFeeUnits:amm.trading_fee || 0,priceObservedAtMs:Date.now() };
       } catch (err: any) {
         if (attempt < 3) {
           debug(`fetchAMMInfo attempt ${attempt} failed for ${rawCurrency}: ${err?.message} — retrying`);
