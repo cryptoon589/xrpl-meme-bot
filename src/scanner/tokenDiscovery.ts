@@ -7,6 +7,7 @@ import { XRPLClient } from '../xrpl/client';
 import { TrackedToken, TxEvent } from '../types';
 import { info, debug, warn } from '../utils/logger';
 import { Database } from '../db/database';
+import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 
 
 // Discovery has no automatic permanent blacklist. XRP itself is the native
@@ -199,6 +200,16 @@ export class TokenDiscovery {
         this.db.saveToken(existing);
         info(`[Discovery] Restored exact raw XRPL issue code for ${token.currency} issuer ${token.issuer.slice(0,11)}…`);
       }
+      return false;
+    }
+    // The same issued asset may be represented as either display "ARMY" or
+    // 40-hex currency in older rows. Never track/trade both aliases as if
+    // they were independent assets with independent position limits.
+    const candidateIssue=normalizeIssuedCurrency(token.rawCurrency || token.currency);
+    if (candidateIssue && [...this.trackedTokens.values()].some(prev =>
+      prev.issuer===token.issuer &&
+      normalizeIssuedCurrency(prev.rawCurrency || prev.currency)===candidateIssue)) {
+      debug(`[Discovery] Skipped duplicate display/raw issue alias for ${token.currency} issuer ${token.issuer.slice(0,11)}…`);
       return false;
     }
     this.trackedTokens.set(key, token);
