@@ -28,6 +28,9 @@ export class RuntimeLearning {
   }
 
   private load(): void {
+    // A removed/malformed file must revoke previously loaded adaptation.
+    this.recs = null;
+    this.loadedAt = Date.now();
     try {
       if (!fs.existsSync(RECOMMENDATIONS_PATH)) return;
       const raw = fs.readFileSync(RECOMMENDATIONS_PATH, 'utf8');
