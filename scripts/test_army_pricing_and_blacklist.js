@@ -32,7 +32,7 @@ assert.equal(XRP_ARMY.issuer,'rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC');
 
 const reversed={amount:official.amount2,amount2:official.amount,trading_fee:500};
 approx(parseXrpIssuedAmm(reversed,XRP_ARMY.rawCurrency,XRP_ARMY.issuer).priceXRP,.005);
-for(const bad of [
+for(const [caseNo,bad] of [
  {...official,amount2:{...official.amount2,issuer:'rDifferentIssuer'}},
  {...official,amount2:{...official.amount2,currency:'41524d5800000000000000000000000000000000'}},
  {...official,amount:'NaN'},
@@ -41,7 +41,7 @@ for(const bad of [
  {...reversed,asset_frozen:true},
  {...official,trading_fee:1001},
  {...official,trading_fee:-1},
-]) assert.equal(parseXrpIssuedAmm(bad,XRP_ARMY.rawCurrency,XRP_ARMY.issuer),null);
+]).entries()) assert.equal(parseXrpIssuedAmm(bad,XRP_ARMY.rawCurrency,XRP_ARMY.issuer),null,'invalid AMM case '+caseNo);
 
 const blacklist=OperatorBlacklist.load(path.resolve('state/manual_token_blacklist.json'));
 assert.deepEqual(blacklist.list().map(t=>t.currency).sort(),['CORE','MXI','OCT','SHX']);
