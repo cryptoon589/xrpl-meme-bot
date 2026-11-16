@@ -84,7 +84,11 @@ export class TradeDecisionEngine {
 
     // ── 1. Blocklist checks ────────────────────────────────────────────────
     const decodedCurrency = this.decodeCurrency(input.rawCurrency || input.currency);
-    if (input.blocklist.has(input.currency) || input.blocklist.has(decodedCurrency)) {
+    const exact = [input.currency, decodedCurrency, input.rawCurrency || ''];
+    const tokens = new Set(exact.map(x => x.toUpperCase()));
+    const blocked = [...tokens].some(x =>
+      input.blocklist.has(x) || input.blocklist.has(x + ':' + input.issuer));
+    if (blocked) {
       return reject(0, 0, `Token blocklisted: ${input.currency}`);
     }
 
