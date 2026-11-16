@@ -77,6 +77,8 @@ def main():
                 HUNTERIX_MANUAL_BLOCKLIST_FILE=str(manifest.resolve()),
                 HUNTERIX_LEGACY_SOURCE_DB_PATH=str(legacy.resolve()),
                 HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256=digest,
+                XRPL_WS_URL='wss://xrplcluster.com',
+                HUNTERIX_VNEXT_XRPL_WS_URL='wss://xrplcluster.com',
                 BOT_USE_RESERVE_QUOTES='1',BOT_ENABLE_LIQUIDITY_LOSS_GUARD='1',
                 BOT_ENABLE_STARTUP_PRUNE='0',BOT_ENABLE_OBSERVATION_RETENTION='1',
                 BOT_ENABLE_RECOVERY_DISK_GUARD='1',
