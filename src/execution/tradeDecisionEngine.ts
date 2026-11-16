@@ -27,6 +27,7 @@ import {
 } from './tradeProfiles';
 import { diagnostics } from '../diagnostics/diagnostics';
 import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
+import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -82,6 +83,12 @@ export class TradeDecisionEngine {
     const profile = this.selectProfile(input);
     const reject = (sizeXRP: number, slippage: number, reason: string): DecisionResult =>
       this.reject(input.signalType, profile, sizeXRP, slippage, reason);
+
+    // Entry eligibility is distinct from the four-token manual blacklist.
+    if (this.config.mode === 'PAPER' && process.env.BOT_PAPER_MEME_ONLY === '1') {
+      const policy=paperMemeEntryDecision(input.currency,input.issuer,input.rawCurrency);
+      if (!policy.allowed) return reject(0,0,'Meme-only universe: '+policy.reason);
+    }
 
     // ── 1. Blocklist checks ────────────────────────────────────────────────
     const decodedCurrency = this.decodeCurrency(input.rawCurrency || input.currency);
