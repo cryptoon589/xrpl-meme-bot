@@ -67,9 +67,116 @@ export class BuyPressureTracker {
     } else if (txType === 'Payment') {
       this.processPayment(t, meta);
     }
-    // AMMDeposit / AMMWithdraw are liquidity management, NOT actual token
-    // purchases or disposals. Never use them to inflate unique buyer or
-    // early momentum counts.
+    // Liquidity deposits/withdrawals are not organic purchases and cannot
+    // boost early buyer momentum; handle them separately in AMM risk monitors.
+  }
+
+  private processOffer(t: any, meta: any): void {
+    // Look at affected nodes to find actual token transfers
+    const nodes: any[] = meta.AffectedNodes || [];
+
+    for (const node of nodes) {
+      const modified = node.ModifiedNode || node.CreatedNode || node.DeletedNode;
+      if (!modified) continue;
+
+      // Look for RippleState changes (token balance changes)
+      if (modified.LedgerEntryType !== 'RippleState') continue;
+
+      const prev = modified.PreviousFields;
+      const curr = modified.FinalFields;
+      if (!prev?.Balance || !curr?.Balance) continue;
+
+      const currency = curr.Balance?.currency || curr.LowLimit?.currency;
+      const issuer = curr.LowLimit?.issuer || curr.HighLimit?.issuer;
+      if (!currency || currency === 'XRP') continue;
+
+      // Determine direction from balance change
+      const prevVal = parseFloat(prev.Balance.value || prev.Balance || '0');
+      const currVal = parseFloat(curr.Balance.value || curr.Balance || '0');
+      const delta = currVal - prevVal;
+
+      if (delta === 0) continue;
+
+      // Estimate XRP value from TakerPays/TakerGets
+      const xrpValue = this.estimateXRPFromOffer(t, Math.abs(delta));
+
+      const wallet = t.Account;
+      const side: 'buy' | 'sell' = delta > 0 ? 'buy' : 'sell';
+
+      this.recordTrade(`${currency}:${issuer}`, wallet, side, xrpValue);
+    }
+  }
+
+  private processPayment(t: any, meta: any): void {
+    const amount = t.Amount;
+    if (!amount || typeof amount === 'string') return; // XRP payment, skip
+
+    const currency = amount.currency;
+    const issuer = amount.issuer;
+    if (!currency || currency === 'XRP') return;
+
+    const xrpValue = this.estimateXRPFromMeta(meta);
+    const wallet = t.Account;
+
+    // Payment sender is selling, destination is buying
+    this.recordTrade(`${currency}:${issuer}`, wallet, 'sell', xrpValue);
+    if (t.Destination) {
+      this.recordTrade(`${currency}:${issuer}`, t.Destination, 'buy', xrpValue);
+    }
+  }
+
+  private recordTrade(
+    key: string,
+    wallet: string,
+    side: 'buy' | 'sell',
+    volumeXRP: number
+  ): void {
+    const now = Date.now();
+
+    if (!this.events.has(key)) this.events.set(key, []);
+    if (!this.knownWallets.has(key)) this.knownWallets.set(key, new Set());
+
+    this.events.get(key)!.push({ wallet, side, volumeXRP, timestamp: now });
+
+    // Cap knownWallets per token to prevent unbounded memory growth
+    const known = this.knownWallets.get(key)!;
+    if (known.size < this.MAX_KNOWN_WALLETS) {
+      known.add(wallet);
+    }
+    this.lastTrade.set(key, now);
+
+    // Prune old events beyond window
+    this.pruneOldEvents(key, now);
+
+    // Real-time momentum detection — fire callback when signals cross threshold
+    if (side === 'buy' && this.onMomentumDetected) {
+      const colonIdx = key.indexOf(':');
+      const currency = key.substring(0, colonIdx);
+      const issuer   = key.substring(colonIdx + 1);
+      const lastFire = this.momentumCooldown.get(key) ?? 0;
+      if (Date.now() - lastFire > 5 * 60 * 1000) { // 5 min cooldown per token
+        const snap = this.getSnapshot(currency, issuer);
+        // Lowered: 100 XRP fired too late (move already over). 40 XRP catches early legs.
+        // uniqueBuyers 3→2: 2 distinct wallets is sufficient signal for meme pumps.
+        if (snap.uniqueBuyers >= 2 && snap.buySellRatio >= 0.65 && snap.buyVolumeXRP >= 40) {
+          this.momentumCooldown.set(key, Date.now());
+          this.onMomentumDetected(currency, issuer, snap);
+        }
+      }
+    }
+
+    // Prune least-active tokens if we're tracking too many
+    if (this.events.size > this.MAX_TOKENS_TRACKED) {
+      this.pruneLeastActiveTokens();
+    }
+  }
+
+  private pruneOldEvents(key: string, now: number): void {
+    const events = this.events.get(key);
+    if (!events) return;
+    const cutoff = now - this.WINDOW_MS;
+    const pruned = events.filter(e => e.timestamp >= cutoff);
+    this.events.set(key, pruned);
   }
 
   /**
