@@ -983,7 +983,7 @@ function startPeriodicScan(
         // QUICK WIN #5: Batch DB writes in transaction
         db.transaction(() => {
           for (const result of results) {
-            if (result.status !== 'fulfilled' || !result.value || result.value.skipped) continue;
+            if (result.status !== 'fulfilled' || !result.value) continue;
             const { token, snapshot, risks, score } = result.value;
             if (!snapshot || !risks || !score) continue;
 
