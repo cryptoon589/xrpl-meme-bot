@@ -137,6 +137,8 @@ def check_runtime(epoch, manifest, legacy, digest):
         'observation retention':os.environ.get('BOT_ENABLE_OBSERVATION_RETENTION')=='1',
         'disk guard':os.environ.get('BOT_ENABLE_RECOVERY_DISK_GUARD')=='1',
         'separate XRPL stream':os.environ.get('XRPL_SEPARATE_STREAM')=='1',
+        'public RPC max inflight (2)':os.environ.get('XRPL_RPC_MAX_INFLIGHT')=='2',
+        'public RPC pacing (3/sec)':os.environ.get('XRPL_RPC_MAX_PER_SEC')=='3',
         'unvalidated learning disabled':os.environ.get('BOT_ENABLE_VALIDATED_LEARNING')!='1',
     }
     for label, passed in checks.items():
