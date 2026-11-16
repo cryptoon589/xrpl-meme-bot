@@ -21,9 +21,9 @@ from datetime import datetime, timezone
 DEFAULT_RECOVERY_DB = Path('/root/xrpl-meme-bot/data/meme_bot.recovery.db')
 DB_PATH = Path(os.environ.get('DAILY_REPORT_DB_PATH', str(DEFAULT_RECOVERY_DB))).expanduser().resolve()
 import re
-ALLOWED_DB_NAME = DB_PATH.name == 'meme_bot.recovery.db' or re.fullmatch(
-    r'meme_bot\\.paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?\\.db', DB_PATH.name
-)
+ALLOWED_DB_NAME = DB_PATH.name == 'meme_bot.recovery.db' or bool(re.fullmatch(
+    r'meme_bot[.]paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?[.]db', DB_PATH.name
+))
 if not ALLOWED_DB_NAME:
     raise SystemExit('Refusing daily PAPER report from non-recovery/non-epoch SQLite database')
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
@@ -67,6 +67,14 @@ def main():
     now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     day_ms = 24 * 60 * 60 * 1000
     week_ms = 7 * day_ms
+
+    cash_label = "not audited (legacy cash/restart reconciliation pending)"
+    try:
+        row = c.execute("SELECT bankroll_xrp FROM paper_cash_state WHERE singleton_id=1").fetchone()
+        if row is not None and row[0] is not None and float(row[0]) >= 0:
+            cash_label = f"{float(row[0]):.2f} XRP (verified PAPER cash checkpoint; not total equity)"
+    except sqlite3.OperationalError:
+        pass  # historical report database has no checkpoint table
 
     # --- Overall stats (excl ghosts) ---
     c.execute("""SELECT COUNT(*),
@@ -184,7 +192,7 @@ def main():
 
 <b>Mode:</b> PAPER ONLY — live trading disabled
 <b>Database:</b> {DB_PATH.name} (isolated PAPER history)
-<b>Bankroll:</b> not audited (recovery/restart cash reconciliation pending)
+<b>Spendable PAPER cash:</b> {cash_label}
 <b>P&amp;L caveat:</b> historical recorded PAPER outcomes; entry-fee, liquidity and fill accuracy unverified
 
 <b>Last 24h (closed in window)</b>
