@@ -895,7 +895,7 @@ function startPeriodicScan(
           batch.map(async (token) => {
             try {
               if (tokenDiscovery.isSpamIssuer(token.issuer)) {
-                return { token, skipped: true };
+                debug(`[Discovery] High-frequency issuer ${token.issuer}; preserve eligibility and evaluate actual token risk`);
               }
 
               const pool = ammScanner.findPoolByToken(token.currency, token.issuer);
