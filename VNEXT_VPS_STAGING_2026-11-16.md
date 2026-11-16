@@ -37,3 +37,15 @@ The diagnostic reads only XRPL_WS_URL from the original .env, never sources the 
 ## Future cutover remains separate and gated
 
 After Phase 2 results, prepare a new simulated PAPER epoch with create-only mode and run vnext_preflight.py --initial-cutover. An operator-approved blacklist hash, Telegram configuration, old-position watcher and rollback procedure are mandatory before stopping old PAPER and starting vNext PAPER. Never run both simultaneously. Passing AMM pricing checks does not establish sellability or profits.
+
+## Stage status and provider throttling diagnostic
+
+Phase 1 succeeded on the original VPS: stage backup 851 trades, 896 tokens, **3** legacy unresolved PAPER positions (rCODE 15%, XRPB 40%, CORE 50%). Phase 2 build/fixture tests passed, but the original endpoint closed the ARMY WebSocket with `threshold exceeded`, consistent with documented XRPL server rate limiting. This is not a token blacklist or proven absent pool.
+
+The next phase is **one read-only request against a separate documented public Mainnet provider**, from the staged checkout only. Do not repeatedly retry the old throttled endpoint. After fetching the latest release commit into the independent worktree and rebuilding, run:
+
+```bash
+XRPL_WS_URL=wss://xrplcluster.com timeout 30s node scripts/diagnose_army_price.js
+```
+
+The latest CLI reports rate-limit vs transport failure vs no-pool separately. vNext now requires a separately selected/pinned XRPL WebSocket URL, conservative RPC pacing, and 120s backoff for 1008. **Neither PM2 nor old .env should be edited during this check.** A successful spot quote is still not proof of executable sell liquidity.
