@@ -13,6 +13,7 @@ import { TradeProfileName, PROFILES } from '../execution/tradeProfiles';
 import { AMMPriceFetcher } from '../market/ammPriceFetcher';
 import { closedEconomicPnl, indicativeOpenPnl, partialRealizedPnl, reconstructedRemainingTokens } from './paperAccounting';
 import { estimateAmmSell } from './ammExecutionQuote';
+import { quotePaperBuy, quotePaperSell } from './reservePaperExecution';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -120,8 +121,9 @@ export class PaperTrader {
 
     // Require minimum XRP-side pool reserve, not total TVL.
     const poolXrpReserve = this.getPoolXrpReserve(snapshot);
-    if (poolXrpReserve < 500) {
-      debug(`Burst trade skipped: pool too shallow (${poolXrpReserve.toFixed(0)} XRP < 500 XRP)`);
+    const requiredReserve = (snapshot as any)?.isNewLaunch === true ? 300 : 500;
+    if (poolXrpReserve < requiredReserve) {
+      debug(`Burst trade skipped: pool too shallow (${poolXrpReserve.toFixed(0)} XRP < ${requiredReserve} XRP)`);
       return null;
     }
 
@@ -193,9 +195,16 @@ export class PaperTrader {
     }
 
     const entryPrice = snapshot.priceXRP;
-    const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
+    const depthEnabled = process.env.BOT_USE_RESERVE_QUOTES === '1';
+    const depthBuy = depthEnabled ? quotePaperBuy(tradeSizeXRP,snapshot as any) : null;
+    if (depthEnabled && !depthBuy) {
+      warn('[PAPER] Entry refused: no fresh complete AMM reserve quote');
+      return null;
+    }
+    const slippage = depthBuy
+      ? depthBuy.priceImpactPct / 100 : this.estimateSlippage(tradeSizeXRP, snapshot);
     const effectivePrice = entryPrice * (1 + slippage);
-    const tokensBought = tradeSizeXRP / effectivePrice;
+    const tokensBought = depthBuy ? depthBuy.amountOut : tradeSizeXRP / effectivePrice;
     const fees = tradeSizeXRP * 0.003;
 
     const trade: PaperTrade = {
@@ -384,9 +393,16 @@ export class PaperTrader {
       Math.min(this.config.maxTradeXRP, MAX_SCORED_TRADE_XRP * convictionMultiplier)
     );
     const entryPrice = snapshot.priceXRP;
-    const slippage = this.estimateSlippage(tradeSizeXRP, snapshot);
+    const depthEnabled = process.env.BOT_USE_RESERVE_QUOTES === '1';
+    const depthBuy = depthEnabled ? quotePaperBuy(tradeSizeXRP,snapshot as any) : null;
+    if (depthEnabled && !depthBuy) {
+      warn('[PAPER] Entry refused: no fresh complete AMM reserve quote');
+      return null;
+    }
+    const slippage = depthBuy
+      ? depthBuy.priceImpactPct / 100 : this.estimateSlippage(tradeSizeXRP, snapshot);
     const effectivePrice = entryPrice * (1 + slippage);
-    const tokensBought = tradeSizeXRP / effectivePrice;
+    const tokensBought = depthBuy ? depthBuy.amountOut : tradeSizeXRP / effectivePrice;
     const fees = tradeSizeXRP * 0.003; // 0.3% estimated fees
 
     const trade: PaperTrade = {
@@ -863,8 +879,16 @@ export class PaperTrader {
     if (!Number.isFinite(tokensToSell) || tokensToSell < 0)
       throw new Error('[PAPER] Invalid remaining token inventory');
 
-    const slippage = this.estimateSlippage(tokensToSell * exitPrice, snapshot);
-    const grossProceeds = tokensToSell * exitPrice * (1 - slippage);
+    const depthEnabled = process.env.BOT_USE_RESERVE_QUOTES === '1';
+    const depthSell = depthEnabled ? quotePaperSell(tokensToSell,snapshot as any) : null;
+    if (depthEnabled && !depthSell) {
+      warn(`[PAPER] Sell not priced for ${key}; inventory retained, NO invented proceeds`);
+      return null;
+    }
+    const slippage = depthSell
+      ? depthSell.priceImpactPct / 100 : this.estimateSlippage(tokensToSell * exitPrice,snapshot);
+    const grossProceeds = depthSell
+      ? depthSell.amountOut : tokensToSell * exitPrice * (1 - slippage);
     const fees = grossProceeds * 0.003;
     const netProceeds = grossProceeds - fees;
     // Daily P&L is booked per executed leg; do not re-count earlier TP legs.
@@ -924,18 +948,26 @@ export class PaperTrader {
     percentOfOriginal: number,
     reason: string,
     snapshot: MarketSnapshot | null
-  ): void {
+  ): boolean {
     const position = this.openPositions.get(key);
-    if (!position || !(exitPrice > 0)) return;
+    if (!position || !(exitPrice > 0)) return false;
     const trade = position.trade;
     const actualPct = Math.min(percentOfOriginal, trade.remainingPosition);
-    if (actualPct <= 0) return;
+    if (actualPct <= 0) return false;
 
     const fractionRemaining = actualPct / trade.remainingPosition;
     const tokensToSell = position.tokensHeld * fractionRemaining;
     const nextTokensHeld = Math.max(0, position.tokensHeld - tokensToSell);
-    const slippage = this.estimateSlippage(tokensToSell * exitPrice, snapshot);
-    const proceeds = tokensToSell * exitPrice * (1 - slippage);
+    const depthEnabled = process.env.BOT_USE_RESERVE_QUOTES === '1';
+    const depthSell = depthEnabled ? quotePaperSell(tokensToSell,snapshot as any) : null;
+    if (depthEnabled && !depthSell) {
+      warn(`[PAPER] Partial sale unpriceable for ${key}; inventory and milestones unchanged`);
+      return false;
+    }
+    const slippage = depthSell
+      ? depthSell.priceImpactPct / 100 : this.estimateSlippage(tokensToSell * exitPrice, snapshot);
+    const proceeds = depthSell
+      ? depthSell.amountOut : tokensToSell * exitPrice * (1 - slippage);
     const fees = proceeds * 0.003;
     const netProceeds = proceeds - fees;
     const costBasisSold = trade.entryAmountXRP * (1 + 0.003) * (actualPct / 100);
@@ -985,6 +1017,7 @@ export class PaperTrader {
       this.recordProfileStat(position, trade);
     }
     info(`📊 Partial close: ${trade.tokenCurrency} | Sold ${actualPct}% of original | Fee-adjusted leg PnL: ${legPnlXRP.toFixed(4)} XRP | Remaining: ${nextRemaining}%`);
+    return true;
   }
 
   /**
