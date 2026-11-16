@@ -1240,7 +1240,9 @@ export class PaperTrader {
    * Called every scan cycle to catch orphaned positions (tokens pruned from scan list).
    */
   async checkAllOpenExits(
-    getPrice: (currency: string, issuer: string, rawCurrency?: string) => Promise<number | null>
+    getPrice: (currency: string, issuer: string, rawCurrency?: string) =>
+      Promise<number | { priceXRP:number; poolXRP?:number; poolTokens?:number;
+        tradingFee?:number; source?:string; observedAtMs?:number } | null>
   ): Promise<PaperTrade[]> {
     const allClosed: PaperTrade[] = [];
     const now = Date.now();
@@ -1267,7 +1269,8 @@ export class PaperTrader {
     for (let i = 0; i < positionEntries.length; i++) {
       const [key, position] = positionEntries[i];
       const { trade } = position;
-      const price = prices[i];
+      const quote = prices[i];
+      const price = typeof quote === 'number' ? quote : quote?.priceXRP ?? null;
 
       // No price — check if position has been open too long without pricing
       if (!price || price <= 0) {
@@ -1297,6 +1300,12 @@ export class PaperTrader {
         tokenIssuer: trade.tokenIssuer,
         priceXRP: price,
         liquidityXRP: null,
+        ...(quote && typeof quote !== 'number' ? {
+          poolXrpReserve:quote.poolXRP,poolTokens:quote.poolTokens,
+          tradingFeeUnits:quote.tradingFee,
+          priceObservedAtMs:quote.observedAtMs,
+          priceSource:quote.source,
+        } : {}),
         buyCount5m: 0,
         sellCount5m: 0,
       } as any;
