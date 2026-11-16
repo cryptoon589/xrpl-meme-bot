@@ -42,6 +42,7 @@ import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
 import { OperatorBlacklist } from './risk/operatorBlacklist';
+import { PRIORITY_MONITORED_ISSUES, priorityTrackedToken } from './market/priorityIssues';
 import { isLearningApproved } from './analysis/learningApproval';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
@@ -530,6 +531,17 @@ async function main() {
   }
 
   await tokenDiscovery.initialize();
+
+  // Operator-requested priority watch issues. These are existing tokens,
+  // not NEW_LAUNCH discoveries, never auto-traded and never risk-exempt.
+  // Seed BEFORE burst AMM preload and scan startup; name alone is NOT enough
+  // to identify the popular ARMY issuance.
+  for (const issue of PRIORITY_MONITORED_ISSUES) {
+    if (manualBlacklist.isBlocked(issue.currency, issue.issuer, issue.rawCurrency))
+      throw new Error('Priority issued token unexpectedly blocked by manual manifest: '+issue.currency);
+    const added = tokenDiscovery.addTrackedToken(priorityTrackedToken(issue));
+    info(`[PriorityIssue] ${issue.currency} ${issue.issuer.slice(0,11)}… raw=${issue.rawCurrency} ${added ? 'seeded' : 'already tracked'}; regular risk checks apply`);
+  }
   await ammScanner.initialize();
   await telegramAlerter.sendTestMessage();
 
