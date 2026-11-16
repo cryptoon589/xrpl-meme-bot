@@ -26,6 +26,7 @@ import {
   estimateRoundTripLossPct,
 } from './tradeProfiles';
 import { diagnostics } from '../diagnostics/diagnostics';
+import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -156,14 +157,27 @@ export class TradeDecisionEngine {
     }
 
     // ── 7. Slippage check (uses poolXrpReserve, not TVL) ──────────────────
-    const slippage = sizeXRP / (poolXrpReserve + sizeXRP); // CPMM formula
+    // Opt-in PAPER experiment: full-pool token + XRP reserves and fee units,
+    // timestamped AMM quote only. Absent/stale reserve data is a temporary
+    // rejection, NEVER a new token blacklist entry.
+    const useDepthQuotes = this.config.mode === 'PAPER' &&
+      process.env.BOT_USE_RESERVE_QUOTES === '1';
+    const depthQuote = useDepthQuotes
+      ? quotePaperRoundTrip(sizeXRP,input.snapshot as any) : null;
+    if (useDepthQuotes && !depthQuote) {
+      return reject(sizeXRP,0,'No fresh complete AMM reserves for PAPER execution');
+    }
+    const slippage = depthQuote
+      ? depthQuote.entryImpactPct/100
+      : sizeXRP / (poolXrpReserve + sizeXRP); // legacy model when feature off
     if (slippage > profile.maxSlippage) {
       return reject(sizeXRP, slippage,
         `Slippage too high: ${(slippage * 100).toFixed(2)}% > ${(profile.maxSlippage * 100).toFixed(1)}%`);
     }
 
     // ── 8. Round-trip loss check ───────────────────────────────────────────
-    const roundTripLossPct = estimateRoundTripLossPct(slippage);
+    const roundTripLossPct = depthQuote
+      ? depthQuote.roundTripLossPct : estimateRoundTripLossPct(slippage);
     if (roundTripLossPct > profile.maxRoundTripLossPct) {
       return reject(sizeXRP, slippage,
         `Round-trip loss too high: ${roundTripLossPct.toFixed(2)}% > ${profile.maxRoundTripLossPct}%`);
