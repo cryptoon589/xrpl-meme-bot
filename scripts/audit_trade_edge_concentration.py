@@ -137,6 +137,77 @@ def main():
         print("\nENTRY POOL FIELD COVERAGE FOR LIQUIDITY EXITS:",len(amounts),"/",len(liq))
         if amounts:
             print("  entry-reason reported pool median=%.0f XRP (NOT validated on-ledger)"%statistics.median(amounts))
+        print("\nTOKEN + ISSUER CONCENTRATION (NOT TICKER ALONE)")
+        keyed = defaultdict(list)
+        for trade in sample:
+            token_key = (str(trade.get("token_currency") or ""),
+                         str(trade.get("token_issuer") or ""))
+            keyed[token_key].append(trade)
+        groups = sorted(keyed.items(), key=lambda pair:sum(x["estimated_net"] for x in pair[1]))
+        print("Worst 12 token+issuer pairs:")
+        for (ticker, issuer), arr in groups[:12]:
+            print("  %-19s %-12s %s | kill_liq_drop=%d" %
+                  (ticker[:19], issuer[:12], pretty(arr),
+                   sum(x.get("exit_reason") == "kill_liq_drop" for x in arr)))
+        print("Best 12 token+issuer pairs:")
+        for (ticker, issuer), arr in groups[-12:][::-1]:
+            print("  %-19s %-12s %s | burst=%d" %
+                  (ticker[:19], issuer[:12], pretty(arr),
+                   sum(x["source_group"] == "burst" for x in arr)))
+        for ticker in ["CFH", "OLX", "PHNUX"]:
+            trows = [r for r in sample if r["token_currency"] == ticker]
+            print("  TICKER %-6s %s issuers=%d" %
+                  (ticker, pretty(trows),len(set(r.get("token_issuer") for r in trows))))
+
+        print("\nUNUSUAL LIQUIDITY-EXIT OUTCOMES")
+        winning_liq = sorted((r for r in liq if r["estimated_net"] > 0),
+                             key=lambda r:r["estimated_net"], reverse=True)
+        print("Profitable kill_liq_drop exits: %d / %d" %
+              (len(winning_liq),len(liq)))
+        print("Liquidity-exit P&L excluding biggest winner: %+.3f XRP" %
+              (sum(r["estimated_net"] for r in liq) -
+               (winning_liq[0]["estimated_net"] if winning_liq else 0)))
+        for r in winning_liq[:8]:
+            ep = n(r.get("entry_price_xrp"))
+            xp = n(r.get("exit_price_xrp"))
+            ratio = xp/ep if ep>0 else 0
+            print("  id=%s token=%s:%s entry=%.12g exit=%.12g price_ratio=%.2fx net=%+.3f held=%.1fm" %
+                  (r["id"],r["token_currency"],str(r["token_issuer"])[:10],
+                   ep,xp,ratio,r["estimated_net"],r["held_minutes"]))
+
+        print("\nBURST EDGE STRESS TEST (NOT A REALISTIC COUNTERFACTUAL)")
+        burst = [r for r in sample if r["source_group"]=="burst"]
+        for excluded in [{"PHNUX"}, {"OLX"}, {"PHNUX","OLX"}]:
+            remain = [r for r in burst if r.get("token_currency") not in excluded]
+            print("  exclude ticker(s) %-11s %s" % (",".join(sorted(excluded)), pretty(remain)))
+
+        print("\nREPEATED ENTRY / LOSS COOLDOWN FORENSICS")
+        recent_pairs = []
+        repeat_after_large_loss = []
+        for (ticker, issuer), all_pair_rows in keyed.items():
+            ordered = sorted(all_pair_rows,key=lambda r:n(r.get("entry_timestamp")))
+            for previous, next_trade in zip(ordered,ordered[1:]):
+                prev_exit = n(previous.get("exit_timestamp"))
+                next_entry = n(next_trade.get("entry_timestamp"))
+                if not prev_exit or next_entry <= 0: continue
+                gap_ms = next_entry-prev_exit
+                if 0 <= gap_ms < 15*60000:
+                    recent_pairs.append((ticker,issuer,previous,next_trade,gap_ms))
+                    if previous["estimated_net"] <= -.5*n(previous["entry_amount_xrp"]):
+                        repeat_after_large_loss.append((ticker,issuer,previous,next_trade,gap_ms))
+        print("Re-entry within 15m of prior closed trade:",len(recent_pairs))
+        print("Re-entry within 15m after >=50% previous loss:",len(repeat_after_large_loss))
+        for ticker,issuer,p,nxt,gap in repeat_after_large_loss[:12]:
+            print("  %s:%s prev_id=%s prev_reason=%s prev_net=%+.3f next_id=%s after=%.1fm"%
+                  (ticker[:15],issuer[:10],p["id"],p.get("exit_reason"),
+                   p["estimated_net"],nxt["id"],gap/60000))
+        print("WARNING: historical trades span versions; current cooldown logic may differ.")
+
+        print("\nSOURCE/PROFILE LABEL CONSISTENCY")
+        pairs = defaultdict(list)
+        for r in sample: pairs[(r["source_group"],r["profile_group"])].append(r)
+        for (src,profile),arr in sorted(pairs.items(),key=lambda x:-len(x[1])):
+            print("  %-10s / %-17s %s" % (src,profile,pretty(arr)))
         print("\nREAD-ONLY EDGE AUDIT COMPLETE. No DB writes.")
     finally: con.close()
 
