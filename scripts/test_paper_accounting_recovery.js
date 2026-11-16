@@ -97,7 +97,7 @@ try {
   console.log('PASS historical DB fails closed instead of resetting cash to fabricated baseline');
 
   const bad={...closed,id:0,tokenCurrency:'BAD',tokenIssuer:'rInvalid',status:'open'};
-  const oldCash=afterLastRestart.getState().bankrollXRP;
+  const oldCash=db.getPaperCashState(); // compare full-precision persisted value
   assert.throws(()=>db.commitPaperMutation(bad,oldCash, -1,'entry'));
   approx(db.getPaperCashState(),oldCash);
   console.log('PASS invalid checkpoint fails atomically');
