@@ -393,7 +393,7 @@ async function main() {
       // Decode hex currency immediately — all downstream keys use decoded form
       const displayCurrency = decodeCurrency(currency);
       const momentumKey = `${displayCurrency}:${issuer}`;
-      if (isBlocklistedToken(currency)) return;
+      if (isBlocklistedToken(displayCurrency, issuer, currency)) return;
       // noPriceCooldown check (was missing from stream path — burst+scored had it)
       const npStreamTs = noPriceCooldowns.get(momentumKey);
       if (npStreamTs && Date.now() - npStreamTs < NO_PRICE_COOLDOWN_MS) {
@@ -623,7 +623,7 @@ async function main() {
     riskFilter, tokenScorer, paperTrader, telegramAlerter, db, config,
     ammPriceFetcher, buyPressureTracker, tradeExecutor,
     whaleTracker, liveValidator, socialDetector, runtimeLearning, multiTimeframeScorer,
-    missedOpportunityTracker, tradeDecisionEngine, BURST_TRADE_BLOCKLIST
+    missedOpportunityTracker, tradeDecisionEngine, BURST_TRADE_BLOCKLIST, manualBlacklist
   );
 
   startHealthCheck(xrplClient, buyPressureTracker, paperTrader);
@@ -833,7 +833,8 @@ function startPeriodicScan(
   multiTimeframeScorer: MultiTimeframeScorer,
   missedOpportunityTracker: import('./market/missedOpportunityTracker').MissedOpportunityTracker,
   tradeDecisionEngine: import('./execution/tradeDecisionEngine').TradeDecisionEngine,
-  BURST_TRADE_BLOCKLIST: Set<string>
+  BURST_TRADE_BLOCKLIST: Set<string>,
+  manualBlacklist: OperatorBlacklist
 ): void {
   const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
   const BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.SCAN_BATCH_SIZE || '10', 10) || 10)); // Configurable scanner concurrency
