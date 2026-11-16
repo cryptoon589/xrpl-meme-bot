@@ -10,6 +10,7 @@
 
 import { XRPLClient } from '../xrpl/client';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
+import { parseXrpIssuedAmm } from './parseIssuedAmm';
 import { debug, warn } from '../utils/logger';
 
 export interface TokenPrice {
@@ -78,7 +79,12 @@ export class AMMPriceFetcher {
     // Skip tokens that previously returned no price - avoid hammering the network
     // Exception: open positions bypass the null cache so exit checks always fire
     const nullTs = this.nullCache.get(key);
-    if (!effectiveBypass && nullTs && now - nullTs < this.NULL_CACHE_TTL_MS) {
+    // A priority monitored issue or recently recovered missing price needs
+    // faster retries, without infinite RPC hammering.
+    const isPriorityArmy = issuer === 'rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC' &&
+      (currency.toUpperCase()==='ARMY' || rawCurrency==='41524D5900000000000000000000000000000000');
+    const allowedNullAge = isPriorityArmy ? 30_000 : this.NULL_CACHE_TTL_MS;
+    if (!effectiveBypass && !forceFresh && nullTs && now-nullTs < allowedNullAge) {
       return null;
     }
 
@@ -103,6 +109,7 @@ export class AMMPriceFetcher {
       if (ammPrice) {
         const observed = { ...ammPrice, observedAtMs: Date.now() };
         this.cache.set(key, { price: observed, fetchedAt: observed.observedAtMs });
+        this.nullCache.delete(key); // recovery should not retain stale failed lookup
         return observed;
       }
     }
@@ -118,8 +125,7 @@ export class AMMPriceFetcher {
     // Cache the null result so we don't retry for 5 minutes
     // FIX #32: For open positions, use a shorter null cache (30s not 5min)
     // so we retry more aggressively when a position needs an exit price.
-    const nullTtl = isOpen ? 30_000 : this.NULL_CACHE_TTL_MS;
-    this.nullCache.set(key, now - (this.NULL_CACHE_TTL_MS - nullTtl));
+    this.nullCache.set(key, now);
     return null;
   }
 
@@ -144,43 +150,20 @@ export class AMMPriceFetcher {
       const amm = res?.result?.amm;
       if (!amm) return null;
 
-      // Parse pool reserves
-      const amount1 = amm.amount;   // XRP side (in drops)
-      const amount2 = amm.amount2;  // Token side
-
-      let xrpDrops: number;
-      let tokenUnits: number;
-
-      // XRPL AMM: XRP side is always a string (drops), token side is always an object
-      // amount1 is XRP (string) and amount2 is the token (object) - or vice versa
-      if (typeof amount1 === 'string' && typeof amount2 === 'object') {
-        // Normal layout: amount1=XRP drops, amount2=token
-        xrpDrops = parseInt(amount1);
-        tokenUnits = parseFloat(amount2?.value || '0');
-      } else if (typeof amount2 === 'string' && typeof amount1 === 'object') {
-        // Reversed layout: amount2=XRP drops, amount1=token
-        xrpDrops = parseInt(amount2);
-        tokenUnits = parseFloat(amount1?.value || '0');
-      } else {
+      const parsed = parseXrpIssuedAmm(amm,validCurrency,issuer);
+      if (!parsed) {
+        debug(`[AMMPrice] Rejecting invalid, frozen, or wrong-issuer pool for ${validCurrency}:${issuer}`);
         return null;
       }
-
-      if (xrpDrops <= 0 || tokenUnits <= 0) return null;
-
-      const poolXRP = xrpDrops / 1_000_000;
-      const priceXRP = poolXRP / tokenUnits;
-      const liquidityXRP = poolXRP * 2; // TVL = both sides
-
-      const tradingFee = amm.trading_fee || 0; // in basis points (e.g. 500 = 0.5%)
-
       return {
-        priceXRP,
-        liquidityXRP,
-        poolXRP,
-        poolTokens: tokenUnits,
-        tradingFee,
-        source: 'amm',
+        priceXRP:parsed.priceXRP,
+        liquidityXRP:parsed.liquidityXRP,
+        poolXRP:parsed.poolXRP,
+        poolTokens:parsed.poolTokens,
+        tradingFee:parsed.tradingFeeUnits, // XRPL 1/100000 units, NOT percent
+        source:'amm',
       };
+
     } catch (err: any) {
       // "actNotFound" means no AMM pool exists - normal, not an error
       if (err?.message?.includes('actNotFound') || err?.message?.includes('Account not found')) {
