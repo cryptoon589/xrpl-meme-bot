@@ -11,6 +11,7 @@
 import { XRPLClient } from '../xrpl/client';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from './parseIssuedAmm';
+import { XRP_ARMY } from './priorityIssues';
 import { debug, warn } from '../utils/logger';
 
 export interface TokenPrice {
@@ -81,8 +82,10 @@ export class AMMPriceFetcher {
     const nullTs = this.nullCache.get(key);
     // A priority monitored issue or recently recovered missing price needs
     // faster retries, without infinite RPC hammering.
-    const isPriorityArmy = issuer === 'rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC' &&
-      (currency.toUpperCase()==='ARMY' || rawCurrency==='41524D5900000000000000000000000000000000');
+    const isPriorityArmy = issuer === XRP_ARMY.issuer &&
+      (currency.toUpperCase()===XRP_ARMY.currency ||
+       rawCurrency?.toUpperCase()===XRP_ARMY.rawCurrency ||
+       rawCurrency?.toUpperCase()===XRP_ARMY.currency);
     const allowedNullAge = isPriorityArmy ? 30_000 : this.NULL_CACHE_TTL_MS;
     if (!effectiveBypass && !forceFresh && nullTs && now-nullTs < allowedNullAge) {
       return null;
