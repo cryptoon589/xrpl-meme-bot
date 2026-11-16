@@ -218,8 +218,15 @@ export class XRPLClient {
    */
   private scheduleReconnect(rateLimited = false): void {
     if (this.isReconnecting) {
-      debug('Reconnect already scheduled — ignoring duplicate');
-      return;
+      if (!rateLimited) {
+        debug('Reconnect already scheduled — ignoring duplicate');
+        return;
+      }
+      // A 1008 close can follow an ordinary transport event. Escalate an
+      // already pending short retry to the full 120-second server cooldown.
+      if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+      this.isReconnecting = false;
     }
     this.isReconnecting = true;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
@@ -325,7 +332,12 @@ export class XRPLClient {
   }
 
   private scheduleStreamReconnect(rateLimited = false): void {
-    if (this.streamStopped || this.streamReconnectTimer) return;
+    if (this.streamStopped) return;
+    if (this.streamReconnectTimer) {
+      if (!rateLimited) return;
+      clearTimeout(this.streamReconnectTimer);
+      this.streamReconnectTimer = null; // escalate pending retry to 1008 cooldown
+    }
     const delay = rateLimited ? 120_000 : 5000;
     if (rateLimited) warn('XRPL stream 1008 rate limit: waiting at least 120s before reconnecting');
     this.streamReconnectTimer = setTimeout(() => {
