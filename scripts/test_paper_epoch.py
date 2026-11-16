@@ -19,7 +19,12 @@ def sh(*args):
         text=True,capture_output=True)
 
 def main():
-    OUTPUT.unlink(missing_ok=True)
+    # This disposable-filename test is strictly for isolated GitHub CI runners.
+    # Never allow a local/VPS test command to unlink or replace any database.
+    if os.environ.get('CI', '').lower() != 'true':
+        raise SystemExit('CI-only synthetic fixture; refusing to run on an operator VPS')
+    if OUTPUT.exists():
+        raise SystemExit('CI fixture destination already exists; refusing to overwrite')
     with tempfile.TemporaryDirectory(prefix='hunterix-paper-epoch-') as tmp:
         source = Path(tmp)/'source.db'
         c=sqlite3.connect(source)
