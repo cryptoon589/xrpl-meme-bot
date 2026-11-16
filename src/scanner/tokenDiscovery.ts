@@ -184,7 +184,23 @@ export class TokenDiscovery {
    */
   addTrackedToken(token: TrackedToken): boolean {
     const key = `${token.currency}:${token.issuer}`;
-    if (this.trackedTokens.has(key)) return false; // already known
+    const existing = this.trackedTokens.get(key);
+    if (existing) {
+      // Older snapshots, manual entries and trending feeds sometimes stored
+      // only display "ARMY" (not 40-hex code). Repair THAT missing raw identity
+      // when an exact 160-bit currency+issuer has subsequently been supplied.
+      // Never replace one valid 160-bit currency with a different token.
+      const nextRaw=token.rawCurrency;
+      const previousRaw=existing.rawCurrency;
+      if (nextRaw && /^[A-Fa-f0-9]{40}$/.test(nextRaw) &&
+          (!previousRaw || !/^[A-Fa-f0-9]{40}$/.test(previousRaw))) {
+        existing.rawCurrency=nextRaw.toUpperCase();
+        existing.lastUpdated=Date.now();
+        this.db.saveToken(existing);
+        info(`[Discovery] Restored exact raw XRPL issue code for ${token.currency} issuer ${token.issuer.slice(0,11)}…`);
+      }
+      return false;
+    }
     this.trackedTokens.set(key, token);
     this.db.saveToken(token);
     return true;
