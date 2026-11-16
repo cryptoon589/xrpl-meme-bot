@@ -11,6 +11,7 @@ import { info, warn, debug } from '../utils/logger';
 import { BuyPressureTracker } from '../market/buyPressureTracker';
 import { TradeProfileName, PROFILES } from '../execution/tradeProfiles';
 import { AMMPriceFetcher } from '../market/ammPriceFetcher';
+import { closedEconomicPnl, indicativeOpenPnl, partialRealizedPnl, reconstructedRemainingTokens } from './paperAccounting';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -37,6 +38,7 @@ export class PaperTrader {
   private db: Database;
   private positionSizer: PositionSizer;
   private bankrollXRP: number;
+  private cashReconciled: boolean = false;
   private openPositions: Map<string, OpenPosition> = new Map();
   private lastCloseTime: Map<string, number> = new Map();
   private dailyPnL: number = 0;
@@ -79,7 +81,7 @@ export class PaperTrader {
     this.bankrollXRP = config.startingBankrollXRP;
     this.lastResetDate = this.getCurrentDate();
 
-    // Load existing state from DB
+    // Load existing state from DB; historical DBs remain unreconciled.
     this.loadState();
   }
 
@@ -110,6 +112,10 @@ export class PaperTrader {
     tdeSizeXRP?: number
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
+    if (!this.cashReconciled) {
+      warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
+      return null;
+    }
 
     // Require minimum XRP-side pool reserve, not total TVL.
     const poolXrpReserve = this.getPoolXrpReserve(snapshot);
@@ -216,7 +222,10 @@ export class PaperTrader {
       remainingPosition: 100,
     };
 
-    this.bankrollXRP -= tradeSizeXRP + fees;
+    const cashAfterEntry = this.bankrollXRP - tradeSizeXRP - fees;
+    // All three records must commit before changing memory.
+    this.db.commitPaperMutation(trade, cashAfterEntry, tokensBought, 'entry');
+    this.bankrollXRP = cashAfterEntry;
 
     this.openPositions.set(key, {
       trade,
@@ -238,7 +247,7 @@ export class PaperTrader {
       tp2Pct: tpTargets?.tp2,
     });
 
-    this.db.savePaperTrade(trade);
+    // Entry and inventory are already committed atomically.
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
     const displayName = token.currency.length === 40
@@ -261,6 +270,10 @@ export class PaperTrader {
     // Check mode
     if (this.config.mode !== 'PAPER') {
       debug('Paper trading disabled (mode is not PAPER)');
+      return null;
+    }
+    if (!this.cashReconciled) {
+      warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
     }
 
@@ -400,8 +413,10 @@ export class PaperTrader {
       remainingPosition: 100,
     };
 
-    // Deduct from bankroll
-    this.bankrollXRP -= tradeSizeXRP + fees;
+    // Deduct only after a durable, atomic paper entry checkpoint.
+    const cashAfterEntry = this.bankrollXRP - tradeSizeXRP - fees;
+    this.db.commitPaperMutation(trade, cashAfterEntry, tokensBought, 'entry');
+    this.bankrollXRP = cashAfterEntry;
 
     const kellySize = sizeRecommendation.sizeXRP;
     const clampNote = kellySize < this.config.minTradeXRP
@@ -433,8 +448,7 @@ export class PaperTrader {
       tp2Pct: tpTargets?.tp2,
     });
 
-    // Save to DB
-    this.db.savePaperTrade(trade);
+    // The entry, cash and exact token count were saved above.
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
 
