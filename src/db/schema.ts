@@ -213,6 +213,22 @@ export const SCHEMA = {
     )
   `,
 
+  // New-paper ledger: never backfill fabricated cash into existing historic DB.
+  paperCashState: `
+    CREATE TABLE IF NOT EXISTS paper_cash_state (
+      singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+      bankroll_xrp REAL NOT NULL CHECK (bankroll_xrp >= 0),
+      updated_at INTEGER NOT NULL
+    )
+  `,
+  // Exact remaining quantity for each trade, persisted atomically with updates.
+  paperInventory: `
+    CREATE TABLE IF NOT EXISTS paper_inventory (
+      trade_id INTEGER PRIMARY KEY,
+      tokens_held REAL NOT NULL CHECK (tokens_held >= 0),
+      updated_at INTEGER NOT NULL
+    )
+  `,
   profileStats: `
     CREATE TABLE IF NOT EXISTS profile_stats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
