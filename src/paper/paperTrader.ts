@@ -75,6 +75,40 @@ export class PaperTrader {
   private snapshotTrade(trade: PaperTrade): PaperTrade {
     return { ...trade };
   }
+  /**
+   * PAPER temporary risk quarantine from persisted trade outcomes.
+   * It is NOT a blacklist: nothing gets added to the operator's manual list.
+   * The guard is opt-in and survives bot process restarts.
+   *
+   * These durations are conservative hypotheses, not optimized parameters.
+   */
+  private getLossReentryBlockReason(currency: string, issuer: string): string | null {
+    if (this.config.mode !== 'PAPER' ||
+        process.env.BOT_ENABLE_LIQUIDITY_LOSS_GUARD !== '1') return null;
+    const now = Date.now();
+    const HOUR = 3_600_000;
+    const recent = this.db.getRecentClosedTrades(currency, issuer, 32)
+      .filter(t => t.exitTimestamp != null && Number.isFinite(t.exitTimestamp)
+        && t.exitTimestamp! <= now && t.exitTimestamp! > now - 7 * 24 * HOUR);
+    const collapses = recent.filter(t => t.exitReason === 'kill_liq_drop');
+    const latestCollapse = collapses[0];
+    if (collapses.length >= 2 && latestCollapse?.exitTimestamp &&
+        now - latestCollapse.exitTimestamp < 72 * HOUR) {
+      return 'repeat_pool_collapse_72h';
+    }
+    const latest = recent[0];
+    if (!latest?.exitTimestamp) return null;
+    const age = now - latest.exitTimestamp;
+    if (latest.exitReason === 'kill_liq_drop' && age < 24 * HOUR)
+      return 'pool_collapse_24h';
+    if (latest.exitReason === 'force_close_no_price' && age < 24 * HOUR)
+      return 'unpriceable_24h';
+    if (latest.entryAmountXRP > 0 && latest.pnlXRP != null &&
+        latest.pnlXRP <= -.5 * latest.entryAmountXRP && age < 12 * HOUR)
+      return 'heavy_realized_loss_12h';
+    return null;
+  }
+
 
   constructor(config: BotConfig, db: Database) {
     this.config = config;
@@ -150,6 +184,12 @@ export class PaperTrader {
     }
     if (this.db.hasOpenTradeForToken(token.currency, token.issuer)) {
       warn(`Blocked duplicate burst trade for ${key}`);
+      return null;
+    }
+
+    const lossQuarantine = this.getLossReentryBlockReason(token.currency, token.issuer);
+    if (lossQuarantine) {
+      debug(`[PaperRisk] Burst entry ${key} temporarily rejected: ${lossQuarantine}`);
       return null;
     }
 
@@ -327,6 +367,12 @@ export class PaperTrader {
       warn(`Blocked duplicate trade for ${key} — already open in DB`);
       // Sync in-memory state from DB to avoid future misses
       this.loadOpenPositionFromDB(token.currency, token.issuer);
+      return null;
+    }
+
+    const lossQuarantine = this.getLossReentryBlockReason(token.currency, token.issuer);
+    if (lossQuarantine) {
+      debug(`[PaperRisk] Scored/stream entry ${key} temporarily rejected: ${lossQuarantine}`);
       return null;
     }
 
