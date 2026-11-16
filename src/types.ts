@@ -142,6 +142,7 @@ export interface AlertPayload {
     | 'daily_summary'
     | 'hourly_summary'
     | 'open_positions_update'
+    | 'hourly_diagnostics'
     | 'bot_log'
     | 'live_preflight_failed';
   tokenCurrency?: string;
