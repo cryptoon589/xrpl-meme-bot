@@ -70,7 +70,8 @@ try {
   const unsold=bought*.6;
   const slip=(unsold*1.4)/(2000+unsold*1.4);
   const finalNet=unsold*1.4*(1-slip)*(1-0.003);
-  approx(traderAfterRestart.getState().bankrollXRP,beforeFull+finalNet);
+  approx(db.getPaperCashState(),beforeFull+finalNet,0.0001); // getState deliberately rounds display to 4 dp
+  approx(traderAfterRestart.getState().bankrollXRP,beforeFull+finalNet,0.0001);
   approx(closed.xrpReturned - closed.entryAmountXRP*(1+0.003),closed.pnlXRP,1e-6);
   approx(db.getPaperInventory(t.id),0);
   assert.ok(!traderAfterRestart.hasOpenPosition(token.currency,token.issuer));
