@@ -189,7 +189,7 @@ async function main() {
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
-    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP, tokenAgeMs, baselinePrice) => {
+    burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP, tokenAgeMs, baselinePrice, reserveQuote) => {
       diagnostics.increment('burstCandidatesSeen');
       diagnostics.recordSignal({ token: decodeCurrency(rawCurrency || currency), issuer, source: 'burst', reason: 'burst_detected', priceAtSignal: priceXRP, poolXrpReserve: poolTVL / 2, rawCurrency });
       // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
@@ -238,6 +238,7 @@ async function main() {
         whaleWinRate: bestWhaleWR,   // passed into TDE for threshold lowering
         isNewLaunch,                 // hint for TDE profile selection
         tokenAgeMs,
+        ...reserveQuote,
       };
       const token = { currency, issuer, rawCurrency, lastUpdated: Date.now() } as any;
 
@@ -409,7 +410,8 @@ async function main() {
 
       diagnostics.increment('streamMomentumCandidatesSeen');
       diagnostics.recordSignal({ token: displayCurrency, issuer, source: 'stream', reason: 'momentum_detected', priceAtSignal: snap.buyVolumeXRP, poolXrpReserve: null, buyVolumeXRP: snap.buyVolumeXRP, uniqueBuyers: snap.uniqueBuyers });
-      ammPriceFetcher.getPrice(currency, issuer).then(async ammPrice => {
+      ammPriceFetcher.getPrice(currency, issuer, currency, true,
+        process.env.BOT_USE_RESERVE_QUOTES === '1').then(async ammPrice => {
         if (!ammPrice?.priceXRP) { tradeLocks.delete(momentumKey); return; }
 
         // Check whale presence in stream buyers
@@ -421,6 +423,8 @@ async function main() {
           tokenCurrency: currency, tokenIssuer: issuer,
           priceXRP: ammPrice.priceXRP, liquidityXRP: ammPrice.liquidityXRP,
           poolXrpReserve: ammPrice.poolXRP,
+          poolTokens:ammPrice.poolTokens,tradingFeeUnits:ammPrice.tradingFee,
+          priceObservedAtMs:ammPrice.observedAtMs,priceSource:ammPrice.source,
           buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
           uniqueBuyers5m: snap.uniqueBuyers, buySellRatio: snap.buySellRatio,
           newWalletBuys: snap.newWalletBuys, buyVolumeXRP: snap.buyVolumeXRP,
@@ -926,6 +930,10 @@ function startPeriodicScan(
               if (!snapshot) return { token, snapshot: null };
 
               // Fix 3: Inject new wallet data into snapshot for scorer
+              (snapshot as any).poolTokens = ammPrice?.poolTokens;
+              (snapshot as any).tradingFeeUnits = ammPrice?.tradingFee;
+              (snapshot as any).priceObservedAtMs = ammPrice?.observedAtMs;
+              (snapshot as any).priceSource = ammPrice?.source;
               (snapshot as any).newWalletBuys = pressure.newWalletBuys;
               (snapshot as any).newWalletPercent = pressure.newWalletPercent;
               (snapshot as any).buySellRatio = pressure.buySellRatio;
@@ -1147,7 +1155,8 @@ function startPeriodicScan(
         // FIX #34: Pre-entry live AMM check — snapshot up to 90s stale.
         // Abort if AMM gone or pool drained >60% since scan.
         const _live = await ammPriceFetcher.getPrice(
-          token.rawCurrency || token.currency, token.issuer, token.rawCurrency, true
+          token.rawCurrency || token.currency, token.issuer, token.rawCurrency, true,
+          process.env.BOT_USE_RESERVE_QUOTES === '1'
         );
         if (!_live || _live.priceXRP <= 0) {
           warn(`[PreEntry] ${token.currency} — no live AMM price, aborting scored entry`);
@@ -1164,7 +1173,9 @@ function startPeriodicScan(
         const burstTpM = runtimeLearning.getTpTargets('burst');
         const trade = paperTrader.tryOpenBurstTrade(
           token,
-          { ...snapshot, priceXRP: _live.priceXRP, poolXrpReserve: _live.poolXRP },
+          { ...snapshot, priceXRP: _live.priceXRP, poolXrpReserve: _live.poolXRP,
+             poolTokens:_live.poolTokens,tradingFeeUnits:_live.tradingFee,
+             priceObservedAtMs:_live.observedAtMs,priceSource:_live.source },
           `[MOMENTUM] ${entryReason} | profile: ${decision.profile.name}`,
           burstTpM, decision.sizeXRP
         );
