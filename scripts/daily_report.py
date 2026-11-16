@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Daily live-readiness report for xrpl-meme-bot.
-Sends a Telegram message with key stats and a go/no-go checklist.
+Daily PAPER recovery report for xrpl-meme-bot.
+Sends operational stats only; this is not a LIVE trading readiness assessment.
 Run via cron at 08:00 UTC daily.
 """
 
@@ -11,9 +11,21 @@ import sys
 import urllib.request
 import urllib.parse
 import json
+import argparse
+from pathlib import Path
 from datetime import datetime, timezone
 
-DB_PATH = os.environ.get('DB_PATH', '/root/xrpl-meme-bot/data/meme_bot.db')
+# Intentionally ignore the legacy DB_PATH env used by older cron jobs.
+# The active PAPER service uses meme_bot.recovery.db, and the historical
+# 18-GB original DB must never be the source of today's trading report.
+DEFAULT_RECOVERY_DB = Path('/root/xrpl-meme-bot/data/meme_bot.recovery.db')
+DB_PATH = Path(os.environ.get('DAILY_REPORT_DB_PATH', str(DEFAULT_RECOVERY_DB))).expanduser().resolve()
+import re
+ALLOWED_DB_NAME = DB_PATH.name == 'meme_bot.recovery.db' or re.fullmatch(
+    r'meme_bot\\.paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?\\.db', DB_PATH.name
+)
+if not ALLOWED_DB_NAME:
+    raise SystemExit('Refusing daily PAPER report from non-recovery/non-epoch SQLite database')
 BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 
@@ -35,7 +47,22 @@ def send_telegram(text: str) -> bool:
         return False
 
 def main():
-    conn = sqlite3.connect(DB_PATH)
+    parser = argparse.ArgumentParser(description='Read-only PAPER recovery report')
+    parser.add_argument('--dry-run', action='store_true', help='print report, never call Telegram')
+    parser.add_argument('--check-config', action='store_true', help='show DB and Telegram presence without secrets or network')
+    args = parser.parse_args()
+
+    print('Daily PAPER report data source:', DB_PATH)
+    print('Legacy DB_PATH ignored:', bool(os.environ.get('DB_PATH')))
+    if args.check_config:
+        print('Recovery database exists:', DB_PATH.is_file())
+        print('Telegram token configured:', bool(BOT_TOKEN))
+        print('Telegram chat configured:', bool(CHAT_ID))
+        return
+
+    if not DB_PATH.is_file():
+        raise SystemExit('Recovery database missing. No Telegram report was sent.')
+    conn = sqlite3.connect(DB_PATH.as_uri() + '?mode=ro', uri=True, timeout=8)
     c = conn.cursor()
     now_ts = int(datetime.now(timezone.utc).timestamp() * 1000)
     day_ms = 24 * 60 * 60 * 1000
@@ -57,7 +84,7 @@ def main():
         ROUND(AVG(CASE WHEN pnl_xrp<=0 THEN pnl_percent END),1)
         FROM paper_trades WHERE status='closed'
         AND exit_reason!='force_close_no_price'
-        AND entry_timestamp > ?""", (now_ts - week_ms,))
+        AND exit_timestamp > ?""", (now_ts - week_ms,))
     w7_t, w7_wr, w7_net, w7_avgW, w7_avgL = c.fetchone()
 
     # --- Last 24h ---
@@ -66,19 +93,19 @@ def main():
         ROUND(SUM(pnl_xrp),2)
         FROM paper_trades WHERE status='closed'
         AND exit_reason!='force_close_no_price'
-        AND entry_timestamp > ?""", (now_ts - day_ms,))
+        AND exit_timestamp > ?""", (now_ts - day_ms,))
     d1_t, d1_wr, d1_net = c.fetchone()
 
     # --- kill_no_followthrough last 7 days ---
     c.execute("""SELECT COUNT(*) FROM paper_trades
         WHERE status='closed' AND exit_reason='kill_no_followthrough'
-        AND entry_timestamp > ?""", (now_ts - week_ms,))
+        AND exit_timestamp > ?""", (now_ts - week_ms,))
     knf_7d = c.fetchone()[0]
 
     # --- Ghost closes last 7 days ---
     c.execute("""SELECT COUNT(*) FROM paper_trades
         WHERE status='closed' AND exit_reason='force_close_no_price'
-        AND entry_timestamp > ?""", (now_ts - week_ms,))
+        AND exit_timestamp > ?""", (now_ts - week_ms,))
     ghost_7d = c.fetchone()[0]
 
     # --- NEW_LAUNCH profile stats ---
@@ -96,20 +123,16 @@ def main():
         ROUND(SUM(pnl_xrp),2)
         FROM paper_trades WHERE status='closed'
         AND exit_reason!='force_close_no_price'
-        AND entry_timestamp > ?
+        AND exit_timestamp > ?
         AND trade_profile IS NOT NULL
         GROUP BY trade_profile ORDER BY SUM(pnl_xrp) DESC""", (now_ts - week_ms,))
     profiles = c.fetchall()
 
-    # --- Bankroll (real trades only, excl ghost closes) ---
-    c.execute("""SELECT ROUND(SUM(pnl_xrp),2) FROM paper_trades
-        WHERE status='closed' AND exit_reason != 'force_close_no_price'""")
-    all_pnl = c.fetchone()[0] or 0
-    bankroll_est = 100 + all_pnl
-
+    # Bankroll cannot be reconstructed from historical P&L sums (partial closes,
+    # entry fees, ghost closes and restart cash state must first be reconciled).
     # --- Exit reason breakdown (7d) ---
     c.execute("""SELECT exit_reason, COUNT(*), ROUND(AVG(pnl_percent),1)
-        FROM paper_trades WHERE status='closed' AND entry_timestamp > ?
+        FROM paper_trades WHERE status='closed' AND exit_timestamp > ?
         GROUP BY exit_reason ORDER BY COUNT(*) DESC LIMIT 8""", (now_ts - week_ms,))
     exit_reasons = c.fetchall()
 
@@ -130,33 +153,22 @@ def main():
 
     conn.close()
 
-    # --- Live readiness checks ---
-    checks = []
-    wr_ok     = (w7_wr or 0) >= 20
-    knf_ok    = knf_7d <= 15
-    net_ok    = (w7_net or 0) > 0
-    nl_ok     = (nl_t or 0) >= 5 and (nl_wr or 0) > 0
-    ghost_ok  = ghost_7d <= 20
-
-    checks.append(("WR ≥20% (7d)",        wr_ok,    f"{w7_wr}%"))
-    checks.append(("kill_nofollow ≤15 (7d)", knf_ok, f"{knf_7d}x"))
-    checks.append(("Net PnL > 0 (7d)",    net_ok,   f"{'+' if (w7_net or 0)>=0 else ''}{w7_net} XRP"))
-    checks.append(("NEW_LAUNCH ≥5 trades", nl_ok,   f"{nl_t}t WR {nl_wr}%"))
-    checks.append(("Ghosts ≤20 (7d)",     ghost_ok, f"{ghost_7d}x"))
-
-    all_green = all(ok for _, ok, _ in checks)
-    readiness = "🟢 READY FOR LIVE" if all_green else "🔴 NOT READY YET"
+    # This report is not a certification system: win rate thresholds cannot
+    # establish executable post-cost edge or approve live trading.
+    readiness = "🔒 NOT CERTIFIED — PAPER ACCOUNTING/EXECUTION AUDIT OPEN"
+    sample_warning = (
+        f"Only {w7_t} closed trades in 7d — insufficient for statistical "
+        "strategy evaluation." if w7_t < 30 else
+        "Historical PAPER outcomes still require fill and accounting validation."
+    )
+    avg_win_str = f"{w7_avgW:+.1f}%" if w7_avgW is not None else "N/A"
+    avg_loss_str = f"{w7_avgL:+.1f}%" if w7_avgL is not None else "N/A"
 
     # --- Build message ---
     profile_lines = '\n'.join(
         f"  {p[0]}: {p[1]}t WR {p[2]}% net {'+' if (p[3] or 0)>=0 else ''}{p[3]} XRP"
         for p in profiles
     ) or "  no data"
-
-    check_lines = '\n'.join(
-        f"  {'✅' if ok else '❌'} {label}: {val}"
-        for label, ok, val in checks
-    )
 
     exit_lines = '\n'.join(
         f"  {r[0] or 'unknown'}: {r[1]}x avg {r[2]}%"
@@ -170,18 +182,24 @@ def main():
 
     msg = f"""📊 <b>DAILY BOT REPORT — {datetime.now(timezone.utc).strftime('%d %b %Y %H:%M UTC')}</b>
 
-<b>Bankroll:</b> ~{bankroll_est:.2f} XRP
+<b>Mode:</b> PAPER ONLY — live trading disabled
+<b>Database:</b> {DB_PATH.name} (isolated PAPER history)
+<b>Bankroll:</b> not audited (recovery/restart cash reconciliation pending)
+<b>P&amp;L caveat:</b> historical recorded PAPER outcomes; entry-fee, liquidity and fill accuracy unverified
 
-<b>Last 24h</b>
-Trades: {d1_t} | WR: {d1_wr}% | Net: {'+' if (d1_net or 0)>=0 else ''}{d1_net} XRP
+<b>Last 24h (closed in window)</b>
+Trades: {d1_t} | WR: {d1_wr}% | Recorded P&amp;L: {'+' if (d1_net or 0)>=0 else ''}{d1_net} XRP
 
-<b>Last 7 days</b>
-Trades: {w7_t} | WR: {w7_wr}% | Net: {'+' if (w7_net or 0)>=0 else ''}{w7_net} XRP
-AvgW: +{w7_avgW}% | AvgL: {w7_avgL}%
+<b>Last 7 days (closed in window)</b>
+Trades: {w7_t} | WR: {w7_wr}% | Recorded P&amp;L: {'+' if (w7_net or 0)>=0 else ''}{w7_net} XRP
+AvgW: {avg_win_str} | AvgL: {avg_loss_str}
 kill_nofollow: {knf_7d}x | Ghosts: {ghost_7d}x
 
 <b>All-time (excl ghosts)</b>
-Trades: {total_t} | WR: {total_wr}% | Net: {'+' if (total_net or 0)>=0 else ''}{total_net} XRP
+Trades: {total_t} | WR: {total_wr}% | Recorded P&amp;L: {'+' if (total_net or 0)>=0 else ''}{total_net} XRP
+
+<b>NEW_LAUNCH history (all-time, non-ghost)</b>
+Trades: {nl_t} | Recorded WR: {nl_wr}% | Recorded P&amp;L: {nl_net} XRP
 
 <b>By Profile (7d)</b>
 {profile_lines}
@@ -192,12 +210,17 @@ Trades: {total_t} | WR: {total_wr}% | Net: {'+' if (total_net or 0)>=0 else ''}{
 <b>Shadow Backtest — Rejected Signals (7d)</b>
 {shadow_lines}
 
-<b>Live Readiness: {readiness}</b>
-{check_lines}"""
+<b>LIVE trading authorization: {readiness}</b>
+<i>{sample_warning}</i>
+<i>No checklist in this report authorizes LIVE trading.</i>"""
 
+    if args.dry_run:
+        print('[DRY RUN: Telegram not contacted]')
+        print(msg)
+        return
     sent = send_telegram(msg)
     if not sent:
-        print("[No Telegram credentials — stdout only]")
+        print("[Telegram not configured or delivery failed — stdout only]")
         print(msg)
 
 if __name__ == '__main__':
