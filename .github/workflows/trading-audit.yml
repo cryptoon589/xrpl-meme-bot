@@ -7,6 +7,7 @@ on:
     paths:
       - 'scripts/audit_trading_integrity.py'
       - 'scripts/audit_paper_accounting.js'
+      - 'scripts/audit_telegram_delivery.js'
       - '.github/workflows/trading-audit.yml'
   workflow_dispatch:
 
@@ -24,6 +25,8 @@ jobs:
       - run: python3 -m py_compile scripts/audit_trading_integrity.py
       - name: Disposable PAPER accounting demonstration
         run: node scripts/audit_paper_accounting.js
+      - name: Offline Telegram notification audit
+        run: node scripts/audit_telegram_delivery.js
       - name: Synthetic trade history audit
         run: |
           python3 - <<'PY'
