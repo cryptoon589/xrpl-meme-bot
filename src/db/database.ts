@@ -25,7 +25,14 @@ export class Database {
 
   constructor(dbPath?: string) {
     const filePath = dbPath || process.env.BOT_DB_PATH || path.join(process.cwd(), 'data', 'meme_bot.db');
-    this.isCompactRecoveryDb = path.resolve(filePath) === path.resolve(process.cwd(), 'data', 'meme_bot.recovery.db');
+    // A versioned PAPER epoch has the same bounded-retention safeguards as
+    // compact recovery. Never classify the 18GB historical meme_bot.db as small.
+    const resolved = path.resolve(filePath);
+    const expectedData = path.resolve(process.cwd(), 'data');
+    const isPaperEpoch = path.dirname(resolved) === expectedData &&
+      /^meme_bot[.]paper-epoch-[0-9]{8}(?:-[a-z0-9]+)?[.]db$/.test(path.basename(resolved));
+    this.isCompactRecoveryDb = resolved === path.join(expectedData,'meme_bot.recovery.db') ||
+      isPaperEpoch;
 
     // Ensure data directory exists
     const fs = require('fs');
