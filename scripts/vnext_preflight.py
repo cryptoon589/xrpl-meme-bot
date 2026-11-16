@@ -15,6 +15,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / 'data'
@@ -119,6 +120,14 @@ def epoch_state(path, expected_legacy):
 def check_runtime(epoch, manifest, legacy, digest):
     expected_db=str(epoch.resolve())
     expected_id=epoch.stem
+    xrpl_url=os.environ.get('XRPL_WS_URL','')
+    pinned_url=os.environ.get('HUNTERIX_VNEXT_XRPL_WS_URL','')
+    try:
+        parsed_url=urlparse(xrpl_url)
+        valid_ws=(parsed_url.scheme=='wss' and bool(parsed_url.netloc) and
+                  not parsed_url.username and not parsed_url.password)
+    except ValueError:
+        valid_ws=False
     checks={
         'MODE=PAPER':os.environ.get('MODE')=='PAPER',
         'LIVE_TRADING=false':os.environ.get('LIVE_TRADING')=='false',
@@ -137,6 +146,7 @@ def check_runtime(epoch, manifest, legacy, digest):
         'observation retention':os.environ.get('BOT_ENABLE_OBSERVATION_RETENTION')=='1',
         'disk guard':os.environ.get('BOT_ENABLE_RECOVERY_DISK_GUARD')=='1',
         'separate XRPL stream':os.environ.get('XRPL_SEPARATE_STREAM')=='1',
+        'explicit pinned WSS provider':bool(pinned_url) and xrpl_url==pinned_url and valid_ws,
         'public RPC max inflight (2)':os.environ.get('XRPL_RPC_MAX_INFLIGHT')=='2',
         'public RPC pacing (3/sec)':os.environ.get('XRPL_RPC_MAX_PER_SEC')=='3',
         'unvalidated learning disabled':os.environ.get('BOT_ENABLE_VALIDATED_LEARNING')!='1',
