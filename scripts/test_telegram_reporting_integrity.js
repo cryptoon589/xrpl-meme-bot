@@ -39,7 +39,8 @@ async function main(){
     trailingStopActive:false,remainingPosition:0,
   };
   const formatted=a.format({type:'paper_trade_closed',paperTrade:trade,message:''});
-  assert.ok(formatted.includes('-0.015'),'trade-close alert must display net recorded fee-adjusted P&L');
+  assert.ok(formatted.includes('TRADE CLOSED — LOSS') && formatted.includes('<b>P&L:</b>') && formatted.includes('-0.01 XRP'),
+    'trade-close alert must classify fee-adjusted negative net as loss despite gross proceeds equaling principal');
   console.log('PASS close alert uses corrected net P&L rather than gross returned-principal');
 
   console.log('TELEGRAM ACCOUNTING/DIAGNOSTICS REGRESSION PASSED (OFFLINE)');
