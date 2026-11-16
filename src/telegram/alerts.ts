@@ -116,15 +116,15 @@ export class TelegramAlerter {
     this.lastAlertTime.set(key, Date.now());
   }
 
-  async sendAlert(payload: AlertPayload): Promise<void> {
+  async sendAlert(payload: AlertPayload): Promise<boolean> {
     if (!this.enabled || !this.bot) {
       debug(`Alert skipped (Telegram disabled): ${payload.type}`);
-      return;
+      return false;
     }
 
     // Route to correct formatter — ignore alert types we no longer send
     const html = this.format(payload);
-    if (!html) return; // suppressed type
+    if (!html) return false; // suppressed type
 
     // Cooldown guard
     // Trade close/partial alerts use entry timestamp in the key so TP1 + final close
@@ -134,7 +134,7 @@ export class TelegramAlerter {
     if (payload.type === 'bot_log') {
       cdKey = this.cooldownKey(payload.type);
       cdMs  = this.BOT_LOG_COOLDOWN_MS;
-    } else if (payload.type === 'open_positions_update') {
+    } else if (payload.type === 'open_positions_update' || payload.type === 'hourly_diagnostics') {
       cdKey = this.cooldownKey(payload.type);
       cdMs  = this.SUMMARY_COOLDOWN_MS;
     } else if (payload.type === 'paper_trade_opened') {
@@ -160,7 +160,7 @@ export class TelegramAlerter {
 
     if (this.isOnCooldown(cdKey, cdMs)) {
       debug(`Alert cooldown: ${cdKey}`);
-      return;
+      return false;
     }
 
     // bot_log is plain text — no HTML tags, but may contain special chars that
@@ -168,6 +168,7 @@ export class TelegramAlerter {
     const isPlain = payload.type === 'bot_log';
     const sent = await this.send(html, isPlain);
     if (sent) this.markSent(cdKey);
+    return sent;
   }
 
   /** Send pre-formatted HTML (used internally and by TradeExecutor). */
@@ -247,6 +248,7 @@ export class TelegramAlerter {
         return this.fmtTradeClose(payload);
 
       case 'open_positions_update':
+      case 'hourly_diagnostics':
         return payload.message; // pre-built in index.ts
 
       case 'bot_log':
@@ -405,10 +407,12 @@ export class TelegramAlerter {
     const safeTicker = escapeHtml(ticker);
 
     // Use cumulative xrpReturned (includes all partial + final proceeds)
-    const returned = (t.xrpReturned != null && t.xrpReturned > 0) ? t.xrpReturned : null;
-    const pnlXRP   = returned != null
-      ? returned - t.entryAmountXRP
-      : (t.pnlXRP ?? null);
+    const returned = (t.xrpReturned != null && t.xrpReturned >= 0) ? t.xrpReturned : null;
+    // New PAPER closes persist fee-adjusted net P&L. Never silently overwrite it
+    // using the old fee-excluding (returned - principal) calculation.
+    const pnlXRP = t.pnlXRP != null
+      ? t.pnlXRP
+      : (returned != null ? returned - t.entryAmountXRP * 1.003 : null);
     const pnlPct   = (pnlXRP != null && t.entryAmountXRP > 0)
       ? (pnlXRP / t.entryAmountXRP) * 100
       : (t.pnlPercent ?? null);
