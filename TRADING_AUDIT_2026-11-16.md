@@ -69,6 +69,16 @@ The current `tryOpenBurstTrade` re-entry cooldown is held in `lastCloseTime`, an
 
 `kill_liq_drop` triggers based on pool reserve falling by a percentage relative to entry while the exit uses the latest price and the simplistic slippage model. Liquidity withdrawals can occur without an equivalent spot-price fall, and price may be stale or untradeable. The `kill_liq_drop` category must be evaluated using observed reserve changes, validated fillable sell quotes and proper token accounting.
 
+## Exact token+issuer concentration drilldown — operator output 2026-11-16
+
+The enhanced read-only audit identifies **CFH / issuer rDTHkzTq3Acx…** as a **single** issuer, 88 non-ghost closed trades, estimated net **−315.937 XRP**, win rate **4.5%**, profit factor **0.01**, with **50** `kill_liq_drop` exits. **OLX / rswiX7wDL25G…** was +159.607 XRP over 24 trades, and **PHNUX / r4ejWuT3fb6U…** +84.286 XRP in one trade. These are *historical PAPER* outcomes, not proof of real executable edge. Excluding CFH hypothetically shifts total −127.448 → **+188.489 XRP**; excluding CFH *and* OLX *and* PHNUX yields **−55.404 XRP**. This demonstrates heavy issuer-level concentration, not a reliable predictive filter; blind ticker blacklisting after seeing past outcomes would be post-selection bias.
+
+PHNUX trade id=219: entry price ~0.000001710313 XRP, exit price ~0.000045008710 XRP, **26.32×** spot movement in 1.6 min, exit_reason=`kill_liq_drop` despite +84.286 XRP simulated profit. `kill_liq_drop` other profitable case id=792 ~+0.024 XRP; without PHNUX, 81 liquidity-collapse exits sum **−383.776 XRP**. The source data cannot verify those quotes were sellable at matching size. Historical snapshots from May 11 may exist only in the immutable original 18GiB database and would require strictly bounded read-only queries.
+
+The audit found **40** reentries within 15min after a prior exit (not necessarily all violations of the then-version's cooldown), including **14** within 15min after a prior loss of at least 50%. Many were CFH after 10–14 min. Current code holds the last-close time in an in-memory Map, so *all* cooldowns reset across PM2 restart. The entry source and exit profile differ: `BURST_SCALP` profile includes 106 momentum-source historical trades at −212.047 XRP.
+
+A separate **opt-in PAPER safety experiment** in draft PR #3 (`fix/paper-loss-reentry-20261116`) uses already persisted closed trades to maintain a 24h cooldown after one liquidity-collapse/no-price exit, 12h after catastrophic loss (>=50%), and 72h after repeated liquidity collapses. It preserves token+issuer matching, never permanently bans tokens, and is disabled by default (`BOT_ENABLE_LIQUIDITY_LOSS_GUARD` must be `1`). Offline restart and disposable SQLite tests passed. **This is not deployed**; historical thresholds are hypotheses pending forward comparison, and underlying accounting/price-execution defects remain higher priority.
+
 ## P1 — NEXT ENGINEERING PRIORITIES
 
 ### P1.1 Learning can overfit and some learned gates are unused
