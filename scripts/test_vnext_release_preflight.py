@@ -80,7 +80,8 @@ def main():
                 BOT_USE_RESERVE_QUOTES='1',BOT_ENABLE_LIQUIDITY_LOSS_GUARD='1',
                 BOT_ENABLE_STARTUP_PRUNE='0',BOT_ENABLE_OBSERVATION_RETENTION='1',
                 BOT_ENABLE_RECOVERY_DISK_GUARD='1',
-                XRPL_SEPARATE_STREAM='1',BOT_ENABLE_VALIDATED_LEARNING='0',
+                XRPL_SEPARATE_STREAM='1',XRPL_RPC_MAX_INFLIGHT='2',XRPL_RPC_MAX_PER_SEC='3',
+                BOT_ENABLE_VALIDATED_LEARNING='0',
                 TEST_OLD_ONLINE='0')
             ready=run(PRE,'--epoch',EPOCH,'--legacy',legacy,
                 '--manifest',manifest,'--strict-startup',env=testEnv)
