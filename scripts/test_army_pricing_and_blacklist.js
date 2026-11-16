@@ -107,6 +107,16 @@ async function main(){
   const again=td.addTrackedToken({...priorityTrackedToken(XRP_ARMY),rawCurrency:'4141414100000000000000000000000000000000'});
   assert.equal(again,false,'do not blindly overwrite one valid code with another');
   assert.equal(td.getTrackedTokens()[0].rawCurrency,XRP_ARMY.rawCurrency);
+  const td2=new TokenDiscovery(xrpl,{
+    getTrackedTokens:()=>[{
+      currency:XRP_ARMY.rawCurrency,rawCurrency:XRP_ARMY.rawCurrency,
+      issuer:XRP_ARMY.issuer,firstSeen:100,lastUpdated:100
+    }],
+    saveToken:()=>{throw Error('duplicate ARMY alias must not be saved')}
+  });
+  await td2.initialize();
+  assert.equal(td2.addTrackedToken(priorityTrackedToken(XRP_ARMY)),false);
+  assert.equal(td2.getTrackedTokens().length,1,'ticker and hex representations are the same issued token');
   console.log('PASS older ARMY ticker-only records upgraded to correct exact raw issue before AMM preload');
   console.log('ARMY PRICING + USER BLACKLIST TESTS PASSED (MOCKS ONLY)');
 }
