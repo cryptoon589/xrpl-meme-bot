@@ -17,7 +17,7 @@ This branch stacks on draft PR #6 (which stacks on PR #5, then PR #4), and integ
 
 ## Critical blockers: do NOT cut over yet
 
-1. Original permanent blacklist must be verified by the operator. The repository does NOT prove the exact user-chosen tokens from direct user messages. A May 4 commit describes OCT/SHX/MXI/CORE as operator-confirmed *established, non-meme exclusions*, then explicitly removes XSPECTAR as a meme; the initial commit also removed guessed XRDOGE/XOGE/BEAR/BULL/FURY exclusions. On May 11, ARMY/LOVE were blocked due to no-price errors, not because they are rugs. **User clarification Nov 16: ARMY and LOVE are legitimate XRPL tickers and should NOT be permanently blacklisted. They remain eligible whenever their prices are obtainable and they meet normal temporary liquidity, issuer and risk checks.** A May 24 commit removed automatic ghost-exit blocking to avoid missing dormant winners. These commits provide history, not permission to migrate a list automatically. The manifest is deliberately NOT created. Do not insert ANY token without explicit user review. The file must use format hunterix-manual-blacklist-v1 and managedBy operator. An empty list in a schema example does not mean the user's actual list is empty.
+1. **The operator has explicitly confirmed the exact permanent blacklist: OCT, SHX, MXI and CORE (Nov 16, 2026).** The reviewed content is committed in `state/manual_token_blacklist.json` with exactly those four tickers, no other asset/issuer exclusions. ARMY, LOVE, XSPECTAR and earlier guessed meme tokens are NOT permanently blacklisted. The permanent list is no longer an open clarification; at deployment the operator must still approve the exact file's SHA256 in `HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256`. This guards against unreviewed changes. Temporary liquidity/no-price/issuer checks must never add permanent bans.
 
 2. The recovery database's four unresolved PAPER positions remain in the original database. The new epoch must NOT import, delete, refund, forcibly close or mark-to-market those positions. The script scripts/legacy_positions_report.py reads their status safely without a fake current price, and the original SQLite is never modified.
 
@@ -57,3 +57,16 @@ GitHub Actions workflow .github/workflows/vnext-release-candidate.yml compiles, 
 ## Historical chat-history cross-check and operator clarification
 
 A search of past XRPL bot/Hunterix chat history found a general instruction to blacklist known rugs, and an April 2 preference to stop BTC/XRP pair tracking in favor of XRPL-native token/pool discovery. **Neither establishes an exhaustive token blacklist or authorization to exclude every stablecoin/L1/established project permanently.** No direct user message validating OCT/SHX/MXI/CORE as the permanent list was retrieved, despite the May 4 commit's operator-verified description. Treat those symbols as candidates for review, not as already approved bans. Do not auto-migrate them, or XRDOGE/XOGE/XSPECTAR/ARMY/LOVE. Do not convert any no-price, liquidity or issuer risk into a permanent manual blacklist.
+
+## XRP ARMY issuer-exact priority pricing repair
+
+The user expressly requested that ARMY be trade-eligible after its price is fixed. XRPL.to identifies the widely traded XRP ARMY as issuer `rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC` with issued currency `41524D5900000000000000000000000000000000`, while many other unrelated ARMY tickers exist. Reference: https://xrpl.to/token/rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC-41524D5900000000000000000000000000000000
+
+- `src/market/priorityIssues.ts`: registers this exact existing issued token before AMM preload/monitoring; never calls it a new launch, and it is not a buy signal or exemption from risk checks.
+- `TokenDiscovery.addTrackedToken`: repairs legacy display-only raw currency entries without overwriting an already valid but different 160-bit currency.
+- `AMMPriceFetcher` and burst detector now share the same finite issuer/currency-validated AMM reserve parser. Requests use validated ledger, reject other issuers, frozen pools, invalid fees/reserves, and preserve correct reserve orientation.
+- Failed canonical ARMY lookups retry on a bounded 30-second cadence rather than inheriting a 5-minute generic null cache. Missing quotes still block trades; no fabricated fills.
+- `scripts/test_army_pricing_and_blacklist.js`: synthetic regression for correct AMM price, burst/scanner matching, wrong issuer rejection, raw-code repair, null recovery and the **exactly four** approved permanent bans.
+- `scripts/diagnose_army_price.js`: one-shot read-only XRPL diagnostic from staged vNext checkout after `npm run build`. It will confirm whether that particular VPS RPC actually returns a fresh validated price. Until it is run and passes, do **not** claim live ARMY pricing is fixed.
+
+A published pool and passing mocked tests are **not** proof of an executable XRPL sell quote or a profitable entry.
