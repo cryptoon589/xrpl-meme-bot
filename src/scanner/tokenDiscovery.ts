@@ -34,8 +34,16 @@ export class TokenDiscovery {
    */
   async initialize(): Promise<void> {
     const existingTokens = this.db.getTrackedTokens();
+    const seenIssued=new Set<string>();
     for (const token of existingTokens) {
       const key = `${token.currency}:${token.issuer}`;
+      const raw=normalizeIssuedCurrency(token.rawCurrency || token.currency);
+      const identity=raw ? `${raw}:${token.issuer}` : key;
+      if (seenIssued.has(identity)) {
+        debug(`[Discovery] Legacy duplicate issued-token representation ignored for scanning: ${token.currency}`);
+        continue; // never delete or rewrite historical SQLite records
+      }
+      seenIssued.add(identity);
       this.trackedTokens.set(key, token);
       this.knownIssuers.add(token.issuer);
     }
