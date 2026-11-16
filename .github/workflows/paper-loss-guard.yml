@@ -1,0 +1,21 @@
+name: PAPER loss reentry guard tests
+
+on:
+  push:
+    branches:
+      - fix/paper-loss-reentry-20261116
+  workflow_dispatch:
+
+jobs:
+  paper-loss-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Disposable PAPER loss guard regression
+        run: node scripts/test_paper_loss_guard.js
