@@ -37,7 +37,7 @@ for(const [caseNo,bad] of [
  {...official,amount2:{...official.amount2,currency:'41524d5800000000000000000000000000000000'}},
  {...official,amount:'NaN'},
  {...official,amount2:{...official.amount2,value:'0'}},
- {...official,amount2_frozen:true},
+ {...official,asset2_frozen:true},
  {...reversed,asset_frozen:true},
  {...official,trading_fee:1001},
  {...official,trading_fee:-1},
