@@ -77,6 +77,11 @@ async function main() {
   const config = loadConfig();
   getLogger(config.logLevel);
 
+  // Startup invariant: verify the exact operator-controlled permanent
+  // exclusion list BEFORE opening/writing SQLite or connecting to XRPL.
+  // Never silently substitute hard-coded or inferred exclusions.
+  const manualBlacklist = OperatorBlacklist.load();
+
   info('🚀 Starting XRPL Meme Bot v1.3.0...');
   info(`Mode: ${config.mode}`);
 
@@ -177,7 +182,6 @@ async function main() {
   // The operator's explicit manual list is the ONLY permanent token blacklist.
   // Missing manifest => startup fails closed, rather than silently guessing
   // what the operator previously chose to blacklist.
-  const manualBlacklist = OperatorBlacklist.load();
   const BURST_TRADE_BLOCKLIST = manualBlacklist.asDecisionSet();
   info(`[Blacklist] Loaded ${manualBlacklist.list().length} operator entries. No automatic token additions.`);
 
