@@ -45,6 +45,15 @@ jobs:
             console.log('PASS new PAPER epoch boots with catalog and clean 100 XRP checkpoint, no inherited trade or position');
           } finally { db.close(); }
           JS
+      - name: Daily PAPER report recognizes isolated epoch without Telegram network
+        run: |
+          python3 -m py_compile scripts/prepare_paper_epoch.py scripts/daily_report.py
+          DAILY_REPORT_DB_PATH="$PWD/data/meme_bot.paper-epoch-20261116-ci.db" \
+            python3 scripts/daily_report.py --dry-run > /tmp/epoch-daily-report.txt
+          grep -q 'Spendable PAPER cash:</b> 100.00 XRP' /tmp/epoch-daily-report.txt
+          grep -q 'meme_bot.paper-epoch-20261116-ci.db (isolated PAPER history)' /tmp/epoch-daily-report.txt
+          grep -q 'No checklist in this report authorizes LIVE trading' /tmp/epoch-daily-report.txt
+          grep -q 'DRY RUN: Telegram not contacted' /tmp/epoch-daily-report.txt
       - name: Remove disposable test epoch
         if: always()
         run: rm -f data/meme_bot.paper-epoch-20261116-ci.db data/meme_bot.paper-epoch-20261116-ci.db-wal data/meme_bot.paper-epoch-20261116-ci.db-shm
