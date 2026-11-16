@@ -57,6 +57,18 @@ The audit prints `reconstructed cash=-147.485 XRP` using **all** entry debits, i
 
 Follow-up forensic script `scripts/audit_trade_edge_concentration.py` (audit branch) measures by month, profile, winner concentration, 81 liquidity-loss trades, top 12 winners/losers and partial entry-pool fields without changing the database. This is essential before choosing which signals to shadow-only or suppress.
 
+## Concentration drilldown — 2026-11-16 00:35 UTC, read-only historical PAPER data
+
+A subsequent operator-run forensic script found **58 trades with estimated losses of at least 50% totaling -341.787 XRP**, offset in part by **25 winners over +50% yielding +349.923 XRP**. The full sample's positive outcomes are very sparse and heavy-tailed. Source=burst n=295 estimated net +121.148 XRP, but removing its **three largest wins** flips burst to **-59.875 XRP**; removing just the largest reduces profit to +36.863 XRP. **Do not classify burst as a verified robust alpha source.**
+
+Repeated historical CFH trades dominate the 12 largest individual losses (11 are CFH; worst is XPM). OLX appears repeatedly among biggest winners, alongside a PHNUX trade that gained an estimated **+84.286 XRP from a 3.75 XRP entry**, but had exit_reason=`kill_liq_drop` after ~1.6 min. This unusual outlier needs price-reserve and token-identity verification and executable sell quote reconstruction. **Ticker names alone do not prove unique issuer identity**. Use the enhanced `scripts/audit_trade_edge_concentration.py` (same audit branch) to show token+issuer pairs, quick reentry after losses, and all positive liquidity-drop exits. CI synthetic test passed.
+
+The 81 historical `kill_liq_drop` trades were all `trade_profile=BURST_SCALP`, **but 55 have trade_source=momentum**, 18 burst, 5 stream, 3 scored. This is not a contradiction in the output: the current `PaperTrader.tryOpenTrade` explicitly assigns `profileName='BURST_SCALP'` for scored/stream entries, meaning a profile is *exit policy*, not entry source. Historical tags may reflect earlier code versions. Never use `BURST_SCALP` profile aggregates to claim burst *entry* profitability; retain separate source, profile and versioned entry signal.
+
+The current `tryOpenBurstTrade` re-entry cooldown is held in `lastCloseTime`, an in-memory Map that is **not reconstructed after a restart**; the 10-minute rule may be circumvented by PM2 restarts. Scored/stream cooldowns use the same in-memory map (15m/2h conditional). With repeated large losses in CFH, add persisted *per-issuer* and *per-token+issuer* cooldown / drawdown guards, validated against historical event timing. Do not automatically blacklist all CFH ticker matches without issuer-level proof.
+
+`kill_liq_drop` triggers based on pool reserve falling by a percentage relative to entry while the exit uses the latest price and the simplistic slippage model. Liquidity withdrawals can occur without an equivalent spot-price fall, and price may be stale or untradeable. The `kill_liq_drop` category must be evaluated using observed reserve changes, validated fillable sell quotes and proper token accounting.
+
 ## P1 — NEXT ENGINEERING PRIORITIES
 
 ### P1.1 Learning can overfit and some learned gates are unused
