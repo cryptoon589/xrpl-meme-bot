@@ -12,6 +12,7 @@ import { BuyPressureTracker } from '../market/buyPressureTracker';
 import { TradeProfileName, PROFILES } from '../execution/tradeProfiles';
 import { AMMPriceFetcher } from '../market/ammPriceFetcher';
 import { closedEconomicPnl, indicativeOpenPnl, partialRealizedPnl, reconstructedRemainingTokens } from './paperAccounting';
+import { estimateAmmSell } from './ammExecutionQuote';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -1367,6 +1368,34 @@ export class PaperTrader {
     const position = this.openPositions.get(`${currency}:${issuer}`);
     if (!position || !this.cashReconciled) return null;
     return indicativeOpenPnl(position.trade, position.tokensHeld, spotPriceXRP);
+  }
+
+  /**
+   * Indicative reserve-aware PAPER valuation of existing unsold tokens.
+   * Not executable: transfer fees, reserve changes, issuer restrictions, route
+   * and ledger slippage constraints are not simulated.
+   */
+  getIndicativeOpenAmmMark(
+    currency: string, issuer: string, poolXRP: number,
+    poolTokens: number, tradingFeeUnits: number
+  ): { pnlXRP: number; pnlPercent: number; estimatedProceedsXRP: number;
+       impactPct: number } | null {
+    if (!this.cashReconciled) return null;
+    const position = this.openPositions.get(`${currency}:${issuer}`);
+    if (!position) return null;
+    const quote = estimateAmmSell(position.tokensHeld, poolTokens, poolXRP, tradingFeeUnits);
+    if (!quote) return null;
+    // Existing PAPER model also applies a conservative 0.3% execution buffer.
+    // Kept explicit and separate from XRPL AMM trading fee embedded in quote.
+    const afterOverhead = quote.amountOut * (1 - 0.003);
+    const remainingFraction = Math.max(0, Math.min(100,position.trade.remainingPosition)) / 100;
+    const remainingCost = position.trade.entryAmountXRP * (1 + 0.003) * remainingFraction;
+    return {
+      pnlXRP: afterOverhead - remainingCost,
+      pnlPercent: remainingCost > 0 ? 100 * (afterOverhead - remainingCost) / remainingCost : 0,
+      estimatedProceedsXRP: afterOverhead,
+      impactPct: quote.priceImpactPct,
+    };
   }
 
   /**

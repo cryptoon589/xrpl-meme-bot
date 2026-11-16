@@ -32,6 +32,7 @@ import { debug, info } from '../utils/logger';
 import { WhaleTracker } from './whaleTracker';
 import { SocialDetector } from './socialDetector';
 import { ScoreWeights } from '../analysis/tradeAnalyzer';
+import { isLearningApproved } from '../analysis/learningApproval';
 
 const RECOMMENDATIONS_PATH = path.join(process.cwd(), 'state', 'recommendations.json');
 
@@ -58,30 +59,30 @@ export class TokenScorer {
   }
 
   loadLearnedWeights(): void {
+    // Fail closed: a missing, expired, changed, or unapproved recommendation
+    // must NEVER leave prior adaptive weights active on a subsequent reload.
+    this.learnedWeights = { ...DEFAULT_WEIGHTS };
+    this.weightsLoadedAt = Date.now();
     try {
       if (!fs.existsSync(RECOMMENDATIONS_PATH)) return;
       const raw = fs.readFileSync(RECOMMENDATIONS_PATH, 'utf8');
       const recs = JSON.parse(raw);
-      if (!recs?.scoreWeights) return;
-      // Only apply learned weights if win rate is meaningful (≥30%) — below this
-      // the weights were learned from bad/noisy data and will suppress good signals.
-      const wr = recs.overallWinRate ?? 0;
-      const trades = recs.tradesAnalyzed ?? 0;
-      if (wr < 30 || trades < 30) {
-        info(`[TokenScorer] Ignoring learned weights (WR=${wr}% trades=${trades}) — below quality threshold, using defaults`);
-        this.learnedWeights = { ...DEFAULT_WEIGHTS };
-        this.weightsLoadedAt = Date.now();
+      if (!recs?.scoreWeights || !isLearningApproved(recs)) {
+        debug('[TokenScorer] Advisory recommendations only; using fixed default weights');
         return;
       }
       const w: ScoreWeights = recs.scoreWeights;
-      const vals = Object.values(w) as number[];
-      if (vals.length < 4 || vals.some(v => typeof v !== 'number' || v < 0 || v > 100)) return;
-      this.learnedWeights = w;
-      this.weightsLoadedAt = Date.now();
-      info(`[TokenScorer] Learned weights loaded (${trades} trades, ${wr}% WR)`);
-      info(`[TokenScorer] momentum=${w.volumeAccelScore} buyPressure=${w.buyPressureScore} newWallets=${w.holderGrowthScore} volSurge=${w.liquidityScore}`);
+      const keys: (keyof ScoreWeights)[] = [
+        'liquidityScore','holderGrowthScore','buyPressureScore',
+        'volumeAccelScore','devSafetyScore','spreadScore',
+      ];
+      if (!keys.every(k => Number.isFinite(w[k]) && w[k] >= 0 && w[k] <= 100)) return;
+      const total = keys.reduce((sum,k) => sum + w[k],0);
+      if (total < 95 || total > 105) return;
+      this.learnedWeights = { ...w };
+      info('[TokenScorer] Explicitly approved PAPER strategy weights loaded');
     } catch (err) {
-      debug(`[TokenScorer] Could not load learned weights: ${err}`);
+      debug(`[TokenScorer] Could not load weights; defaults remain active: ${err}`);
     }
   }
 

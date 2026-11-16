@@ -19,6 +19,8 @@ export interface TokenPrice {
   poolTokens: number;          // token side of pool
   tradingFee: number;          // AMM fee in basis points
   source: 'amm' | 'orderbook';
+  /** Time this source was actually fetched; cached prices retain original timestamp. */
+  observedAtMs?: number;
   poolAge?: number;            // ms since pool created (if available)
 }
 
@@ -99,16 +101,18 @@ export class AMMPriceFetcher {
     for (const ammCurrency of ammCandidates) {
       const ammPrice = await this.fetchFromAMM(ammCurrency, issuer);
       if (ammPrice) {
-        this.cache.set(key, { price: ammPrice, fetchedAt: now });
-        return ammPrice;
+        const observed = { ...ammPrice, observedAtMs: Date.now() };
+        this.cache.set(key, { price: observed, fetchedAt: observed.observedAtMs });
+        return observed;
       }
     }
 
     // Fall back to order book using the same normalized valid currency.
     const bookPrice = await this.fetchFromOrderBook(apiCurrency, issuer);
     if (bookPrice) {
-      this.cache.set(key, { price: bookPrice, fetchedAt: now });
-      return bookPrice;
+      const observed = { ...bookPrice, observedAtMs: Date.now() };
+      this.cache.set(key, { price: observed, fetchedAt: observed.observedAtMs });
+      return observed;
     }
 
     // Cache the null result so we don't retry for 5 minutes

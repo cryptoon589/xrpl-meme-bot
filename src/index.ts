@@ -41,6 +41,7 @@ import { SocialDetector } from './scoring/socialDetector';
 import { LiveValidator } from './execution/liveValidator';
 import { TradeAnalyzer } from './analysis/tradeAnalyzer';
 import { RuntimeLearning } from './analysis/runtimeLearning';
+import { isLearningApproved } from './analysis/learningApproval';
 import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
 import { MissedOpportunityTracker } from './market/missedOpportunityTracker';
@@ -1438,11 +1439,11 @@ function startPeriodicScan(
     const livePriceResults = await Promise.allSettled(
       openPositions.map((pos: any) =>
         ammPriceFetcher.getPrice(pos.tokenCurrency, pos.tokenIssuer, pos.rawCurrency)
-          .then((r: any) => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: r?.priceXRP ?? null }))
+          .then((r: any) => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: r ?? null }))
           .catch(() => ({ key: `${pos.tokenCurrency}:${pos.tokenIssuer}`, price: null }))
       )
     );
-    const priceMap = new Map<string, number | null>();
+    const priceMap = new Map<string, import('./market/ammPriceFetcher').TokenPrice | null>();
     for (const r of livePriceResults) {
       if (r.status === 'fulfilled') priceMap.set(r.value.key, r.value.price);
     }
@@ -1473,22 +1474,26 @@ function startPeriodicScan(
           ? `${Math.floor(ageMs / 3600000)}h ${Math.round((ageMs % 3600000) / 60000)}m`
           : `${Math.round(ageMs / 60000)}m`;
 
-        // The only permissible mark comes from a recent fetched spot price.
-        // Never substitute historical highs or the entry price for a quote.
-        // Inventory from historical unreconciled data is deliberately NOT
-        // presented as earned/available profit.
-        const posKey    = `${pos.tokenCurrency}:${pos.tokenIssuer}`;
-        const livePrice = priceMap.get(posKey) ?? null;
-        const mark = livePrice && livePrice > 0
-          ? paperTrader.getIndicativeOpenMark(pos.tokenCurrency, pos.tokenIssuer, livePrice)
+        // Only current, observed AMM reserve ratios can estimate full-size
+        // PAPER sale proceeds. Book midpoint and historical highs are NOT
+        // reliable exit prices for meme tokens.
+        const posKey = `${pos.tokenCurrency}:${pos.tokenIssuer}`;
+        const quote = priceMap.get(posKey) ?? null;
+        const quoteFresh = quote?.observedAtMs != null &&
+          now - quote.observedAtMs >= 0 && now - quote.observedAtMs <= 15000;
+        const mark = quoteFresh && quote?.source === 'amm'
+          ? paperTrader.getIndicativeOpenAmmMark(
+              pos.tokenCurrency,pos.tokenIssuer,quote.poolXRP,
+              quote.poolTokens,quote.tradingFee)
           : null;
         const pnlStr = mark
-          ? `${mark.pnlXRP >= 0 ? '+' : ''}${mark.pnlXRP.toFixed(2)} XRP (${mark.pnlPercent >= 0 ? '+' : ''}${mark.pnlPercent.toFixed(1)}%)`
-          : 'N/A (no audited inventory + current quote)';
+          ? `${mark.pnlXRP >= 0 ? '+' : ''}${mark.pnlXRP.toFixed(2)} XRP (${mark.pnlPercent >= 0 ? '+' : ''}${mark.pnlPercent.toFixed(1)}%), estimated AMM sale impact ${mark.impactPct.toFixed(1)}%`
+          : 'N/A (no recent reserve-aware AMM quote or unreconciled inventory)';
         const pnlIcon = mark ? (mark.pnlXRP >= 0 ? '🟢' : '🔴') : '⚪';
-        const typeIcon  = pos.isBurst ? '🚀' : '📈';
-        const priceTag  = livePrice != null && livePrice > 0
-          ? ` | recent spot: ${fmtP(livePrice)}` : ' | spot unavailable';
+        const typeIcon = pos.isBurst ? '🚀' : '📈';
+        const priceTag = quoteFresh && quote?.priceXRP != null && quote.priceXRP > 0
+          ? ` | recent ${quote.source} spot: ${fmtP(quote.priceXRP)}`
+          : ' | recent spot unavailable';
 
         lines.push(
           `${typeIcon} <b>${ticker}</b>${priceTag}`,
@@ -1500,7 +1505,7 @@ function startPeriodicScan(
       }
     }
 
-    lines.push('<i>Spot marks are NOT executable XRPL sell quotes. Historical inventory and cash remain unreconciled until audited.</i>');
+    lines.push('<i>Reserve-curve PAPER values are estimates, NOT executable XRPL fills. Issuer restrictions, transfer fees, routes and ledger changes may prevent actual sales.</i>');
     await telegramAlerter.sendAlert({
       type: 'open_positions_update',
       message: lines.join('\n'),
@@ -1610,16 +1615,17 @@ function startPeriodicScan(
       message: logText,
     }, config);
 
-    // Auto-apply and hot-reload only if we have enough data
+    // Advisory analytics do not alter active strategy policy by themselves.
     if (recs) {
-      if (recs.autoApplyReady) {
-        info('TradeAnalyzer: auto-apply threshold met - applying recommendations');
+      if (isLearningApproved(recs)) {
+        info('[Learning] Independent epoch OOS approval verified; applying PAPER recommendations');
         const configPath = process.env.CONFIG_PATH || './bot-config.json';
         tradeAnalyzer.applyRecommendations(recs, configPath);
+      } else {
+        info('[Learning] Advisory report only; auto-application blocked');
       }
       tokenScorer.loadLearnedWeights();
       runtimeLearning.reload();
-      info('TradeAnalyzer: scorer weights and runtime learning reloaded');
     }
     info('[BotLog] Bot log sent successfully.');
     } catch (err) {
