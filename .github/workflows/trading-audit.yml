@@ -50,9 +50,22 @@ jobs:
           grep -q 'PAPER ONLY' /tmp/daily-report-audit.txt
           grep -q 'Bankroll:</b> not audited' /tmp/daily-report-audit.txt
           grep -q 'NOT CERTIFIED' /tmp/daily-report-audit.txt
+          grep -q 'NEW_LAUNCH history (all-time' /tmp/daily-report-audit.txt
+          grep -q 'No checklist in this report authorizes LIVE trading' /tmp/daily-report-audit.txt
+          if grep -q '✅ WR' /tmp/daily-report-audit.txt; then exit 1; fi
           grep -q 'DRY RUN: Telegram not contacted' /tmp/daily-report-audit.txt
           if grep -q 'READY FOR LIVE' /tmp/daily-report-audit.txt; then exit 1; fi
           if DAILY_REPORT_DB_PATH=/tmp/legacy.db python3 scripts/daily_report.py --check-config; then exit 1; fi
+          python3 - <<'PY'
+          import sqlite3
+          db=sqlite3.connect('/tmp/hunterix-report-audit/meme_bot.recovery.db')
+          db.execute('DELETE FROM paper_trades')
+          db.commit()
+          db.close()
+          PY
+          DAILY_REPORT_DB_PATH=/tmp/hunterix-report-audit/meme_bot.recovery.db python3 scripts/daily_report.py --dry-run > /tmp/daily-report-zero.txt
+          grep -q 'AvgW: N/A | AvgL: N/A' /tmp/daily-report-zero.txt
+          grep -q 'Only 0 closed trades in 7d' /tmp/daily-report-zero.txt
       - name: Synthetic trade history audit
         run: |
           python3 - <<'PY'
