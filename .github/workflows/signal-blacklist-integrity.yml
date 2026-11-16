@@ -1,0 +1,31 @@
+name: XRPL signal integrity and operator-only blacklist
+
+on:
+  push:
+    branches:
+      - feature/signals-user-blacklist-20261116
+  workflow_dispatch:
+
+jobs:
+  offline-signal-regression:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Operator-only manual token blacklist
+        run: node scripts/test_manual_blacklist.js
+      - name: Stale vs fresh whale wallet signal
+        run: node scripts/test_whale_signal_integrity.js
+      - name: Burst, first price baseline and confirmed AMM launch
+        run: node scripts/test_burst_launch_integrity.js
+      - name: Prior PAPER accounting and fee regressions
+        run: |
+          node scripts/test_paper_accounting_recovery.js
+          node scripts/test_amm_sell_quotes.js
+          node scripts/test_learning_gate.js
+          node scripts/test_telegram_reporting_integrity.js
