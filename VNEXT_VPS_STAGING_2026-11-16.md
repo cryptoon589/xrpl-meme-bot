@@ -3,17 +3,18 @@
 **No old PAPER stop/restart, new PM2 start, LIVE trading, wallet transactions or cron edits in these steps.**
 The DigitalOcean connector cannot run shell commands; the operator must run these commands in SSH on xrpl-bot.
 
-## Phase 1 — separate checkout and coherent recovery snapshot
+## Phase 1 — separate Git worktree and coherent recovery snapshot
 
 ```bash
-cd /root &&
-git clone --single-branch --depth 1 --branch release/hunterix-vnext-paper-20261116 https://github.com/cryptoon589/xrpl-meme-bot.git hunterix-vnext-stage-20261116 &&
+cd /root/xrpl-meme-bot &&
+git fetch --no-tags origin release/hunterix-vnext-paper-20261116 &&
+git worktree add --detach /root/hunterix-vnext-stage-20261116 FETCH_HEAD &&
 cd /root/hunterix-vnext-stage-20261116 &&
 python3 scripts/stage_vnext_safely.py --old-root /root/xrpl-meme-bot &&
 python3 scripts/prepare_paper_epoch.py --plan --output data/meme_bot.paper-epoch-20261116-vnext.db
 ```
 
-Run this block only ONCE and only if the staging directory does not already exist. The script checks disk, manual blacklist, compact DB and PM2 state. Its sole DB write is a NEW SQLite online backup into the separate stage tree; it does NOT modify the live source recovery database, original 18GiB historical database, PM2 or Telegram.
+Run this block only ONCE and only if the staging directory does not already exist. `git worktree add` creates an isolated checkout from the just-fetched release commit while preserving the current working directory and all its uncommitted files. It uses the existing repo's GitHub credentials; it does not reset, pull or switch the running code. The script checks disk, manual blacklist, compact DB and PM2 state. Its sole DB write is a NEW SQLite online backup into the separate stage tree; it does NOT modify the live source recovery database, original 18GiB historical database, PM2 or Telegram.
 
 Expected permanent exclusions: **OCT, SHX, MXI, CORE only**. ARMY and LOVE remain eligible subject to normal pricing and risk checks. The stage script displays the four-item file and SHA256; no wallet secrets are printed.
 
