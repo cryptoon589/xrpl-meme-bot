@@ -48,6 +48,10 @@ import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
 import { MissedOpportunityTracker } from './market/missedOpportunityTracker';
 import { diagnostics } from './diagnostics/diagnostics';
+import fs from 'fs';
+import { MemeCategoryFeed, setActiveMemeCategoryFeed } from './market/memeCategoryFeed';
+import { canonicalIssue, dynamicMemeUniverse } from './risk/dynamicMemeUniverse';
+import { selectDynamicScanTokens } from './scanner/dynamicMemeScheduler';
 
 // Global state
 let isRunning = false;
@@ -532,6 +536,21 @@ async function main() {
 
   await tokenDiscovery.initialize();
 
+  // Optional, fail-closed dynamic meme metadata feed. Does not authorize
+  // purchases: the TDE still verifies signal, pool reserves, slippage and risk.
+  if (config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1') {
+    const feed=new MemeCategoryFeed(issue=>{
+      tokenDiscovery.addTrackedToken({
+        currency:issue.display,rawCurrency:issue.currency,
+        issuer:issue.issuer,firstSeen:issue.dateon||Date.now(),
+        lastUpdated:Date.now()
+      });
+    });
+    setActiveMemeCategoryFeed(feed);
+    feed.start(); // fetches are not on the XRPL node
+    info('[MemeDiscovery] dynamic issuer-exact category feed enabled (Data by xrpl.to https://xrpl.to)');
+  }
+
   // Operator-requested priority watch issues. These are existing tokens,
   // not NEW_LAUNCH discoveries, never auto-traded and never risk-exempt.
   // Seed BEFORE burst AMM preload and scan startup; name alone is NOT enough
@@ -864,7 +883,18 @@ function startPeriodicScan(
   BURST_TRADE_BLOCKLIST: Set<string>,
   manualBlacklist: OperatorBlacklist
 ): void {
-  const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
+  const MAX_TRACKED_TOKENS = 300; // fixed RPC work budget, not meme-universe limit
+  const dynamicMode = config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1';
+  const bootstrapKeys = new Set<string>();
+  if(dynamicMode) {
+    const approved=JSON.parse(fs.readFileSync(
+      process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE!, 'utf8'
+    )) as {tokens:Array<{currency:string;issuer:string}>};
+    for(const token of approved.tokens) {
+      const key=canonicalIssue(token.currency,token.issuer);
+      if(key)bootstrapKeys.add(key);
+    }
+  }
   const BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.SCAN_BATCH_SIZE || '10', 10) || 10)); // Configurable scanner concurrency
   const HOLDER_SCAN_INTERVAL = 24; // Scan holders every 24th cycle (~6 minutes)
   let scanCycle = 0;
@@ -883,13 +913,29 @@ function startPeriodicScan(
     try {
       let tokens = tokenDiscovery.getTrackedTokens();
 
-      // Smart pruning: remove inactive tokens with no pool and low score
-      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config, paperTrader);
-
-      // Hard cap if still over limit
-      if (tokens.length > MAX_TRACKED_TOKENS) {
-        tokens = tokens.sort((a, b) => b.lastUpdated - a.lastUpdated).slice(0, MAX_TRACKED_TOKENS);
-        warn(`Token count exceeds limit after pruning, scanning most recent ${MAX_TRACKED_TOKENS}`);
+      if(dynamicMode) {
+        // Discovery can track 10k+ tokens, but a public XRPL RPC must only
+        // receive bounded AMM/holder requests. Rotate the confirmed universe.
+        const memeKeys=new Set(bootstrapKeys);
+        for(const issue of dynamicMemeUniverse.eligibleIssues()){
+          const key=canonicalIssue(issue.currency,issue.issuer);
+          if(key)memeKeys.add(key);
+        }
+        const openKeys=new Set((paperTrader?.getOpenPositionsSummary()||[]).map(p=>
+          canonicalIssue(p.rawCurrency||p.tokenCurrency,p.tokenIssuer)).filter(
+          (k):k is string=>!!k));
+        tokens=selectDynamicScanTokens(tokens,memeKeys,openKeys,scanCycle,MAX_TRACKED_TOKENS);
+        if(scanCycle%4===1) {
+          info('[MemeDiscovery] monitored '+memeKeys.size+' exact issues; scanning '+
+            tokens.length+' rotating meme candidates; catalog remains '+tokenDiscovery.getTokenCount());
+        }
+      } else {
+        // Compatibility: static release behavior unchanged when feature off.
+        tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config, paperTrader);
+        if(tokens.length>MAX_TRACKED_TOKENS) {
+          tokens=tokens.sort((a,b)=>b.lastUpdated-a.lastUpdated).slice(0,MAX_TRACKED_TOKENS);
+          warn('Token count exceeds limit, scanning most recent '+MAX_TRACKED_TOKENS);
+        }
       }
 
       // Periodic holder count update
