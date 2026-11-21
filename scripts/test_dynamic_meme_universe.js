@@ -40,6 +40,9 @@ async function run() {
   assert.equal(canonicalIssue('NEWMEME',issuer),null,
     'display name cannot substitute for original ledger issue');
   assert.equal(canonicalIssue(newHex,issuer),newHex+':'+issuer);
+  local.acceptTaggedPage([tagged(newHex,issuer,['Memes','RWA'])],clock+2000);
+  assert.equal(local.hasIssue('NEWMEME',issuer,newHex,clock+3000),false,
+    'a later explicit negative category revokes prior meme evidence');
 
   // End-to-end: documented tagged-list response, issuer identity, TTL and
   // on-demand token lookup. Both 3-character and 40-hex XRPL codes supported.
@@ -71,6 +74,11 @@ async function run() {
     'metadata never overrides non-meme symbol ban');
   assert.equal(paperMemeEntryDecision('SOLO',issuer,'534F4C4F00000000000000000000000000000000').allowed,
     false,'conflicting metadata excludes utility asset');
+  const solo='534F4C4F00000000000000000000000000000000';
+  const knownSoloIssuer='rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz';
+  dynamicMemeUniverse.acceptTaggedPage([tagged(solo,knownSoloIssuer)],clock);
+  assert.equal(paperMemeEntryDecision('SOLO',knownSoloIssuer,solo).allowed,false,
+    'known conventional issue cannot be authorized by a false meme tag');
 
   const late='4C41544500000000000000000000000000000000';
   assert.equal(await feed.ensureIssue('LATE',issuer,late),true);
