@@ -40,6 +40,8 @@ jobs:
         run: node scripts/test_dynamic_meme_universe.js
       - name: Dynamic meme XRPL RPC budget regressions (offline)
         run: node scripts/test_dynamic_rpc_budget.js
+      - name: Dynamic PAPER performance audit versus 16-trade baseline (SQLite offline)
+        run: python3 scripts/test_dynamic_paper_performance.py
       - name: Whale, burst, validated new launches and operator blacklist
         run: |
           node scripts/test_manual_blacklist.js
