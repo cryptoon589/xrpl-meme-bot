@@ -113,12 +113,17 @@ def audit(db_path: Path, baseline_path: Path) -> int:
             for tid, row in current.items()
         )
         spent_since = sum(float(t["entry_amount_xrp"]) for t in new)
-        expected_cash = old_cash - spent_since + proceeds_diff
+        # Opening a PAPER trade debits the buy amount PLUS the simulated
+        # entry fee (0.3%). xrp_returned is already net of exit fees.
+        # Omitting entry fees creates an apparent 0.003 * spend cash shortfall.
+        entry_fees_since = spent_since * PAPER_ENTRY_FEE_RATE
+        expected_cash = old_cash - spent_since - entry_fees_since + proceeds_diff
         print("=== HUNTERIX PAPER PERFORMANCE SINCE DYNAMIC ACTIVATION ===")
         print("Database:   ", db_path)
         print("Baseline:   ", baseline_path)
         print(f"Cash:       {cash:.6f} XRP (baseline {old_cash:.6f})")
         print(f"Trades:     {len(current)} total | {len(initial)} pre-dynamic | {len(new)} new")
+        print(f"New entries: {spent_since:.6f} XRP + {entry_fees_since:.6f} XRP simulated entry fees")
         print(f"Cash check: expected {expected_cash:.6f}, delta {cash-expected_cash:+.8f} XRP")
         if abs(cash - expected_cash) > TOLERANCE:
             raise RuntimeError("Cash movements DO NOT reconcile with post-baseline trade mutations")
