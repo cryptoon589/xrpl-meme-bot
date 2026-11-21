@@ -38,6 +38,8 @@ jobs:
         run: node scripts/test_meme_entry_universe.js
       - name: Dynamic meme evidence and rotating scan regressions (mock provider only)
         run: node scripts/test_dynamic_meme_universe.js
+      - name: Dynamic meme XRPL RPC budget regressions (offline)
+        run: node scripts/test_dynamic_rpc_budget.js
       - name: Whale, burst, validated new launches and operator blacklist
         run: |
           node scripts/test_manual_blacklist.js
