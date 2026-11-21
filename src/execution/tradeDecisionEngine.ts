@@ -29,6 +29,7 @@ import { diagnostics } from '../diagnostics/diagnostics';
 import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { ensureTaggedMemeIssue } from '../market/memeCategoryFeed';
+import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -95,6 +96,20 @@ export class TradeDecisionEngine {
     if (this.config.mode === 'PAPER' && process.env.BOT_PAPER_MEME_ONLY === '1') {
       const policy=paperMemeEntryDecision(input.currency,input.issuer,input.rawCurrency);
       if (!policy.allowed) return reject(0,0,'Meme-only universe: '+policy.reason);
+    }
+
+    // Separately protect source-confirmed project identities. A Memes tag
+    // proves category at most; it does not authenticate a project's issuer.
+    // Unreviewed names remain eligible through normal dynamic discovery.
+    if(this.config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1'){
+      const identity=decideVerifiedProjectIssuer(
+        input.currency,input.issuer,input.rawCurrency
+      );
+      if(!identity.allowed){
+        return reject(0,0,
+          'Verified project issuer mismatch: '+identity.ticker+
+          ' (candidate issuer is not project-published issuance)');
+      }
     }
 
     // ── 1. Blocklist checks ────────────────────────────────────────────────
