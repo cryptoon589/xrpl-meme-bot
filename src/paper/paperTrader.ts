@@ -15,6 +15,7 @@ import { closedEconomicPnl, indicativeOpenPnl, partialRealizedPnl, reconstructed
 import { estimateAmmSell } from './ammExecutionQuote';
 import { quotePaperBuy, quotePaperSell } from './reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
+import { findOpenTickerCollision } from '../risk/openTickerCollision';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -61,6 +62,24 @@ export class PaperTrader {
 
   private getPoolXrpReserve(snapshot: MarketSnapshot | null | undefined): number {
     return snapshot?.poolXrpReserve ?? ((snapshot?.liquidityXRP ?? 0) / 2);
+  }
+
+  /** Entry-only safeguard against paying for two different issuers using
+   * the same displayed ticker. Does not close or blacklist either token.
+   * All PAPER entry paths funnel through tryOpenBurstTrade or tryOpenTrade.
+   */
+  private conflictsWithOpenTicker(token: TrackedToken): boolean {
+    if (this.config.mode!=='PAPER' ||
+        process.env.BOT_PAPER_MEME_DISCOVERY!=='1')return false;
+    const conflict=findOpenTickerCollision(
+      token,
+      [...this.openPositions.values()].map(p=>p.trade)
+    );
+    if(!conflict)return false;
+    warn('[PaperRisk] Ticker identity collision: '+token.currency+
+      ' issuer='+token.issuer.slice(0,12)+'… conflicts with held issuer='+
+      conflict.tokenIssuer.slice(0,12)+'…; new PAPER entry rejected (inventory and exits untouched)');
+    return true;
   }
 
   /** FIX #28: Return the pnlXRP of the most recently closed trade for a token key, or null if none. */
@@ -161,6 +180,7 @@ export class PaperTrader {
       warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
     }
+    if (this.conflictsWithOpenTicker(token))return null;
 
     // Require minimum XRP-side pool reserve, not total TVL.
     const poolXrpReserve = this.getPoolXrpReserve(snapshot);
@@ -345,6 +365,7 @@ export class PaperTrader {
         return null;
       }
     }
+    if (this.conflictsWithOpenTicker(token))return null;
 
     // Check max open trades
     if (this.openPositions.size >= this.config.maxOpenTrades) {
