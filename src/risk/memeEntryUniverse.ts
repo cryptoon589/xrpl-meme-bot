@@ -18,6 +18,13 @@ const NON_MEME = new Set([
   'SOL','WSOL','XSOL','BNB','WBNB','AVAX','WAVAX','ADA','TRX',
   'PAXG','XAUT','FXRP','WBTC','RLUSD','USDY','USDE','SUSDE'
 ]);
+const NON_MEME_KNOWN_ISSUES = new Set([
+  'EVR:ra9g3LAJm9xJu8Awe7oWzR6VXFB1mpFtSe',
+  '534F4C4F00000000000000000000000000000000:rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz',
+  '5245414C00000000000000000000000000000000:rKVyXn1AhqMTvNA9hS6XkFjQNn2VE8Nz88'
+]);
+// Known utility/ecosystem issues from the previous PAPER misclassification.
+// These are NOT entries in the operator-controlled permanent blacklist.
 const ISSUER = /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/;
 
 function readable(value?: string): string {
@@ -41,6 +48,9 @@ export function paperMemeEntryDecision(
   if (!ISSUER.test(issuer||'')) return reject('Invalid XRPL issuer');
   const excluded=deniedName(currency,rawCurrency);
   if (excluded) return reject('Non-meme asset type: '+excluded);
+  const identity=normalizeIssuedCurrency(rawCurrency||currency);
+  if(identity && NON_MEME_KNOWN_ISSUES.has(identity+':'+issuer))
+    return reject('Previously confirmed conventional token issue');
   // Fresh, issuer-exact external meme evidence is an alternative to the
   // operator's initial two-token bootstrap list, not a permanent whitelist.
   if (process.env.BOT_PAPER_MEME_DISCOVERY==='1' &&
