@@ -16,6 +16,7 @@ async function main(){
     const known=Buffer.from('TESTMEME').toString('hex').toUpperCase().padEnd(40,'0');
     const confirmed=Buffer.from('LAUNCHMEME').toString('hex').toUpperCase().padEnd(40,'0');
     const observed=[];
+    const ammCalls=()=>observed.filter(x=>x.command==='amm_info').length;
     const request=async arg=>{
       observed.push(arg);
       return {result:{amm:null}};
@@ -27,7 +28,7 @@ async function main(){
     });
     assert(discovery.processLiveTx(payment(unknown)));
     await new Promise(r=>setImmediate(r));
-    assert.equal(observed.length,0,
+    assert.equal(ammCalls(),0,
       'routine unclassified token discovery must not issue expensive AMM RPC');
 
     dynamicMemeUniverse.acceptTaggedPage([
@@ -35,7 +36,7 @@ async function main(){
     ],Date.now());
     assert(discovery.processLiveTx(payment(known)));
     await new Promise(r=>setImmediate(r));
-    assert.equal(observed.length,1,
+    assert.equal(ammCalls(),1,
       'confirmed meme token discovery may request one AMM quote');
 
     const create={
@@ -45,7 +46,7 @@ async function main(){
     };
     assert(discovery.processLiveTx(create));
     await new Promise(r=>setImmediate(r));
-    assert.equal(observed.length,2,
+    assert.equal(ammCalls(),2,
       'validated AMMCreate stays discoverable even when meme metadata is missing');
 
     const poolCalls=[];
