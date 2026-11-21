@@ -229,6 +229,15 @@ export const SCHEMA = {
       updated_at INTEGER NOT NULL
     )
   `,
+  // Persist per-position trailing high, learned TP settings and exit profile.
+  // This does not replace economic PAPER trade/inventory/cash checkpoints.
+  paperPositionRuntime: `
+    CREATE TABLE IF NOT EXISTS paper_position_runtime (
+      trade_id INTEGER PRIMARY KEY,
+      state_json TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `,
   profileStats: `
     CREATE TABLE IF NOT EXISTS profile_stats (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
