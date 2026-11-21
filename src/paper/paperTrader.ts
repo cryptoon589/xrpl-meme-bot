@@ -14,6 +14,7 @@ import { AMMPriceFetcher } from '../market/ammPriceFetcher';
 import { closedEconomicPnl, indicativeOpenPnl, partialRealizedPnl, reconstructedRemainingTokens } from './paperAccounting';
 import { estimateAmmSell } from './ammExecutionQuote';
 import { quotePaperBuy, quotePaperSell } from './reservePaperExecution';
+import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -148,6 +149,14 @@ export class PaperTrader {
     tdeSizeXRP?: number
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
+    // Entry-only universe gate; never closes existing PAPER inventory.
+    if (process.env.BOT_PAPER_MEME_ONLY === '1') {
+      const policy=paperMemeEntryDecision(token.currency,token.issuer,token.rawCurrency);
+      if (!policy.allowed) {
+        debug('[PAPER] Meme-only burst rejected '+token.currency+': '+policy.reason);
+        return null;
+      }
+    }
     if (!this.cashReconciled) {
       warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
@@ -328,6 +337,13 @@ export class PaperTrader {
     if (!this.cashReconciled) {
       warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
+    }
+    if (process.env.BOT_PAPER_MEME_ONLY === '1') {
+      const policy=paperMemeEntryDecision(token.currency,token.issuer,token.rawCurrency);
+      if (!policy.allowed) {
+        debug('[PAPER] Meme-only entry rejected '+token.currency+': '+policy.reason);
+        return null;
+      }
     }
 
     // Check max open trades

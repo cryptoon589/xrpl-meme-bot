@@ -1,0 +1,47 @@
+{
+  "format": "hunterix-paper-meme-candidate-review-v1",
+  "purpose": "Review only. This file is not loaded by the trading engine and grants no entry eligibility.",
+  "reviewedOn": "2026-11-21",
+  "candidates": [
+    {
+      "ticker": "FUZZY",
+      "currency": "46555A5A59000000000000000000000000000000",
+      "issuer": "rhCAT4hRdi2Y9puNdkpMzxrdKa5wkppR62",
+      "sources": [
+        "https://fuzzyxrp.com/",
+        "https://xrpl.to/token/rhCAT4hRdi2Y9puNdkpMzxrdKa5wkppR62-46555A5A59000000000000000000000000000000"
+      ],
+      "status": "candidate_for_operator_approval"
+    },
+    {
+      "ticker": "PHNIX",
+      "currency": "50484E4958000000000000000000000000000000",
+      "issuer": "rDFXbW2ZZCG5WgPtqwNiA2xZokLMm9ivmN",
+      "sources": [
+        "https://phnix.io/",
+        "https://xrpl.to/token/rDFXbW2ZZCG5WgPtqwNiA2xZokLMm9ivmN-50484E4958000000000000000000000000"
+      ],
+      "status": "candidate_for_operator_approval"
+    },
+    {
+      "ticker": "LOX",
+      "currency": "LOX",
+      "issuer": "r9kzhatDuUyAxAYbbsZAbs8nLr3t7sa6Wk",
+      "sources": [
+        "https://xrplwin.com/token/r9kzhatDuUyAxAYbbsZAbs8nLr3t7sa6Wk/LOX",
+        "https://xrpl.to/token/r9kzhatDuUyAxAYbbsZAbs8nLr3t7sa6Wk-LOX"
+      ],
+      "status": "candidate_for_operator_approval"
+    },
+    {
+      "ticker": "XMEME",
+      "currency": "584D454D45000000000000000000000000000000",
+      "issuer": "r4UPddYeGeZgDhSGPkooURsQtmGda4oYQW",
+      "sources": [
+        "https://www.xmemecoinxrpl.com/",
+        "https://xrpl.to/token/r4UPddYeGeZgDhSGPkooURsQtmGda4oYQW-584D454D45000000000000000000000000000000"
+      ],
+      "status": "candidate_for_operator_approval"
+    }
+  ]
+}

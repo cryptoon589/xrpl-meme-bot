@@ -14,6 +14,9 @@ if(!process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH ||
 if(!/^[0-9a-f]{64}$/i.test(process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256 || '')){
   throw new Error('Approved operator-manifest SHA256 required before staging PM2');
 }
+if(!/^[0-9a-f]{64}$/i.test(process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256 || '')){
+  throw new Error('Reviewed exact-meme issue allowlist SHA256 required');
+}
 const endpoint=process.env.HUNTERIX_VNEXT_XRPL_WS_URL || '';
 let parsedEndpoint;
 try { parsedEndpoint=new URL(endpoint); }
@@ -39,6 +42,9 @@ module.exports={
       HUNTERIX_MANUAL_BLOCKLIST_FILE:path.join(root,'state','manual_token_blacklist.json'),
       HUNTERIX_LEGACY_SOURCE_DB_PATH:process.env.HUNTERIX_LEGACY_SOURCE_DB_PATH,
       HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256:process.env.HUNTERIX_OPERATOR_BLACKLIST_APPROVED_SHA256,
+      BOT_PAPER_MEME_ONLY:'1',
+      HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE:path.join(root,'state','paper_meme_entry_allowlist.json'),
+      HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256:process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256,
       BOT_USE_RESERVE_QUOTES:'1',
       BOT_ENABLE_LIQUIDITY_LOSS_GUARD:'1',
       BOT_ENABLE_SMALL_LAUNCH_PROBES:'0',
