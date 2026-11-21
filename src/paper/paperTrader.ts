@@ -16,6 +16,7 @@ import { estimateAmmSell } from './ammExecutionQuote';
 import { quotePaperBuy, quotePaperSell } from './reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { findOpenTickerCollision } from '../risk/openTickerCollision';
+import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -62,6 +63,22 @@ export class PaperTrader {
 
   private getPoolXrpReserve(snapshot: MarketSnapshot | null | undefined): number {
     return snapshot?.poolXrpReserve ?? ((snapshot?.liquidityXRP ?? 0) / 2);
+  }
+
+  /** Only a first-party published issuer qualifies for a protected project
+   * name. This does not suppress unreviewed meme names or close inventory.
+   */
+  private hasUnverifiedProjectIssuer(token:TrackedToken):boolean {
+    if(this.config.mode!=='PAPER' ||
+       process.env.BOT_PAPER_MEME_DISCOVERY!=='1')return false;
+    const result=decideVerifiedProjectIssuer(
+      token.currency,token.issuer,token.rawCurrency
+    );
+    if(result.allowed)return false;
+    warn('[PaperRisk] Protected project '+result.ticker+
+      ' is not the independently published XRPL issuer; new PAPER entry rejected. '+
+      'Existing positions and exits preserved.');
+    return true;
   }
 
   /** Entry-only safeguard against paying for two different issuers using
@@ -180,6 +197,7 @@ export class PaperTrader {
       warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
     }
+    if (this.hasUnverifiedProjectIssuer(token))return null;
     if (this.conflictsWithOpenTicker(token))return null;
 
     // Require minimum XRP-side pool reserve, not total TVL.
@@ -365,6 +383,7 @@ export class PaperTrader {
         return null;
       }
     }
+    if (this.hasUnverifiedProjectIssuer(token))return null;
     if (this.conflictsWithOpenTicker(token))return null;
 
     // Check max open trades
