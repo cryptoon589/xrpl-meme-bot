@@ -31,6 +31,7 @@ import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
 import { TelegramAlerter } from '../telegram/alerts';
 import { Database } from '../db/database';
+import type { TrackedToken } from '../types';
 import { info, warn, debug } from '../utils/logger';
 
 // ─────────────────────────────────────────────
@@ -129,8 +130,10 @@ export class BurstDetector {
     info(`[NewLaunch] Registered ${displayName} with burst detector (AMMCreate)`);
   }
 
-  async preloadAMMs(): Promise<void> {
-    const tokens = this.db.getTrackedTokens();
+  async preloadAMMs(tokenSubset?: TrackedToken[]): Promise<void> {
+    // Dynamic meme mode supplies bounded, issuer-classified candidates. The
+    // legacy/static mode retains its original behavior when no subset supplied.
+    const tokens = tokenSubset ?? this.db.getTrackedTokens();
     info(`[BurstDetector] Pre-loading AMM accounts for ${tokens.length} tracked tokens...`);
     let registered = 0;
     // Batch in groups of 10 to avoid flooding the WS connection
