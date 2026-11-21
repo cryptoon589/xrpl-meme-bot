@@ -81,6 +81,8 @@ let hourlySummaryTimer: NodeJS.Timeout | null = null;
 async function main() {
   const config = loadConfig();
   getLogger(config.logLevel);
+  const dynamicPaperMode = config.mode==='PAPER' &&
+    process.env.BOT_PAPER_MEME_DISCOVERY==='1';
 
   // Startup invariant: verify the exact operator-controlled permanent
   // exclusion list BEFORE opening/writing SQLite or connecting to XRPL.
@@ -568,7 +570,36 @@ async function main() {
   // With 4000+ tracked tokens this can take 5-15 min if awaited; the bot
   // would miss all trades during that window. Lazy registration still catches
   // tokens on their second buy; preload just closes the first-buy gap.
-  burstDetector.preloadAMMs().catch(err =>
+  // Preloading every catalog token (10k+) generated thousands of RPC calls
+  // despite the dynamic periodic scan being capped at 24. In dynamic mode,
+  // preload only the reviewed bootstrap issues and any already classified
+  // meme issues; burst discovery still watches every incoming validated tx.
+  let burstPreload = undefined as ReturnType<typeof tokenDiscovery.getTrackedTokens> | undefined;
+  if (dynamicPaperMode) {
+    const reviewed=JSON.parse(fs.readFileSync(
+      process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE!, 'utf8'
+    )) as {tokens:Array<{currency:string;issuer:string}>};
+    const allowed=new Set<string>();
+    for(const t of reviewed.tokens) {
+      const k=canonicalIssue(t.currency,t.issuer);
+      if(k)allowed.add(k);
+    }
+    for(const t of dynamicMemeUniverse.eligibleIssues()) {
+      const k=canonicalIssue(t.currency,t.issuer);
+      if(k)allowed.add(k);
+    }
+    // Open positions remain priority even if classification later expires.
+    for(const pos of paperTrader?.getOpenPositionsSummary()||[]) {
+      const k=canonicalIssue(pos.rawCurrency||pos.tokenCurrency,pos.tokenIssuer);
+      if(k)allowed.add(k);
+    }
+    burstPreload=tokenDiscovery.getTrackedTokens().filter(t=>
+      allowed.has(canonicalIssue(t.rawCurrency||t.currency,t.issuer)||'')
+    );
+    info('[MemeDiscovery] bounded startup burst AMM preload: '+
+      burstPreload.length+' exact issues; catalog '+tokenDiscovery.getTokenCount());
+  }
+  burstDetector.preloadAMMs(burstPreload).catch(err =>
     warn(`[preloadAMMs] Non-fatal error during startup preload: ${err}`)
   );
 
@@ -651,16 +682,50 @@ async function main() {
   });
   trendingSeeder.start();
 
-  // Background holder refresh — rate-limited to 1 token per 5s.
-  // Avoids WS flooding. Prioritises tokens with no cached value.
+  // Dynamic mode: holder counts are slow paginated issuer account_lines
+  // reads. Rotate across classified issues only, 1 token/minute, and never
+  // start a second job while a previous multi-page fetch is outstanding.
+  // Static mode remains unchanged until the feature is explicitly enabled.
+  let holderCursor=0;
+  let holderFetchBusy=false;
   setInterval(async () => {
-    const tokens = tokenDiscovery.getTrackedTokens();
-    const uncached = tokens.filter(t => holderCounter.getCached(t.currency, t.issuer) === null);
-    const target = uncached.length > 0 ? uncached[0] : tokens[Math.floor(Math.random() * tokens.length)];
-    if (target) {
-      holderCounter.getHolderCount(target.currency, target.issuer, target.rawCurrency).catch(() => {});
+    if(dynamicPaperMode && holderFetchBusy)return;
+    let tokens=tokenDiscovery.getTrackedTokens();
+    if(dynamicPaperMode) {
+      const allowed=new Set<string>();
+      for(const issue of dynamicMemeUniverse.eligibleIssues()) {
+        const k=canonicalIssue(issue.currency,issue.issuer);
+        if(k)allowed.add(k);
+      }
+      const bootstrap=JSON.parse(fs.readFileSync(
+        process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE!, 'utf8'
+      )) as {tokens:Array<{currency:string;issuer:string}>};
+      for(const t of bootstrap.tokens) {
+        const k=canonicalIssue(t.currency,t.issuer);
+        if(k)allowed.add(k);
+      }
+      const dedup=new Set<string>();
+      tokens=tokens.filter(t=>{
+        const k=canonicalIssue(t.rawCurrency||t.currency,t.issuer);
+        if(!k || !allowed.has(k) || dedup.has(k))return false;
+        dedup.add(k);return true;
+      });
     }
-  }, 5000); // 1 holder fetch per 5s = 12/min, won't flood WS
+    const uncached=tokens.filter(t=>
+      holderCounter.getCached(t.currency,t.issuer)===null
+    );
+    const candidates=uncached.length ? uncached : tokens;
+    const target=dynamicPaperMode
+      ? candidates[holderCursor++%Math.max(1,candidates.length)]
+      : (uncached.length>0 ? uncached[0] : tokens[Math.floor(Math.random()*tokens.length)]);
+    if(!target)return;
+    holderFetchBusy=true;
+    try {
+      await holderCounter.getHolderCount(target.currency,target.issuer,target.rawCurrency);
+    } catch(e) {
+      warn('[HolderCounter] background refresh deferred: '+String(e).slice(0,90));
+    } finally {holderFetchBusy=false;}
+  }, dynamicPaperMode ? 60000 : 5000);
 
   // Start periodic scanning with parallel batches
   isRunning = true;
