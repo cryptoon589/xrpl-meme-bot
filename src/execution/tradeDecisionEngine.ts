@@ -30,6 +30,7 @@ import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { ensureTaggedMemeIssue } from '../market/memeCategoryFeed';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
+import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -85,6 +86,11 @@ export class TradeDecisionEngine {
     const profile = this.selectProfile(input);
     const reject = (sizeXRP: number, slippage: number, reason: string): DecisionResult =>
       this.reject(input.signalType, profile, sizeXRP, slippage, reason);
+
+    if(this.config.mode==='PAPER'){
+      const freeze=readPaperEntryFreeze();
+      if(freeze.frozen)return reject(0,0,'PAPER entry frozen: '+freeze.reason);
+    }
 
     // On-demand provider lookup is bounded/cached; no automatic approval from
     // a ticker or momentum alone. Direct PaperTrader methods independently
