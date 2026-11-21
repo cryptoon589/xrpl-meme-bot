@@ -16,6 +16,7 @@ import {
   AlertPayload,
 } from '../types';
 import { info, warn, debug } from '../utils/logger';
+import { PaperPositionRuntimeState, validPaperPositionRuntime } from '../paper/paperPositionRuntime';
 
 export class Database {
   private db: BetterSQLite3.Database;
@@ -525,6 +526,36 @@ export class Database {
         startingBankrollXRP, Date.now());
       return startingBankrollXRP;
     })();
+  }
+
+  /** Persist volatile trailing-stop, TP/SL and profile state for safe process
+   * restart. Does not mutate any economic ledger or old PAPER trade rows.
+   * The trade ID+entry timestamp are validated when restoring the checkpoint.
+   */
+  savePaperPositionRuntime(state:PaperPositionRuntimeState): void {
+    if(!Number.isInteger(state.tradeId) || state.tradeId<=0 ||
+       !Number.isFinite(state.highestPriceSinceEntry) ||
+       state.highestPriceSinceEntry<=0){
+      throw new Error('Invalid PAPER runtime state');
+    }
+    this.db.prepare(`
+      INSERT INTO paper_position_runtime (trade_id,state_json,updated_at)
+      VALUES (?,?,?)
+      ON CONFLICT(trade_id) DO UPDATE SET
+        state_json=excluded.state_json,updated_at=excluded.updated_at
+    `).run(state.tradeId,JSON.stringify(state),Date.now());
+  }
+
+  getPaperPositionRuntime(trade:PaperTrade):PaperPositionRuntimeState|null {
+    if(!trade.id)return null;
+    const row=this.db.prepare(
+      'SELECT state_json FROM paper_position_runtime WHERE trade_id=?'
+    ).get(trade.id) as {state_json:string}|undefined;
+    if(!row)return null;
+    try {
+      const state=JSON.parse(row.state_json);
+      return validPaperPositionRuntime(state,trade)?state:null;
+    }catch{return null;}
   }
 
   getPaperInventory(tradeId: number | undefined): number | null {
