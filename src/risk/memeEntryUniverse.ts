@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
+import { dynamicMemeUniverse } from './dynamicMemeUniverse';
 
 type Decision = { allowed: boolean; reason: string };
 const NON_MEME = new Set([
@@ -40,6 +41,11 @@ export function paperMemeEntryDecision(
   if (!ISSUER.test(issuer||'')) return reject('Invalid XRPL issuer');
   const excluded=deniedName(currency,rawCurrency);
   if (excluded) return reject('Non-meme asset type: '+excluded);
+  // Fresh, issuer-exact external meme evidence is an alternative to the
+  // operator's initial two-token bootstrap list, not a permanent whitelist.
+  if (process.env.BOT_PAPER_MEME_DISCOVERY==='1' &&
+      dynamicMemeUniverse.hasIssue(currency,issuer,rawCurrency))
+    return {allowed:true,reason:'Fresh issuer-exact external meme evidence'};
 
   const file=process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE;
   const approvedHash=process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256;
