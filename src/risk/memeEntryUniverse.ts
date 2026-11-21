@@ -51,11 +51,10 @@ export function paperMemeEntryDecision(
   const identity=normalizeIssuedCurrency(rawCurrency||currency);
   if(identity && NON_MEME_KNOWN_ISSUES.has(identity+':'+issuer))
     return reject('Previously confirmed conventional token issue');
-  // Fresh, issuer-exact external meme evidence is an alternative to the
-  // operator's initial two-token bootstrap list, not a permanent whitelist.
-  if (process.env.BOT_PAPER_MEME_DISCOVERY==='1' &&
-      dynamicMemeUniverse.hasIssue(currency,issuer,rawCurrency))
-    return {allowed:true,reason:'Fresh issuer-exact external meme evidence'};
+  // External evidence expands the bootstrap list, but must never bypass
+  // the operator's reviewed approval-file checksum or strict startup rules.
+  const dynamicEligible=process.env.BOT_PAPER_MEME_DISCOVERY==='1' &&
+    dynamicMemeUniverse.hasIssue(currency,issuer,rawCurrency);
 
   const file=process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE;
   const approvedHash=process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256;
@@ -93,6 +92,7 @@ export function paperMemeEntryDecision(
     if (seen.has(key)) return reject('Duplicate approved issue');
     seen.add(key);
   }
+  if (dynamicEligible) return {allowed:true,reason:'Fresh issuer-exact external meme evidence'};
   if (seen.has(observed+':'+issuer)) return {allowed:true,reason:'Exact issued meme asset approved'};
   return reject('Unknown/unreviewed token: not approved as XRPL meme coin');
 }
