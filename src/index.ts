@@ -15,6 +15,7 @@
 import { loadConfig } from './config';
 import { getLogger, info, warn, error, debug } from './utils/logger';
 import http from 'http';
+import { readPaperEntryFreeze } from './risk/paperEntryFreeze';
 import { XRPLClient } from './xrpl/client';
 import { TokenDiscovery } from './scanner/tokenDiscovery';
 import { AMMScanner } from './scanner/ammEvents';
@@ -1817,6 +1818,7 @@ function startHealthEndpoint(
         uptime: Math.round(process.uptime()),
         tokens: tokenDiscovery.getTokenCount(),
         positions: paperTrader?.getOpenPositions().length || 0,
+        paperEntryFrozen: paperTrader ? readPaperEntryFreeze().frozen : null,
         xrplConnected: xrplStatus.connected,
         xrplStreamConnected: xrplStatus.streamConnected,
         xrplLastTxAgeMs: xrplStatus.lastTransactionAgeMs,
