@@ -28,6 +28,7 @@ import {
 import { diagnostics } from '../diagnostics/diagnostics';
 import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
+import { ensureTaggedMemeIssue } from '../market/memeCategoryFeed';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -84,6 +85,12 @@ export class TradeDecisionEngine {
     const reject = (sizeXRP: number, slippage: number, reason: string): DecisionResult =>
       this.reject(input.signalType, profile, sizeXRP, slippage, reason);
 
+    // On-demand provider lookup is bounded/cached; no automatic approval from
+    // a ticker or momentum alone. Direct PaperTrader methods independently
+    // verify the resulting in-process evidence.
+    if (this.config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1') {
+      await ensureTaggedMemeIssue(input.currency,input.issuer,input.rawCurrency);
+    }
     // Entry eligibility is distinct from the four-token manual blacklist.
     if (this.config.mode === 'PAPER' && process.env.BOT_PAPER_MEME_ONLY === '1') {
       const policy=paperMemeEntryDecision(input.currency,input.issuer,input.rawCurrency);
