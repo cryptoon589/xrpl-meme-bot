@@ -18,6 +18,7 @@ import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { findOpenTickerCollision } from '../risk/openTickerCollision';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
+import { PaperPositionRuntimeState } from './paperPositionRuntime';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -45,6 +46,8 @@ export class PaperTrader {
   private positionSizer: PositionSizer;
   private bankrollXRP: number;
   private cashReconciled: boolean = false;
+  private exitStateCheckpointHealthy = true;
+  private unverifiedRestartIds = new Set<number>();
   private openPositions: Map<string, OpenPosition> = new Map();
   private lastCloseTime: Map<string, number> = new Map();
   private dailyPnL: number = 0;
@@ -61,6 +64,39 @@ export class PaperTrader {
   private winningTrades: number = 0;
   private totalWinAmount: number = 0;
   private totalLossAmount: number = 0;
+
+  /** Checkpoint every observed price/high-water and recovery-relevant exit
+   * state. Economic trade, cash and token quantities use their own atomic
+   * ledger. A checkpoint write failure NEVER fabricates a trade close; it
+   * blocks further new entries until operational recovery.
+   */
+  private checkpointPosition(p:OpenPosition):void {
+    if(!p.trade.id || p.trade.status==='closed')return;
+    const checkpoint:PaperPositionRuntimeState={
+      version:1,tradeId:p.trade.id,
+      entryTimestamp:p.trade.entryTimestamp,
+      highestPriceSinceEntry:p.highestPriceSinceEntry,
+      openedAt:p.openedAt,lastBuySeenAt:p.lastBuySeenAt,
+      liquidityAtEntry:p.liquidityAtEntry,
+      tradeProfile:p.tradeProfile,profileName:p.profileName,
+      priceHistory:p.priceHistory.slice(-10),
+      ...(p.stopLossPercent!==undefined ? {stopLossPercent:p.stopLossPercent}:{}),
+      ...(p.tp1Pct!==undefined ? {tp1Pct:p.tp1Pct}:{}),
+      ...(p.tp2Pct!==undefined ? {tp2Pct:p.tp2Pct}:{}),
+    };
+    try{this.db.savePaperPositionRuntime(checkpoint);}
+    catch(e){
+      this.exitStateCheckpointHealthy=false;
+      warn('[PAPER] Cannot persist exit-state checkpoint for trade #'+
+        p.trade.id+'; blocking NEW entries, existing exits remain active: '+String(e));
+    }
+  }
+
+  private missingRecoveryStateBlocksEntry(): boolean {
+    if(this.unverifiedRestartIds.size===0 && this.exitStateCheckpointHealthy)return false;
+    warn('[PAPER] Entry denied: unresolved restart exit-state checkpoint or write failure; exits remain enabled');
+    return true;
+  }
 
   private getPoolXrpReserve(snapshot: MarketSnapshot | null | undefined): number {
     return snapshot?.poolXrpReserve ?? ((snapshot?.liquidityXRP ?? 0) / 2);
@@ -187,6 +223,7 @@ export class PaperTrader {
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
     if (readPaperEntryFreeze().frozen) { warn('[PAPER] Entry-only freeze active; burst buy blocked, existing exits unaffected'); return null; }
+    if (this.missingRecoveryStateBlocksEntry()) return null;
     // Entry-only universe gate; never closes existing PAPER inventory.
     if (process.env.BOT_PAPER_MEME_ONLY === '1') {
       const policy=paperMemeEntryDecision(token.currency,token.issuer,token.rawCurrency);
@@ -349,6 +386,8 @@ export class PaperTrader {
       tp2Pct: tpTargets?.tp2,
     });
 
+    this.checkpointPosition(this.openPositions.get(key)!);
+
     // Entry and inventory are already committed atomically.
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
@@ -375,6 +414,7 @@ export class PaperTrader {
       return null;
     }
     if (readPaperEntryFreeze().frozen) { warn('[PAPER] Entry-only freeze active; scored/stream buy blocked, existing exits unaffected'); return null; }
+    if (this.missingRecoveryStateBlocksEntry()) return null;
     if (!this.cashReconciled) {
       warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
@@ -573,6 +613,8 @@ export class PaperTrader {
       tp2Pct: tpTargets?.tp2,
     });
 
+    this.checkpointPosition(this.openPositions.get(key)!);
+
     // The entry, cash and exact token count were saved above.
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
@@ -649,6 +691,10 @@ export class PaperTrader {
           position.lastBuySeenAt = Date.now();
         }
       }
+
+      // Durable price high-water / trailing input BEFORE evaluating exits.
+      // Even if the process crashes later, the peak observed so far survives.
+      this.checkpointPosition(position);
 
       // Kill 1: no new buy within N min AND price below entry
       const msSinceLastBuy = Date.now() - (position.lastBuySeenAt ?? position.openedAt);
@@ -1561,6 +1607,7 @@ export class PaperTrader {
     const pos = this.openPositions.get(key);
     if (pos) {
       pos.profileName = profileName;
+      this.checkpointPosition(pos);
       debug(`[Profile] ${currency} position profileName set to ${profileName}`);
     }
   }
