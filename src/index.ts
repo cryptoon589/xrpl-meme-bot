@@ -1397,16 +1397,19 @@ function startPeriodicScan(
       // Check exits for ALL open positions — catches orphaned positions
       // (tokens that got pruned from the scan list but still have open trades)
       if (paperTrader && paperTrader.getOpenPositions().length > 0) {
-        const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
+        const orphanExitEvents = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
           const p = await ammPriceFetcher.getPrice(
             currency,issuer,rawCurrency,true,process.env.BOT_USE_RESERVE_QUOTES === '1'
           );
           return p ?? null;
         });
-        for (const ct of orphanClosed) {
+        for (const ct of orphanExitEvents) {
+          // checkAllOpenExits yields both partial TP1/TP2 events and complete
+          // closes. A partial realized gain is NOT a full closed winning trade.
+          if (ct.status !== 'partial' && ct.status !== 'closed') continue;
           totalTrades++;
           // Suppress ghost-close alerts (no-price / force-close at entry) — just log them
-          if (ct.exitReason === 'force_close_no_price') {
+          if (ct.status === 'closed' && ct.exitReason === 'force_close_no_price') {
             info(`Ghost close (no price): ${ct.tokenCurrency} — position voided, bankroll returned`);
             // Add to no-price cooldown — don't re-enter this token for 6h
             const cooldownKey = `${ct.tokenCurrency}:${ct.tokenIssuer}`;
@@ -1416,11 +1419,13 @@ function startPeriodicScan(
             continue;
           }
           setTimeout(() => sendAlert(telegramAlerter, db, {
-            type: 'paper_trade_closed',
+            type: ct.status === 'partial' ? 'paper_trade_partial_close' : 'paper_trade_closed',
             tokenCurrency: ct.tokenCurrency,
             tokenIssuer: ct.tokenIssuer,
             paperTrade: ct,
-            message: `Closed ${ct.tokenCurrency}: ${ct.pnlPercent?.toFixed(1)}% PnL`,
+            message: ct.status === 'partial'
+              ? `Partial sale ${ct.tokenCurrency}: ${ct.remainingPosition.toFixed(0)}% remains open`
+              : `Closed ${ct.tokenCurrency}: ${ct.pnlPercent?.toFixed(1)}% PnL`,
           }, config), 0);
         }
       }
