@@ -885,6 +885,10 @@ function startPeriodicScan(
 ): void {
   const MAX_TRACKED_TOKENS = 300; // fixed RPC work budget, not meme-universe limit
   const dynamicMode = config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1';
+  // A small expensive-RPC scan budget prevents the 10k-token catalog from
+  // flooding a shared public XRPL node. Stream/burst signals remain immediate.
+  const dynamicScanBudget=Math.max(8,Math.min(60,
+    Number.parseInt(process.env.BOT_DYNAMIC_MEME_SCAN_BUDGET||'24',10)||24));
   const bootstrapKeys = new Set<string>();
   if(dynamicMode) {
     const approved=JSON.parse(fs.readFileSync(
@@ -924,7 +928,7 @@ function startPeriodicScan(
         const openKeys=new Set((paperTrader?.getOpenPositionsSummary()||[]).map(p=>
           canonicalIssue(p.rawCurrency||p.tokenCurrency,p.tokenIssuer)).filter(
           (k):k is string=>!!k));
-        tokens=selectDynamicScanTokens(tokens,memeKeys,openKeys,scanCycle,MAX_TRACKED_TOKENS);
+        tokens=selectDynamicScanTokens(tokens,memeKeys,openKeys,scanCycle,dynamicScanBudget);
         if(scanCycle%4===1) {
           info('[MemeDiscovery] monitored '+memeKeys.size+' exact issues; scanning '+
             tokens.length+' rotating meme candidates; catalog remains '+tokenDiscovery.getTokenCount());
@@ -1431,6 +1435,11 @@ function startPeriodicScan(
       `<b>Daily P&amp;L:</b> ${state.cashReconciled ? (state.dailyPnL >= 0 ? '+' : '') + state.dailyPnL.toFixed(2) + ' XRP (simulated)' : 'not audited'}`,
       `<b>Open:</b>      ${db.getOpenPositionCount()} open | ${db.getPartialPositionCount()} partial${openPositions.length !== 1 ? 's' : ''}`,
     ];
+    if(dynamicMode) {
+      const observed=dynamicMemeUniverse.stats();
+      lines.push('<i>Classified meme issues: '+observed.eligible+
+        ' (Data by <a href="https://xrpl.to">xrpl.to</a>)</i>');
+    }
     lines.push('');
     const closed6h = db.getClosedTradeCountSince(6*3600*1000);
     const totalClosed = db.getTotalClosedTradeCount();
