@@ -72,7 +72,7 @@ async function run() {
   const emitted=[];
   const feed=new MemeCategoryFeed(issue=>emitted.push(issue),fetcher,()=>clock);
   await feed.refresh();
-  assert.equal(calls.length,3,'three bounded category pages per refresh');
+  assert.equal(calls.length,1,'one category page per refresh protects anonymous quota');
   assert(dynamicMemeUniverse.hasIssue('NEWMEME',issuer,newHex,clock));
   assert(emitted.some(t=>t.currency===newHex));
   assert.equal(paperMemeEntryDecision('NEWMEME',issuer,newHex).allowed,true);
@@ -88,6 +88,9 @@ async function run() {
     'known conventional issue cannot be authorized by a false meme tag');
 
   const late='4C41544500000000000000000000000000000000';
+  assert.equal(await feed.ensureIssue('LATE',issuer,late),false,
+    'on-demand lookup cannot immediately follow a bulk request');
+  clock+=61000;
   assert.equal(await feed.ensureIssue('LATE',issuer,late),true);
   const afterOne=calls.length;
   assert.equal(await feed.ensureIssue('LATE',issuer,late),true);
@@ -129,8 +132,24 @@ async function run() {
   assert.equal(selectDynamicScanTokens(catalog,new Set(),holdings,3,300,clock).length,1,
     'no unclassified issue enters an RPC-heavy scan absent an open position');
 
+  // Verify provider Retry-After blocks ALL subsequent bulk and on-demand requests.
+  let limitedRequests=0;
+  const throttled=new MemeCategoryFeed(()=>{},async()=>{
+    limitedRequests++;
+    return {status:429,ok:false,headers:{
+      get:(k)=>k==='retry-after'?'3600':null
+    },text:async()=>''};
+  },()=>clock);
+  await throttled.refresh();
+  assert.equal(limitedRequests,1);
+  await throttled.refresh();
+  assert.equal(await throttled.ensureIssue('NEWMEME',issuer,newHex),false);
+  assert.equal(limitedRequests,1,'no requests should leak through shared 429 cooldown');
+  assert(throttled.stats().cooldownRemainingMs>=3599*1000,
+    'the 1-hour Retry-After must be honored');
+
   setActiveMemeCategoryFeed(null);
-  console.log('PASS dynamic meme category ingestion, expiry, exact issue, non-meme conflicts, bounded on-demand API, moving scan cohorts');
+  console.log('PASS dynamic meme category ingestion, expiry, exact issue, non-meme conflicts, Retry-After circuit breaker, bounded on-demand API, moving scan cohorts');
 }
 
 run().catch(e=>{setActiveMemeCategoryFeed(null);console.error(e);process.exitCode=1});
