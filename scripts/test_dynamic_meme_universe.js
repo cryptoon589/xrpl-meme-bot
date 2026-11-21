@@ -16,7 +16,7 @@ const newHex='4E45574D454D4500000000000000000000000000'; // NEWMEME
 const oldHex='4F4C444D454D4500000000000000000000000000'; // OLDMEME
 const code='41524D5900000000000000000000000000000000';
 const usdc='5553444300000000000000000000000000000000';
-let clock=1_800_000_000_000;
+let clock=Date.now();
 process.env.BOT_PAPER_MEME_ONLY='1';
 process.env.BOT_PAPER_MEME_DISCOVERY='1';
 const tagged=(currency,who=issuer,tags=['Memes'])=>
@@ -83,7 +83,7 @@ async function run() {
     'request throttling is fail-closed');
 
   clock+=46*60*1000;
-  assert.equal(paperMemeEntryDecision('NEWMEME',issuer,newHex).allowed,false,
+  assert.equal(dynamicMemeUniverse.hasIssue('NEWMEME',issuer,newHex,clock),false,
     'provider evidence expires without refreshed metadata');
   // Tests never enable the external network when metadata API is unavailable.
 
