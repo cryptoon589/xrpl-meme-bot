@@ -93,7 +93,11 @@ export class PaperTrader {
   }
 
   private missingRecoveryStateBlocksEntry(): boolean {
-    if(this.unverifiedRestartIds.size===0 && this.exitStateCheckpointHealthy)return false;
+    // Prototype-only synthetic test doubles do not call constructor; real
+    // PAPER instances always initialize both fields. Treat undefined in
+    // these offline tests as empty/healthy, never dereference a mock field.
+    if((this.unverifiedRestartIds?.size ?? 0)===0 &&
+       this.exitStateCheckpointHealthy!==false)return false;
     warn('[PAPER] Entry denied: unresolved restart exit-state checkpoint or write failure; exits remain enabled');
     return true;
   }
