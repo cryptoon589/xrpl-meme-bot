@@ -62,8 +62,8 @@ def observe_then_invoke(
             return invoke_cutover()
         remaining=timeout_seconds-(monotonic()-start)
         if remaining<=0:
-            print('WATCH ENDED: positions remain; PM2 and database untouched.',flush=True)
-            return 0
+            print('WATCH ENDED WITHOUT DEPLOYMENT: positions remain; PM2 and database untouched.',flush=True)
+            return 3
         sleep(min(interval_seconds,remaining))
 
 def main()->int:
