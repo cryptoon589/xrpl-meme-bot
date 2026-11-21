@@ -70,6 +70,8 @@ export class DynamicMemeUniverse {
       const tags=Array.isArray(candidate.tags) ? candidate.tags : [];
       const tagNames=tags.filter((x):x is string=>typeof x==='string').map(x=>x.toUpperCase().trim());
       const typ=candidate.tokenType;
+      // A later explicit contradictory classification revokes earlier permission.
+      if(key && tagNames.some(x=>NEGATIVE_TAGS.has(x)))this.issues.delete(key);
       // Source must explicitly assert meme classification and not contradict it.
       if (!key || !tagNames.includes('MEMES') ||
           tagNames.some(x=>NEGATIVE_TAGS.has(x)) ||
