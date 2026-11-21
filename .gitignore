@@ -9,3 +9,4 @@ logs/*.log
 .DS_Store
 state/recommendations.json
 state/trade_analysis.md
+state/paper-entry-freeze.flag
