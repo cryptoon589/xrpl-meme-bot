@@ -18,11 +18,20 @@ const API='https://api.xrpl.to/v1';
 const USER_AGENT='HUNTERIX-Meme-PAPER-Classifier/0.1 (+https://github.com/cryptoon589/xrpl-meme-bot)';
 const FETCH_TIMEOUT_MS=8000;
 const REFRESH_MS=15*60*1000;
+const REQUEST_WINDOW_MS=15*60*1000;
+const MAX_ANON_REQUESTS_PER_WINDOW=3; // <=288/day, below documented 333/day
+const MIN_REQUEST_GAP_MS=60*1000; // conservative spacing across list + exact lookup
+const DEFAULT_429_BACKOFF_MS=30*60*1000;
+const MAX_BACKOFF_MS=48*60*60*1000;
 
 export class MemeCategoryFeed {
   private busy=false;
   private rotation=0;
   private nextAllowedFetch=0;
+  private globalCooldownUntil=0;
+  private requestWindowStarted=0;
+  private requestsInWindow=0;
+  private lastRequestAt=0;
   private lastLookup=new Map<string,number>();
   private pendingLookups=new Map<string,Promise<boolean>>();
   private lastRefreshAt=0;
@@ -34,16 +43,61 @@ export class MemeCategoryFeed {
     private readonly now:()=>number=Date.now
   ) {}
 
+  private available(now=this.now()):boolean {
+    if(now < this.globalCooldownUntil || now < this.nextAllowedFetch) return false;
+    if(now-this.requestWindowStarted>=REQUEST_WINDOW_MS) {
+      this.requestWindowStarted=now;
+      this.requestsInWindow=0;
+    }
+    return this.requestsInWindow<MAX_ANON_REQUESTS_PER_WINDOW &&
+      (!this.lastRequestAt || now-this.lastRequestAt>=MIN_REQUEST_GAP_MS);
+  }
+
+  private retryMs(res:Response,now:number):number {
+    const raw=res.headers.get('retry-after');
+    let ms=Number(raw)*1000;
+    if(!raw || !Number.isFinite(ms) || ms<0) {
+      const date=raw ? Date.parse(raw) : NaN;
+      ms=Number.isFinite(date) ? Math.max(0,date-now) : DEFAULT_429_BACKOFF_MS;
+    }
+    const reset=Number(res.headers.get('x-ratelimit-reset')||0);
+    if(Number.isFinite(reset) && reset>0 && reset<=48*3600)
+      ms=Math.max(ms,reset*1000);
+    return Math.min(MAX_BACKOFF_MS,Math.max(15*60*1000,ms));
+  }
+
   private async getJSON(url:string):Promise<any> {
     if (!url.startsWith(API+'/')) throw Error('Unexpected metadata provider URL');
+    const now=this.now();
+    if(!this.available(now))throw Error('metadata request budget/cooldown');
+    this.lastRequestAt=now;
+    this.requestsInWindow++;
+    this.nextAllowedFetch=now+MIN_REQUEST_GAP_MS;
     const controller=new AbortController();
     const timer=setTimeout(()=>controller.abort(),FETCH_TIMEOUT_MS);
     try {
-      const res=await this.fetcher(url,{
-        headers:{'Accept':'application/json','User-Agent':USER_AGENT},
-        signal:controller.signal,
-        redirect:'error'
-      });
+      const headers:Record<string,string>={
+        'Accept':'application/json','User-Agent':USER_AGENT
+      };
+      // A user-generated provider key is optional, never in source or logs.
+      if(process.env.HUNTERIX_XRPLTO_API_KEY)
+        headers['X-Api-Key']=process.env.HUNTERIX_XRPLTO_API_KEY;
+      const res=await this.fetcher(url,{headers,signal:controller.signal,redirect:'error'});
+      if (res.status===429) {
+        const backoff=this.retryMs(res,this.now());
+        this.globalCooldownUntil=Math.max(this.globalCooldownUntil,this.now()+backoff);
+        warn('[MemeDiscovery] provider 429; all provider lookups suspended for at least '+
+          Math.ceil(backoff/60000)+' min (honouring Retry-After)');
+        throw new Error('metadata HTTP 429: provider cooldown');
+      }
+      if([401,402,403].includes(res.status)) {
+        this.globalCooldownUntil=Math.max(this.globalCooldownUntil,this.now()+24*3600000);
+        throw new Error('metadata HTTP '+res.status+': authorization/credit cooldown');
+      }
+      if (res.status>=500) {
+        this.globalCooldownUntil=Math.max(this.globalCooldownUntil,this.now()+10*60000);
+        throw new Error('metadata HTTP '+res.status+': server cooldown');
+      }
       if (!res.ok) throw new Error('metadata HTTP '+res.status);
       const length=Number(res.headers.get('content-length') || 0);
       if (length>500000)throw new Error('metadata response exceeds size budget');
@@ -71,42 +125,38 @@ export class MemeCategoryFeed {
     return result.accepted;
   }
 
-  /** At most three sequential tagged pages/15m, no parallel API flood. */
+  /** One tagged page per 15m. Rotate volume/new/revival snapshots without
+   * burning anonymous quotas or treating a 429 as an invitation to retry.
+   */
   async refresh():Promise<void> {
-    if(this.busy)return;
+    if(this.busy || !this.available())return;
     this.busy=true;
     try {
-      // Top activity, fresh listings, and one circulating older page.
-      const pages=[
-        {sort:'vol24hxrp',offset:0},
-        {sort:'dateon',offset:0},
-        {sort:'vol24hxrp',offset:50+(this.rotation%16)*50}
-      ];
-      let accepted=0;
-      for(const page of pages) {
-        const u=new URL(API+'/tokens');
-        for(const [key,value] of Object.entries({
-          tag:'Memes',tags:'yes',
-          sort:page.sort,order:'desc',limit:'50',
-          offset:String(page.offset),lightweight:'true',skip_metrics:'true'
-        }))u.searchParams.set(key,value);
-        try {
-          const body=await this.getJSON(u.toString());
-          if(body?.success!==true || body.tagName?.toLowerCase()!=='memes' ||
-             !Array.isArray(body.tokens) || body.tokens.length>50)
-            throw Error('metadata category response invalid');
-          accepted+=this.acceptPage(body.tokens);
-        }catch(e) {
-          warn('[MemeDiscovery] documented metadata page unavailable; entries remain fail-closed ('+
-            String((e as Error).message).slice(0,95)+')');
-          break; // provider backoff, no flood after 429/403/5xx
-        }
+      const slot=this.rotation++;
+      const page=slot%3===0
+        ? {sort:'vol24hxrp',offset:0}
+        : slot%3===1
+        ? {sort:'dateon',offset:0}
+        : {sort:'vol24hxrp',offset:50+(Math.floor(slot/3)%16)*50};
+      const u=new URL(API+'/tokens');
+      for(const [key,value] of Object.entries({
+        tag:'Memes',tags:'yes',sort:page.sort,order:'desc',
+        limit:'50',offset:String(page.offset),lightweight:'true',skip_metrics:'true'
+      }))u.searchParams.set(key,value);
+      try {
+        const body=await this.getJSON(u.toString());
+        if(body?.success!==true || body.tagName?.toLowerCase()!=='memes' ||
+           !Array.isArray(body.tokens) || body.tokens.length>50)
+          throw Error('metadata category response invalid');
+        const accepted=this.acceptPage(body.tokens);
+        this.lastRefreshAt=this.now();
+        const st=dynamicMemeUniverse.stats(this.now());
+        info('[MemeDiscovery] category page accepted '+accepted+
+          ' issues; '+st.eligible+' unexpired exact issues (Data by xrpl.to https://xrpl.to)');
+      }catch(e) {
+        warn('[MemeDiscovery] category refresh deferred: '+
+          String((e as Error).message).slice(0,100));
       }
-      this.rotation++;
-      this.lastRefreshAt=this.now();
-      const st=dynamicMemeUniverse.stats(this.now());
-      info('[MemeDiscovery] accepted '+accepted+' tagged issues; '+st.eligible+
-        ' current issuer-exact entries (Data by xrpl.to https://xrpl.to)');
     } finally {
       this.busy=false;
     }
@@ -124,9 +174,8 @@ export class MemeCategoryFeed {
     const outstanding=this.pendingLookups.get(key);
     if(outstanding)return outstanding;
     const now=this.now();
-    if(now<this.nextAllowedFetch || now-(this.lastLookup.get(key)||0)<15*60*1000)
+    if(!this.available(now) || now-(this.lastLookup.get(key)||0)<15*60*1000)
       return false;
-    this.nextAllowedFetch=now+15000;
     this.lastLookup.set(key,now);
     const job=(async()=>{
       try {
@@ -160,9 +209,13 @@ export class MemeCategoryFeed {
     this.interval=null;
   }
 
-  stats():{eligible:number;successfulPages:number;lastSuccessAgeMs:number|null;lastRefreshAgeMs:number|null} {
-    const s=dynamicMemeUniverse.stats(this.now());
-    return {...s,lastRefreshAgeMs:this.lastRefreshAt ? Math.max(0,this.now()-this.lastRefreshAt):null};
+  stats():{eligible:number;successfulPages:number;lastSuccessAgeMs:number|null;lastRefreshAgeMs:number|null;cooldownRemainingMs:number;budgetUsed:number;budgetAvailable:boolean} {
+    const now=this.now();
+    const s=dynamicMemeUniverse.stats(now);
+    return {...s,lastRefreshAgeMs:this.lastRefreshAt ? Math.max(0,now-this.lastRefreshAt):null,
+      cooldownRemainingMs:Math.max(0,this.globalCooldownUntil-now),
+      budgetUsed:this.requestsInWindow,
+      budgetAvailable:this.available(now)};
   }
 }
 
