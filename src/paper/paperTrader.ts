@@ -17,6 +17,7 @@ import { quotePaperBuy, quotePaperSell } from './reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { findOpenTickerCollision } from '../risk/openTickerCollision';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
+import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
 
 interface OpenPosition {
   trade: PaperTrade;
@@ -185,6 +186,7 @@ export class PaperTrader {
     tdeSizeXRP?: number
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
+    if (readPaperEntryFreeze().frozen) { warn('[PAPER] Entry-only freeze active; burst buy blocked, existing exits unaffected'); return null; }
     // Entry-only universe gate; never closes existing PAPER inventory.
     if (process.env.BOT_PAPER_MEME_ONLY === '1') {
       const policy=paperMemeEntryDecision(token.currency,token.issuer,token.rawCurrency);
@@ -372,6 +374,7 @@ export class PaperTrader {
       debug('Paper trading disabled (mode is not PAPER)');
       return null;
     }
+    if (readPaperEntryFreeze().frozen) { warn('[PAPER] Entry-only freeze active; scored/stream buy blocked, existing exits unaffected'); return null; }
     if (!this.cashReconciled) {
       warn('[PAPER] Entry refused: legacy cash ledger not reconciled');
       return null;
