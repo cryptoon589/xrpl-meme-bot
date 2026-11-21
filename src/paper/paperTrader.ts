@@ -1223,6 +1223,7 @@ export class PaperTrader {
     if (hasConcentrated && (position.stopLossPercent === undefined || position.stopLossPercent > 8)) {
       warn(`⚠️ Concentrated supply detected for ${key} — tightening stop to -8%`);
       position.stopLossPercent = 8;
+      this.checkpointPosition(position); // preserve tightened stop across process restart
     }
 
     return null;
