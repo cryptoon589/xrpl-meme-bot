@@ -2,6 +2,9 @@
 /** Synthetic-only regression. No remote API, XRPL RPC, Telegram, or DB writes. */
 'use strict';
 const assert=require('node:assert/strict');
+const fs=require('node:fs');
+const path=require('node:path');
+const crypto=require('node:crypto');
 const {DynamicMemeUniverse,canonicalIssue,dynamicMemeUniverse}=
   require('../dist/risk/dynamicMemeUniverse');
 const {MemeCategoryFeed,setActiveMemeCategoryFeed}=
@@ -19,6 +22,10 @@ const usdc='5553444300000000000000000000000000000000';
 let clock=Date.now();
 process.env.BOT_PAPER_MEME_ONLY='1';
 process.env.BOT_PAPER_MEME_DISCOVERY='1';
+const reviewed=path.resolve('state/paper_meme_entry_allowlist.json');
+process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE=reviewed;
+process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256=
+  crypto.createHash('sha256').update(fs.readFileSync(reviewed)).digest('hex');
 const tagged=(currency,who=issuer,tags=['Memes'])=>
   ({currency,issuer:who,tags,tokenType:'trustline',dateon:clock-1000});
 
