@@ -86,7 +86,7 @@ export class MemeCategoryFeed {
       for(const page of pages) {
         const u=new URL(API+'/tokens');
         for(const [key,value] of Object.entries({
-          tag:'Memes',tags:'yes',token_type:'trustline',
+          tag:'Memes',tags:'yes',
           sort:page.sort,order:'desc',limit:'50',
           offset:String(page.offset),lightweight:'true',skip_metrics:'true'
         }))u.searchParams.set(key,value);
