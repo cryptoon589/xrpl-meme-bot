@@ -35,7 +35,7 @@ import urllib.error
 import urllib.request
 
 OLD_SHA = '6c5d4d0c6c10c1da1608be90ce2725ee71e5645f'
-RELEASE_SHA = 'f41766589db940c257357eb403bff1f29b7f16b9'
+MIN_TESTED_SHA = 'f41766589db940c257357eb403bff1f29b7f16b9'
 PM2_NAME = 'hunterix-vnext-paper'
 EPOCH_NAME = 'meme_bot.paper-epoch-20261116-vnext.db'
 PORT = 3000
@@ -123,6 +123,7 @@ def verify_repositories(active:Path,review:Path,release:str) -> None:
         abort('Review checkout contains local tracked changes')
     cmd(['git','cat-file','-e',release+'^{commit}'],cwd=active)
     cmd(['git','merge-base','--is-ancestor',OLD_SHA,release],cwd=active)
+    cmd(['git','merge-base','--is-ancestor',MIN_TESTED_SHA,release],cwd=active)
 
 def acquire_stop_if_flat(db_path:Path) -> bool:
     """Prevent new SQLite trade commits between flat check and PM2 stop."""
@@ -200,14 +201,18 @@ def main() -> int:
     mode=ap.add_mutually_exclusive_group(required=True)
     mode.add_argument('--status',action='store_true')
     mode.add_argument('--deploy-if-flat',action='store_true')
+    ap.add_argument('--pin',required=True,help='Full 40-hex CI-passed release commit (no implicit latest)')
     ap.add_argument('--active',type=Path,default=Path('/root/hunterix-vnext-stage-20261116'))
     ap.add_argument('--review',type=Path,default=Path('/root/hunterix-dynamic-meme-review-20261121'))
     args=ap.parse_args()
     active=args.active.resolve()
     review=args.review.resolve()
+    release=args.pin.lower()
+    if len(release)!=40 or any(c not in '0123456789abcdef' for c in release):
+        abort('--pin must be the exact full 40-character commit SHA')
     db_path=active/'data'/EPOCH_NAME
 
-    verify_repositories(active,review,RELEASE_SHA)
+    verify_repositories(active,review,release)
     p=pm2_process()
     require_safe_runtime(p,active,online=True)
     n,trades,cash=paper_state(db_path)
@@ -249,8 +254,8 @@ def main() -> int:
         except FileExistsError:
             if not sentinel.is_file():abort('Existing freeze sentinel not regular file')
         print('PASS: exit-only freeze sentinel active for new release')
-        cmd(['git','merge','--ff-only',RELEASE_SHA],cwd=active)
-        if git_head(active)!=RELEASE_SHA:
+        cmd(['git','merge','--ff-only',release],cwd=active)
+        if git_head(active)!=release:
             abort('Code pin failed after fast-forward')
         cmd(['npm','run','build'],cwd=active,timeout=100)
         cmd(['python3','scripts/check_paper_restart_safety.py',
@@ -260,11 +265,11 @@ def main() -> int:
         cmd(['pm2','restart',PM2_NAME],timeout=30)
         require_safe_runtime(pm2_process(),active,online=True)
         health=verify_health()
-        if git_head(active)!=RELEASE_SHA or paper_state(db_path)[0]:
+        if git_head(active)!=release or paper_state(db_path)[0]:
             abort('Release or PAPER account changed during health check')
         cmd(['pm2','save'],timeout=20)
         print('PASS: NEW PAPER release online, healthy, FLAT and ENTRY-FROZEN')
-        print('Deployed:',RELEASE_SHA)
+        print('Deployed:',release)
         print('Health uptime:',health.get('uptime'))
         print('No PAPER entries have been resumed; explicit operator review required.')
         return 0
