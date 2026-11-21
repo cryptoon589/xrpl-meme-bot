@@ -1068,6 +1068,7 @@ export class PaperTrader {
     this.dailyPnL += legPnlXRP;
     this.tradesToday++;
     this.openPositions.delete(key);
+    if(trade.id)this.unverifiedRestartIds.delete(trade.id);
     this.ammPriceFetcher?.unregisterOpenPosition(trade.tokenCurrency, trade.tokenIssuer);
     this.lastCloseTime.set(key, Date.now());
     this.recordProfileStat(position, trade);
@@ -1162,6 +1163,7 @@ export class PaperTrader {
     this.tradesToday++;
     if (nextRemaining === 0) {
       this.openPositions.delete(key);
+      if(trade.id)this.unverifiedRestartIds.delete(trade.id);
       this.ammPriceFetcher?.unregisterOpenPosition(trade.tokenCurrency, trade.tokenIssuer);
       this.lastCloseTime.set(key, Date.now());
       this.recordProfileStat(position, trade);
@@ -1330,20 +1332,29 @@ export class PaperTrader {
     const trade = openTrades.find(t => t.tokenCurrency === currency && t.tokenIssuer === issuer);
     if (!trade) return;
     const tokensHeld = this.db.getPaperInventory(trade.id) ?? reconstructedRemainingTokens(trade);
+    const recovery=this.db.getPaperPositionRuntime(trade);
+    if(!recovery && trade.id){
+      this.unverifiedRestartIds.add(trade.id);
+      warn('[PAPER] Existing position #'+trade.id+
+        ' has NO verified trailing high-water checkpoint. Existing exits continue; NEW entries frozen until it closes.');
+    }
     this.openPositions.set(key, {
       trade,
       entryPriceXRP: trade.entryPriceXRP,
       tokensHeld,
       remainingPercent: trade.remainingPosition,
-      highestPriceSinceEntry: trade.entryPriceXRP,
+      highestPriceSinceEntry: recovery?.highestPriceSinceEntry ?? trade.entryPriceXRP,
       entryRiskFlags: [],
       lastRiskCheck: Date.now(),
-      priceHistory: [trade.entryPriceXRP],
-      openedAt: trade.entryTimestamp || 0,
-      tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
-      profileName: (trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
-      lastBuySeenAt: trade.entryTimestamp || 0,
-      liquidityAtEntry: 0,
+      priceHistory: recovery?.priceHistory ?? [trade.entryPriceXRP],
+      openedAt: recovery?.openedAt ?? trade.entryTimestamp ?? 0,
+      tradeProfile: recovery?.tradeProfile ?? (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
+      profileName: recovery?.profileName ?? (trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
+      lastBuySeenAt: recovery?.lastBuySeenAt ?? trade.entryTimestamp ?? 0,
+      liquidityAtEntry: recovery?.liquidityAtEntry ?? 0,
+      stopLossPercent: recovery?.stopLossPercent,
+      tp1Pct: recovery?.tp1Pct,
+      tp2Pct: recovery?.tp2Pct,
     });
   }
 
@@ -1369,21 +1380,30 @@ export class PaperTrader {
       if (persisted === null) {
         warn(`[PAPER] Legacy inventory reconstructed for ${trade.tokenCurrency} from entry slip and remaining fraction; not independently verified`);
       }
+      const recovery=this.db.getPaperPositionRuntime(trade);
+      if(!recovery && trade.id){
+        this.unverifiedRestartIds.add(trade.id);
+        warn('[PAPER] Recovered open trade #'+trade.id+
+          ' without verified trailing high-water. New entries blocked until closed; exits continue.');
+      }
       this.openPositions.set(key, {
         trade,
         entryPriceXRP: trade.entryPriceXRP,
         tokensHeld,
         remainingPercent: trade.remainingPosition,
-        highestPriceSinceEntry: trade.entryPriceXRP,
+        highestPriceSinceEntry: recovery?.highestPriceSinceEntry ?? trade.entryPriceXRP,
         entryRiskFlags: [],
         lastRiskCheck: Date.now(),
-        priceHistory: [trade.entryPriceXRP],
-        openedAt: trade.entryTimestamp || 0,
-        tradeProfile: (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
-        profileName: (trade.tradeProfile === 'NEW_LAUNCH' ? 'NEW_LAUNCH' :
+        priceHistory: recovery?.priceHistory ?? [trade.entryPriceXRP],
+        openedAt: recovery?.openedAt ?? trade.entryTimestamp ?? 0,
+        tradeProfile: recovery?.tradeProfile ?? (trade.entryReason?.startsWith('[BURST]') ? 'burst' : 'scored') as 'burst' | 'scored',
+        profileName: recovery?.profileName ?? (trade.tradeProfile === 'NEW_LAUNCH' ? 'NEW_LAUNCH' :
           trade.entryReason?.startsWith('[BURST]') ? 'BURST_SCALP' : 'MOMENTUM_RUNNER') as TradeProfileName,
-        lastBuySeenAt: trade.entryTimestamp || 0,
-        liquidityAtEntry: 0,
+        lastBuySeenAt: recovery?.lastBuySeenAt ?? trade.entryTimestamp ?? 0,
+        liquidityAtEntry: recovery?.liquidityAtEntry ?? 0,
+        stopLossPercent: recovery?.stopLossPercent,
+        tp1Pct: recovery?.tp1Pct,
+        tp2Pct: recovery?.tp2Pct,
       });
     }
     info(`Loaded ${this.openPositions.size} open positions; cash checkpoint ${this.cashReconciled ? this.bankrollXRP.toFixed(4) + ' XRP' : 'UNRECONCILED'}`);
