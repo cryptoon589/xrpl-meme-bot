@@ -9,6 +9,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const os=require('node:os');
 const path=require('node:path');
+const {spawnSync}=require('node:child_process');
 const { Database }=require('../dist/db/database');
 const { PaperTrader }=require('../dist/paper/paperTrader');
 const { TradeDecisionEngine }=require('../dist/execution/tradeDecisionEngine');
@@ -87,6 +88,14 @@ async function main(){
     'peak observed during freeze persisted immediately');
   assert.ok(checkpoint?.profileName,'exit profile persisted');
 
+  const restartGate=()=>spawnSync('python3',[
+    path.join(start,'scripts/check_paper_restart_safety.py'),
+    '--db',path.join(temp,'paper-epoch-test.db')
+  ],{encoding:'utf8'});
+  let gate=restartGate();
+  assert.equal(gate.status,0,gate.stdout+'\n'+gate.stderr);
+  assert.match(gate.stdout,/PASS: all open PAPER trade IDs/);
+
   const recovered=new PaperTrader(config,db);
   const restored=recovered.openPositions.get(key);
   assert.ok(restored,'existing position restored');
@@ -100,6 +109,9 @@ async function main(){
 
   // Simulate pre-upgrade crash: a PAPER trade with NO exit-state checkpoint.
   db.db.prepare('DELETE FROM paper_position_runtime WHERE trade_id=?').run(opened.id);
+  gate=restartGate();
+  assert.equal(gate.status,2,'pre-cutover restart gate must block missing high water');
+  assert.match(gate.stdout,/BLOCK: missing/);
   const cold=new PaperTrader(config,db);
   assert.ok(cold.unverifiedRestartIds.has(opened.id),
     'no restart must silently bless an unknown historical high-water');
@@ -109,6 +121,13 @@ async function main(){
     'unknown historical trailing high-water quarantines NEW entries even after operator unfreeze');
   assert.ok(cold.hasOpenPosition(token.currency,token.issuer),
     'restart uncertainty NEVER deletes already open inventory');
+  // A position can exit despite the freeze or missing historical peak; once
+  // it has finally exited, a flat-book restart requires no runtime checkpoint.
+  const closed=cold.closePosition(key,1.20,'time_stop',peakSnap);
+  assert.ok(closed && closed.status==='closed','existing exits remain operable');
+  gate=restartGate();
+  assert.equal(gate.status,0,gate.stdout+'\n'+gate.stderr);
+  assert.match(gate.stdout,/portfolio flat/);
   console.log('PASS PAPER entry-only freeze blocks new burst/scored/TDE decisions, allows TP1 sale, restores exact trailing high and quarantines missing historical checkpoints');
 }
 main().catch(e=>{console.error(e);process.exitCode=1}).finally(()=>{
