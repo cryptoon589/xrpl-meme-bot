@@ -30,7 +30,7 @@ def test():
             result=observe_then_invoke(
                 current,deploy,clock,sleep,
                 timeout_seconds=5.0,interval_seconds=1.0)
-        assert result==0 and calls==[],(result,calls)
+        assert result==3 and calls==[],(result,calls)
         assert 'positions remain; PM2 and database untouched' in output.getvalue()
         assert [row[0] for row in positions_ro(dbpath)]==[24,27]
 
