@@ -5,6 +5,7 @@ on:
     branches:
       - release/hunterix-vnext-paper-20261116
       - fix/hunterix-vnext-meme-only-20261116
+      - feature/hunterix-dynamic-meme-universe-20261121
   workflow_dispatch:
 
 jobs:
@@ -35,6 +36,8 @@ jobs:
         run: node scripts/test_army_pricing_and_blacklist.js
       - name: Meme-only PAPER trade eligibility regression
         run: node scripts/test_meme_entry_universe.js
+      - name: Dynamic meme evidence and rotating scan regressions (mock provider only)
+        run: node scripts/test_dynamic_meme_universe.js
       - name: Whale, burst, validated new launches and operator blacklist
         run: |
           node scripts/test_manual_blacklist.js
