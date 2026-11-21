@@ -12,9 +12,9 @@ async function main(){
   process.env.BOT_PAPER_MEME_DISCOVERY='1';
   try {
     const issuer='rGG3wQ4kUzd7Jnmk1n5NWPZjjut62kCBfC';
-    const unknown='4E4F4E4D454D45000000000000000000000000';
-    const known='544553544D454D450000000000000000000000';
-    const confirmed='4C41554E43484D454D450000000000000000';
+    const unknown=Buffer.from('NONMEME').toString('hex').toUpperCase().padEnd(40,'0');
+    const known=Buffer.from('TESTMEME').toString('hex').toUpperCase().padEnd(40,'0');
+    const confirmed=Buffer.from('LAUNCHMEME').toString('hex').toUpperCase().padEnd(40,'0');
     const observed=[];
     const request=async arg=>{
       observed.push(arg);
