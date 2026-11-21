@@ -60,8 +60,21 @@ async function main(){
     await burst.preloadAMMs([tokens[0]]);
     assert.equal(poolCalls.length,1,'explicit subset limits AMM preload work');
     assert.equal(poolCalls[0],known+':'+issuer);
+    burst.ensureAmmRegistered(unknown,issuer);
+    await new Promise(r=>setImmediate(r));
+    assert.equal(poolCalls.length,1,
+      'routine unclassified payment/offer does not trigger burst AMM RPC');
+    burst.ensureAmmRegistered(known,issuer);
+    await new Promise(r=>setImmediate(r));
+    assert.equal(poolCalls.length,1,
+      'preloaded eligible issue reuses AMM registration');
+    // Fresh AMMCreate still takes the immediate launch-monitoring path.
+    burst.registerNewLaunch(confirmed,issuer,'LAUNCHMEME');
+    await new Promise(r=>setImmediate(r));
+    assert.equal(poolCalls.length,2,
+      'validated new launch may be registered before off-chain metadata arrives');
 
-    console.log('PASS dynamic RPC budget: unknown passive tokens 0 AMM requests, validated launches 1, exact burst preload bounded');
+    console.log('PASS dynamic RPC budget: unclassified routine assets 0 AMM requests, issuer-confirmed and validated launches still discoverable, bounded preload');
   } finally {
     for(const [key,value] of Object.entries(saved)){
       if(value===undefined)delete process.env[key];else process.env[key]=value;
