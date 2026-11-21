@@ -5,6 +5,7 @@ const assert=require('node:assert/strict');
 const {decideVerifiedProjectIssuer,REVIEWED_PROJECT_ISSUERS}=
   require('../dist/risk/verifiedProjectIssuers');
 const {PaperTrader}=require('../dist/paper/paperTrader');
+const {auditRows}=require('./audit_project_issuer_provenance.js');
 const official='rDFXbW2ZZCG5WgPtqwNiA2xZokLMm9ivmN';
 const unknown='r4xx1QrhivG12aYBizd1k1Mwv9mKic7ssd';
 const raw='50484E4958000000000000000000000000000000';
@@ -33,6 +34,21 @@ for(const ticker of ['SWARM','FUZZY','$FLR','SOMENEWMEME','XRPBR']) {
     {allowed:true,status:'not_protected'},
     'the registry protects names; it must not block unrelated meme discovery');
 }
+
+const audit=auditRows([
+  {id:23,token_currency:'PHNIX',token_issuer:unknown,raw_currency:raw,
+   status:'open',remaining_position:100,trade_profile:'BURST_SCALP'},
+  {id:24,token_currency:'PHNIX',token_issuer:official,raw_currency:raw,
+   status:'partial',remaining_position:15,trade_profile:'BURST_SCALP'},
+  {id:25,token_currency:'SWARM',token_issuer:unknown,raw_currency:null,
+   status:'open',remaining_position:100,trade_profile:'BURST_SCALP'}
+]);
+assert.equal(audit[0].provenance,'issuer_mismatch');
+assert.equal(audit[0].sameTickerOtherIssuer,official);
+assert.equal(audit[1].provenance,'issuer_confirmed');
+assert.equal(audit[1].sameTickerOtherIssuer,unknown);
+assert.equal(audit[2].provenance,'not_protected');
+assert.equal(audit[2].sameTickerOtherIssuer,null);
 
 const prev={
   MODE:process.env.MODE,
