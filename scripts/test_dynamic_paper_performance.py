@@ -34,7 +34,7 @@ def populate(p,with_new=False):
         db.execute("INSERT INTO paper_inventory VALUES(?,0)",(i,))
     cash=CASH
     if with_new:
-        cash-=sum(c[3] for c in CASES)
+        cash-=sum(c[3] * 1.003 for c in CASES)  # entry spend + 0.3% simulated fee
         cash+=sum(c[4] for c in CASES)
         for i,token,status,entry,returned,remaining,pnl,tp1,tp2,reason in CASES:
             db.execute("INSERT INTO paper_trades VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -62,9 +62,22 @@ def main():
         assert r.returncode==0,(r.stdout,r.stderr)
         for needle in ("4 new","fully closed: 2 (0 wins, 2 non-wins)",
                        "partial: 1 | open: 1","Combined realized: +0.101848",
-                       "PUNX", "15.0%", "PASS: cash reconciles"):
+                       "New entries:", "simulated entry fees", "PUNX",
+                       "15.0%", "PASS: cash reconciles"):
             assert needle in r.stdout,(needle,r.stdout)
         assert (current.read_bytes(),old.read_bytes())==before,"read-only audit modified database"
+        # Regression: a cash balance missing only entry fees MUST fail. Prior
+        # audit incorrectly accepted this exact discrepancy.
+        with sqlite3.connect(current) as db:
+            missing_entry_fees=sum(c[3]*0.003 for c in CASES)
+            db.execute("UPDATE paper_cash_state SET bankroll_xrp=bankroll_xrp+?",
+                       (missing_entry_fees,))
+        r=run(current,old)
+        assert r.returncode==1 and "Cash movements DO NOT reconcile" in r.stderr,r.stderr
+        with sqlite3.connect(current) as db:
+            db.execute("UPDATE paper_cash_state SET bankroll_xrp=bankroll_xrp-?",
+                       (missing_entry_fees,))
+
         with sqlite3.connect(current) as db:
             db.execute("UPDATE paper_cash_state SET bankroll_xrp=bankroll_xrp+1")
         r=run(current,old)
