@@ -13,6 +13,7 @@ import { XRPLClient } from '../xrpl/client';
 import { Database } from '../db/database';
 import { TrackedToken } from '../types';
 import { info, warn, debug } from '../utils/logger';
+import { dynamicMemeUniverse } from '../risk/dynamicMemeUniverse';
 
 export interface DiscoveredToken {
   currency: string;       // decoded display name (e.g. "Laugh")
@@ -204,8 +205,16 @@ export class ActiveDiscovery {
 
     this.knownTokens.set(key, token);
 
-    // Async: fetch real AMM pool TVL — pass rawCurrency so amm_info gets the correct hex
-    this.fetchRealLiquidity(rawCurrency, issuer, token);
+    // In dynamic PAPER mode, unclassified OfferCreate/Payment/TrustSet
+    // discoveries remain in the tracked catalog but MUST NOT each generate
+    // an expensive AMM RPC. Real AMMCreate evidence still gets a pool probe;
+    // category-confirmed issues and signal-triggered lookups are allowed.
+    const dynamicPaper=process.env.MODE==='PAPER' &&
+      process.env.BOT_PAPER_MEME_DISCOVERY==='1';
+    if(!dynamicPaper || source==='amm_pool' ||
+       dynamicMemeUniverse.hasIssue(currency,issuer,rawCurrency)) {
+      void this.fetchRealLiquidity(rawCurrency,issuer,token);
+    }
 
     return token;
   }
