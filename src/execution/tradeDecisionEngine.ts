@@ -31,6 +31,7 @@ import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { ensureTaggedMemeIssue } from '../market/memeCategoryFeed';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
+import { paperStreamShadowOnly, PAPER_STREAM_SHADOW_REASON } from '../risk/paperStreamShadowOnly';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -223,6 +224,14 @@ export class TradeDecisionEngine {
     if (roundTripLossPct > profile.maxRoundTripLossPct) {
       return reject(sizeXRP, slippage,
         `Round-trip loss too high: ${roundTripLossPct.toFixed(2)}% > ${profile.maxRoundTripLossPct}%`);
+    }
+
+    // Strategy V2: only signals that passed all normal PAPER issuer, liquidity,
+    // size, slippage and loss checks are eligible for the shadow comparison.
+    // Always reject STREAM / whale_stream before any simulated buy.
+    // BURST and scored paths are unchanged.
+    if (paperStreamShadowOnly(this.config.mode, input.signalType)) {
+      return reject(sizeXRP, slippage, PAPER_STREAM_SHADOW_REASON);
     }
 
     // ── 9. Dry-run mode: all checks passed but no real tx ─────────────────
