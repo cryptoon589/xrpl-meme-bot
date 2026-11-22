@@ -242,6 +242,25 @@ export const SCHEMA = {
     )
   `,
 
+  // V2.1: compact, append-only PAPER opportunity event breadcrumbs.
+  // Stores BOT first-sighting (not issuance), qualified signals and actual
+  // simulated trade boundaries. Never contains wallet credentials or fills.
+  paperOpportunityEvents: `
+    CREATE TABLE IF NOT EXISTS paper_opportunity_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      raw_currency TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      source TEXT,
+      price_xrp REAL,
+      trade_id INTEGER,
+      detail TEXT,
+      dedup_key TEXT NOT NULL UNIQUE
+    )
+  `,
+
   // New-paper ledger: never backfill fabricated cash into existing historic DB.
   paperCashState: `
     CREATE TABLE IF NOT EXISTS paper_cash_state (
@@ -302,6 +321,8 @@ export const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status)',
   'CREATE INDEX IF NOT EXISTS idx_paper_trades_entry ON paper_trades(entry_timestamp)',
   'CREATE INDEX IF NOT EXISTS idx_stream_shadow_observed_at ON paper_stream_shadow_signals(observed_at)',
+  'CREATE INDEX IF NOT EXISTS idx_paper_opp_issue_time ON paper_opportunity_events(raw_currency,token_issuer,observed_at)',
+  'CREATE INDEX IF NOT EXISTS idx_paper_opp_event_time ON paper_opportunity_events(event_type,observed_at)',
   'CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, timestamp)',
   'CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date)',
 ];

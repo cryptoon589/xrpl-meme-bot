@@ -215,6 +215,10 @@ async function main() {
       diagnostics.recordSignal({ token: decodeCurrency(rawCurrency || currency), issuer, source: 'burst', reason: 'burst_detected', priceAtSignal: priceXRP, poolXrpReserve: poolTVL / 2, rawCurrency });
       // burstDetector passes poolXRP * 2 as 4th arg (TVL), not the XRP side reserve
       const poolXrpReserve = poolTVL / 2;
+      db.recordOpportunityEvent({tokenCurrency:decodeCurrency(rawCurrency || currency),
+        tokenIssuer:issuer,rawCurrency:rawCurrency || currency,observedAt:Date.now(),
+        eventType:'burst_seen',source:'burst',priceXRP,
+        detail:'poolXRP='+poolXrpReserve.toFixed(2)});
       if (isBlocklistedToken(currency, issuer, rawCurrency)) { debug(`Burst skipped — blocklisted: ${currency}`); return; }
       const burstKey = `${currency}:${issuer}`;
       // Skip tokens that were recently force-closed for no-price
@@ -293,6 +297,9 @@ async function main() {
           return;
         }
         diagnostics.increment('burstApproved');
+        db.recordOpportunityEvent({tokenCurrency:decodeCurrency(rawCurrency || currency),
+          tokenIssuer:issuer,rawCurrency:rawCurrency || currency,observedAt:Date.now(),
+          eventType:'burst_qualified',source:'burst',priceXRP});
         const burstTp = runtimeLearning.getTpTargets('burst');
         // Use the price burstDetector already fetched — it's fresh from the ledger.
         // The previous second ammPriceFetcher.getPrice() call here added 100-300ms
@@ -430,10 +437,19 @@ async function main() {
       tradeLocks.add(momentumKey);
 
       diagnostics.increment('streamMomentumCandidatesSeen');
-      diagnostics.recordSignal({ token: displayCurrency, issuer, source: 'stream', reason: 'momentum_detected', priceAtSignal: snap.buyVolumeXRP, poolXrpReserve: null, buyVolumeXRP: snap.buyVolumeXRP, uniqueBuyers: snap.uniqueBuyers });
+      // Do not compare XRP BUY VOLUME to a token price in missed-mover reports.
+      // Record a signal only after a real issuer-exact quote has been fetched.
       ammPriceFetcher.getPrice(currency, issuer, currency, true,
         process.env.BOT_USE_RESERVE_QUOTES === '1').then(async ammPrice => {
         if (!ammPrice?.priceXRP) { tradeLocks.delete(momentumKey); return; }
+        diagnostics.recordSignal({token:displayCurrency,issuer,source:'stream',
+          reason:'momentum_detected',priceAtSignal:ammPrice.priceXRP,
+          poolXrpReserve:ammPrice.poolXRP,rawCurrency:currency,
+          buyVolumeXRP:snap.buyVolumeXRP,uniqueBuyers:snap.uniqueBuyers});
+        db.recordOpportunityEvent({tokenCurrency:displayCurrency,tokenIssuer:issuer,
+          rawCurrency:currency,observedAt:Date.now(),eventType:'stream_quoted',
+          source:'stream',priceXRP:ammPrice.priceXRP,
+          detail:'buyers='+snap.uniqueBuyers+' buyVolXRP='+snap.buyVolumeXRP.toFixed(2)});
 
         // Check whale presence in stream buyers
         const streamBestWR = whaleTracker.getBestWhaleWinRate(snap.buyerWallets ?? []);
@@ -1270,6 +1286,11 @@ function startPeriodicScan(
             // Need at least 2 of the 4 momentum signals + buys dominating + liquidity ok
             const momentumSignals = [priceUp5m, priceUp15m, volumeSpike, newMoneyIn].filter(Boolean).length;
             const momentumEntry = (momentumSignals >= 2 && buyDominated && liquidOk) || volumeOnlyEntry;
+            if (paperTrader && momentumEntry && snapshot.priceXRP && snapshot.priceXRP>0) {
+              db.recordOpportunityEvent({tokenCurrency:token.currency,tokenIssuer:token.issuer,
+                rawCurrency:token.rawCurrency || token.currency,observedAt:Date.now(),
+                eventType:'momentum_seen',source:'momentum',priceXRP:snapshot.priceXRP});
+            }
 
             // Track near-miss signals for missed opportunity analysis
             if (!momentumEntry && (momentumSignals >= 1 || hasNoPriceHistory) && snapshot.priceXRP && snapshot.liquidityXRP) {

@@ -53,6 +53,25 @@ async function main(){
   assert.equal(paperStreamShadowOnly('PAPER','scored'),false);
   assert.equal(paperStreamShadowOnly('LIVE','stream'),false);
 
+  // Global freeze MUST block PAPER buys, but must not silence risk-qualified
+  // STREAM observation. No PM2 restart, network, cash or trades involved.
+  fs.writeFileSync(path.join(dir,'state','paper-entry-freeze.flag'),'frozen');
+  for(const signalType of ['stream','whale_stream']){
+    const result=await tde.decide({...input,signalType});
+    assert.equal(result.outcome,'REJECTED');
+    assert.equal(result.rejectReason,PAPER_STREAM_SHADOW_REASON,
+      'frozen STREAM should remain eligible for observation-only');
+  }
+  for(const signalType of ['burst','scored']){
+    const result=await tde.decide({...input,signalType});
+    assert.equal(result.outcome,'REJECTED');
+    assert.match(result.rejectReason,/PAPER entry frozen/);
+  }
+  assert.equal(trader.tryOpenTrade(token,snap,75,'[STREAM] frozen'),null);
+  assert.equal(trader.tryOpenBurstTrade(token,snap,'[BURST] frozen',undefined,5),null);
+  assert.equal(db.db.prepare('SELECT COUNT(*) n FROM paper_trades').get().n,0);
+  fs.rmSync(path.join(dir,'state','paper-entry-freeze.flag'));
+
   for(const signalType of ['stream','whale_stream']){
     const result=await tde.decide({...input,signalType});
     assert.equal(result.outcome,'REJECTED');

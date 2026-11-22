@@ -6,6 +6,10 @@ on:
       - release/hunterix-vnext-paper-20261116
       - fix/hunterix-vnext-meme-only-20261116
       - feature/hunterix-dynamic-meme-universe-20261121
+      - feature/hunterix-strategy-v21-20261122
+  pull_request:
+    branches:
+      - feature/hunterix-dynamic-meme-universe-20261121
   workflow_dispatch:
 
 jobs:
@@ -53,6 +57,9 @@ jobs:
           node scripts/test_paper_stream_shadow_v2.js
           python3 scripts/test_paper_stream_shadow_report.py
           python3 -m py_compile scripts/audit_paper_stream_shadow.py
+          node scripts/test_paper_opportunity_events.js
+          python3 scripts/test_paper_opportunity_timeline.py
+          python3 -m py_compile scripts/audit_paper_opportunity_timeline.py
       - name: PAPER entry-only freeze and restart-safe exit-state checkpoint (synthetic SQLite)
         run: |
           node scripts/test_paper_exit_only_restart.js
