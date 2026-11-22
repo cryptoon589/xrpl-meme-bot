@@ -46,7 +46,7 @@ jobs:
         run: node scripts/test_verified_project_issuers.js
       - name: Dynamic PAPER performance audit versus 16-trade baseline (SQLite offline)
         run: python3 scripts/test_dynamic_paper_performance.py
-      - name: Read-only post-activation strategy audit: trade attribution and evidence quality
+      - name: 'Read-only post-activation strategy audit: trade attribution and evidence quality'
         run: python3 scripts/test_dynamic_paper_strategy.py
       - name: PAPER entry-only freeze and restart-safe exit-state checkpoint (synthetic SQLite)
         run: |
