@@ -27,6 +27,7 @@
  */
 
 import { XRPLClient } from '../xrpl/client';
+import { classifyValidatedAmmFlow, ValidatedAmmFlow } from '../diagnostics/xrplAmmFlowEvidence';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
 import { TelegramAlerter } from '../telegram/alerts';
@@ -75,6 +76,8 @@ export class BurstDetector {
   /** key → first seen timestamp — used for age-aware cooldown */
   private confirmedLaunchAt: Map<string, number> = new Map();
   public isManuallyBlocked?: (currency: string, issuer: string, rawCurrency?: string) => boolean;
+  /** Observational, issuer-exact metadata evidence; MUST NOT change burst decisions. */
+  public onValidatedAmmFlow?: (flow: ValidatedAmmFlow) => void;
   private xrplClient: XRPLClient;
   private alerter: TelegramAlerter;
   private db: Database;
@@ -183,7 +186,7 @@ export class BurstDetector {
 
     // PRIMARY: scan metadata for XRP flowing INTO any known AMM pool account.
     // This catches OfferCreate, Payment, AMMDeposit, and any future tx types.
-    this.scanAmmFlows(t, meta);
+    this.scanAmmFlows(tx, t, meta);
 
     // SECONDARY: detect tokens on first encounter via tx fields, then register
     // their AMM account so future txs are caught by scanAmmFlows.
@@ -197,7 +200,7 @@ export class BurstDetector {
   // Scans AffectedNodes for any known AMM account gaining XRP.
   // An AMM account gaining XRP == someone bought the token.
   // ─────────────────────────────────────────
-  private scanAmmFlows(t: any, meta: any): void {
+  private scanAmmFlows(tx: any, t: any, meta: any): void {
     const nodes: any[] = meta?.AffectedNodes || [];
     for (const node of nodes) {
       const n = node.ModifiedNode;
@@ -219,7 +222,19 @@ export class BurstDetector {
       if (this.isManuallyBlocked?.(state.displayName,state.issuer,state.rawCurrency)) continue;
 
       const wallet = t.Account || 'unknown';
-      const isSell = xrpDelta < 0; // XRP out of AMM = someone sold token for XRP
+      const isSell = xrpDelta < 0; // existing burst heuristic; unchanged
+      // New, stricter evidence is independent of legacy burst or buying ratio.
+      // A successful XRP delta alone is NOT an organic buy: verify the exact
+      // AMM<->issuer RippleState token balance changed in the same validated TX.
+      if (this.onValidatedAmmFlow) {
+        try {
+          const observation=classifyValidatedAmmFlow(
+            tx,acct,state.rawCurrency,state.issuer);
+          if(observation)this.onValidatedAmmFlow(observation);
+        } catch(err) {
+          warn('[AmmFlowEvidence] observation failed (BURST unaffected): '+String(err));
+        }
+      }
       debug(`AMM ${isSell ? 'sell' : 'buy'}: ${state.displayName} ${xrpDelta.toFixed(4)} XRP by ${wallet}`);
       this.recordBuy(state.rawCurrency, state.issuer, wallet, Math.abs(xrpDelta), isSell);
     }

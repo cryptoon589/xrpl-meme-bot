@@ -8,6 +8,7 @@ on:
       - feature/hunterix-dynamic-meme-universe-20261121
       - feature/hunterix-strategy-v21-20261122
       - fix/hunterix-v21-first-detected-time-20261122
+      - feature/hunterix-buy-pressure-integrity-20261122
   pull_request:
     branches:
       - feature/hunterix-dynamic-meme-universe-20261121
@@ -59,6 +60,7 @@ jobs:
           python3 scripts/test_paper_stream_shadow_report.py
           python3 -m py_compile scripts/audit_paper_stream_shadow.py
           node scripts/test_paper_opportunity_events.js
+          node scripts/test_xrpl_amm_flow_evidence.js
           python3 scripts/test_paper_opportunity_timeline.py
           python3 scripts/test_v21_capture_coverage.py
           python3 -m py_compile scripts/audit_v21_capture_coverage.py
@@ -70,6 +72,8 @@ jobs:
           python3 -m py_compile scripts/check_paper_restart_safety.py scripts/guarded_flat_paper_cutover.py
           python3 scripts/test_guarded_flat_cutover.py
           python3 scripts/test_guarded_v21_paper_upgrade.py
+          python3 scripts/test_guarded_v212_evidence_upgrade.py
+          python3 -m py_compile scripts/guarded_v212_evidence_upgrade.py
           python3 -m py_compile scripts/guarded_v21_paper_upgrade.py
           python3 scripts/test_legacy_paper_entry_gate.py
           node scripts/test_legacy_paper_gate_trader_contract.js

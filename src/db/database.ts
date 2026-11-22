@@ -189,7 +189,8 @@ export class Database {
     if (!this.isCompactRecoveryDb) return false;
     const kinds = new Set([
       'first_detected','burst_seen','burst_qualified','stream_quoted',
-      'stream_qualified','momentum_seen','paper_entry','paper_exit'
+      'stream_qualified','momentum_seen','paper_entry','paper_exit',
+      'amm_xrp_inflow','amm_xrp_outflow'
     ]);
     const raw = event.rawCurrency || event.tokenCurrency;
     const px = event.priceXRP ?? null;

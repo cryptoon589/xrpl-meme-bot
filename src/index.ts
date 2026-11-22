@@ -208,6 +208,34 @@ async function main() {
   burstDetector.isManuallyBlocked = (currency, issuer, raw) =>
     manualBlacklist.isBlocked(currency, issuer, raw);
 
+  // Observation-only XRP flow evidence; no price inference, buy decision,
+  // wallet attribution, trade execution or change to legacy buy-pressure.
+  // Limited to exact AMM accounts already resolved by the burst detector.
+  if (config.mode === 'PAPER' &&
+      process.env.BOT_PAPER_MEME_DISCOVERY === '1') {
+    const lastAmmFlowBucket = new Map<string, number>();
+    burstDetector.onValidatedAmmFlow = flow => {
+      const bucket = Math.floor(Date.now() / 900000);
+      const key = flow.rawCurrency + ':' + flow.issuer + ':' + flow.side;
+      if (lastAmmFlowBucket.get(key) === bucket) return;
+      lastAmmFlowBucket.set(key, bucket);
+      if (lastAmmFlowBucket.size > 2000) {
+        const first = lastAmmFlowBucket.keys().next().value;
+        if(first !== undefined) lastAmmFlowBucket.delete(first);
+      }
+      const kind=flow.side==='xrp_inflow'
+        ? 'amm_xrp_inflow' : 'amm_xrp_outflow';
+      db.recordOpportunityEvent({
+        tokenCurrency:decodeCurrency(flow.rawCurrency),
+        tokenIssuer:flow.issuer,rawCurrency:flow.rawCurrency,
+        observedAt:Date.now(),eventType:kind,
+        source:'validated_amm_metadata',
+        detail:'AMM XRP flow '+flow.volumeXRP.toFixed(4)+' XRP',
+      });
+      diagnostics.increment('validatedAmmFlowsObserved');
+    };
+  }
+
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
   if (paperTrader) {
     burstDetector.onBurst = (currency, issuer, rawCurrency, poolTVL, priceXRP, tokenAgeMs, baselinePrice, reserveQuote) => {
