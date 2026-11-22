@@ -31,6 +31,8 @@ import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
 import { TelegramAlerter } from '../telegram/alerts';
 import { Database } from '../db/database';
+import { dynamicMemeUniverse } from '../risk/dynamicMemeUniverse';
+import type { TrackedToken } from '../types';
 import { info, warn, debug } from '../utils/logger';
 
 // ─────────────────────────────────────────────
@@ -129,8 +131,10 @@ export class BurstDetector {
     info(`[NewLaunch] Registered ${displayName} with burst detector (AMMCreate)`);
   }
 
-  async preloadAMMs(): Promise<void> {
-    const tokens = this.db.getTrackedTokens();
+  async preloadAMMs(tokenSubset?: TrackedToken[]): Promise<void> {
+    // Dynamic meme mode supplies bounded, issuer-classified candidates. The
+    // legacy/static mode retains its original behavior when no subset supplied.
+    const tokens = tokenSubset ?? this.db.getTrackedTokens();
     info(`[BurstDetector] Pre-loading AMM accounts for ${tokens.length} tracked tokens...`);
     let registered = 0;
     // Batch in groups of 10 to avoid flooding the WS connection
@@ -273,6 +277,14 @@ export class BurstDetector {
   // ─────────────────────────────────────────
   private ensureAmmRegistered(rawCurrency: string, issuer: string): void {
     const key = `${rawCurrency}:${issuer}`;
+    // Unknown OfferCreate/Payment assets can arrive thousands of times an
+    // hour. They may be observed and later tagged by a classifier, but must
+    // not each perform an expensive AMM account lookup. Validated AMMCreate
+    // launches use registerNewLaunch() and remain observable immediately.
+    if(process.env.MODE==='PAPER' &&
+       process.env.BOT_PAPER_MEME_DISCOVERY==='1' &&
+       !dynamicMemeUniverse.hasIssue(rawCurrency,issuer) &&
+       !this.confirmedLaunchAt.has(key)) return;
     // Already tracking via AMM account
     if (this.tokens.has(key)) return;
 

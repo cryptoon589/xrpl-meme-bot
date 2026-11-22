@@ -43,6 +43,41 @@ async function main(){
     'trade-close alert must classify fee-adjusted negative net as loss despite gross proceeds equaling principal');
   console.log('PASS close alert uses corrected net P&L rather than gross returned-principal');
 
+  // Regression: TP1 sold 60% of 5 XRP original for 3.58 XRP returned.
+  // Realized profit on the SOLD inventory is ~0.57 XRP, but 40% is
+  // still exposed; this must never be announced as a CLOSED winning trade.
+  const partial={
+    ...trade,tokenCurrency:'PUNX',status:'partial',
+    entryPriceXRP:0.003237,exitPriceXRP:null,exitTimestamp:null,
+    exitReason:null,entryAmountXRP:5,
+    tp1Hit:true,tp2Hit:false,remainingPosition:40,
+    xrpReturned:3.58,pnlXRP:0.571,pnlPercent:11.42,
+    lastPartialSoldPercent:60,lastPartialXrpReturned:3.58,
+    lastPartialPnlXRP:0.571,lastPartialPnlPercent:18.98,
+    lastPartialExitPriceXRP:0.00365,
+    lastPartialReason:'tp1_+15pct'
+  };
+  const wrongRouted=a.format({type:'paper_trade_closed',paperTrade:partial,message:''});
+  assert.ok(wrongRouted.includes('PARTIAL CLOSE') &&
+    wrongRouted.includes('40% still open') &&
+    wrongRouted.includes('Leg P&amp;L:')===false &&
+    wrongRouted.includes('Leg P&L:') &&
+    !wrongRouted.includes('TRADE CLOSED'),
+    'even wrong-routed TP1 event cannot be shown as completed winning trade');
+  const correctlyRouted=a.format({type:'paper_trade_partial_close',paperTrade:partial,message:''});
+  assert.equal(wrongRouted,correctlyRouted,
+    'partial exit formatting must be consistent across notification entry points');
+  const fullLoss={
+    ...partial,status:'closed',remainingPosition:0,
+    exitPriceXRP:0.0029,exitTimestamp:Date.now(),
+    exitReason:'stop_loss',pnlXRP:-1.435,pnlPercent:-28.7
+  };
+  const fullMessage=a.format({type:'paper_trade_closed',paperTrade:fullLoss,message:''});
+  assert.ok(fullMessage.includes('TRADE CLOSED — LOSS') &&
+    !fullMessage.includes('PARTIAL CLOSE'),
+    'a fully sold trade returning 3.58 XRP on 5 XRP stake must be a loss');
+  console.log('PASS partial TP1 gain never labeled closed win, true full 3.58 XRP close is a loss');
+
   console.log('TELEGRAM ACCOUNTING/DIAGNOSTICS REGRESSION PASSED (OFFLINE)');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

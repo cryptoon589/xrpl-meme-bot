@@ -245,7 +245,12 @@ export class TelegramAlerter {
         return this.fmtTradePartial(payload);
 
       case 'paper_trade_closed':
-        return this.fmtTradeClose(payload);
+        // Defensive guard: callers must never turn a TP1/TP2 leg into a
+        // "TRADE CLOSED — WIN". Inventory status, not realized PnL sign,
+        // determines whether a trade has fully completed.
+        return payload.paperTrade?.status === 'partial'
+          ? this.fmtTradePartial(payload)
+          : this.fmtTradeClose(payload);
 
       case 'open_positions_update':
       case 'hourly_diagnostics':
@@ -402,6 +407,10 @@ export class TelegramAlerter {
   private fmtTradeClose(payload: AlertPayload): string {
     const t = payload.paperTrade;
     if (!t) return '';
+    // A stale caller may send a full-close alert for a partially sold trade.
+    // Do not label open inventory a realized trade win.
+    if (t.status === 'partial') return this.fmtTradePartial(payload);
+    if (t.status !== 'closed') return '';
 
     const ticker = decodeCurrency(t.tokenCurrency);
     const safeTicker = escapeHtml(ticker);

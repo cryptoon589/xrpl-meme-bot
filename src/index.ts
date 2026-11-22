@@ -15,6 +15,8 @@
 import { loadConfig } from './config';
 import { getLogger, info, warn, error, debug } from './utils/logger';
 import http from 'http';
+import { readPaperEntryFreeze } from './risk/paperEntryFreeze';
+import { PAPER_STREAM_SHADOW_REASON, paperStreamShadowOnly } from './risk/paperStreamShadowOnly';
 import { XRPLClient } from './xrpl/client';
 import { TokenDiscovery } from './scanner/tokenDiscovery';
 import { AMMScanner } from './scanner/ammEvents';
@@ -48,6 +50,10 @@ import { MultiTimeframeScorer } from './scoring/multiTimeframeScorer';
 import { TradeDecisionEngine } from './execution/tradeDecisionEngine';
 import { MissedOpportunityTracker } from './market/missedOpportunityTracker';
 import { diagnostics } from './diagnostics/diagnostics';
+import fs from 'fs';
+import { MemeCategoryFeed, setActiveMemeCategoryFeed } from './market/memeCategoryFeed';
+import { canonicalIssue, dynamicMemeUniverse } from './risk/dynamicMemeUniverse';
+import { selectDynamicScanTokens } from './scanner/dynamicMemeScheduler';
 
 // Global state
 let isRunning = false;
@@ -77,6 +83,8 @@ let hourlySummaryTimer: NodeJS.Timeout | null = null;
 async function main() {
   const config = loadConfig();
   getLogger(config.logLevel);
+  const dynamicPaperMode = config.mode==='PAPER' &&
+    process.env.BOT_PAPER_MEME_DISCOVERY==='1';
 
   // Startup invariant: verify the exact operator-controlled permanent
   // exclusion list BEFORE opening/writing SQLite or connecting to XRPL.
@@ -462,8 +470,37 @@ async function main() {
           blocklist: BURST_TRADE_BLOCKLIST,
         });
         if (decision.outcome === 'REJECTED') {
-          info(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
-          diagnostics.recordTdeReject(decision.rejectReason, 'stream');
+          if (decision.rejectReason === PAPER_STREAM_SHADOW_REASON) {
+            // Strategy V2: only normal-risk-APPROVED STREAM candidates reach
+            // this branch. Record raw exact issuer + quote + independent wallet
+            // breadth, without ever opening a PAPER position or touching cash.
+            try {
+              const recorded = db.recordPaperStreamShadowSignal({
+                currency: displayCurrency, issuer, rawCurrency: currency,
+                observedAt: Date.now(),
+                priceXRP: ammPrice.priceXRP,
+                priceObservedAt: ammPrice.observedAtMs ?? null,
+                poolXrpReserve: ammPrice.poolXRP,
+                uniqueBuyers: snap.uniqueBuyers,
+                buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
+                buySellRatio: snap.buySellRatio, buyVolumeXRP: snap.buyVolumeXRP,
+                newWalletBuys: snap.newWalletBuys,
+                signalType: streamHasWhale ? 'whale_stream' : 'stream',
+                assignedProfile: decision.profile.name,
+                approvedSizeXRP: decision.sizeXRP,
+                roundTripLossPct: decision.roundTripLossPct,
+              });
+              if (recorded) {
+                diagnostics.increment('streamShadowEligible');
+                info(`[StrategyV2] STREAM shadow signal: ${displayCurrency} buyers=${snap.uniqueBuyers} | no PAPER entry made`);
+              }
+            } catch (err) {
+              warn(`[StrategyV2] STREAM shadow evidence FAILED for ${displayCurrency}: ${err}`);
+            }
+          } else {
+            info(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
+            diagnostics.recordTdeReject(decision.rejectReason, 'stream');
+          }
           tradeLocks.delete(momentumKey);
           return;
         }
@@ -532,6 +569,21 @@ async function main() {
 
   await tokenDiscovery.initialize();
 
+  // Optional, fail-closed dynamic meme metadata feed. Does not authorize
+  // purchases: the TDE still verifies signal, pool reserves, slippage and risk.
+  if (config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1') {
+    const feed=new MemeCategoryFeed(issue=>{
+      tokenDiscovery.addTrackedToken({
+        currency:issue.display,rawCurrency:issue.currency,
+        issuer:issue.issuer,firstSeen:issue.dateon||Date.now(),
+        lastUpdated:Date.now()
+      });
+    });
+    setActiveMemeCategoryFeed(feed);
+    feed.start(); // fetches are not on the XRPL node
+    info('[MemeDiscovery] dynamic issuer-exact category feed enabled (Data by xrpl.to https://xrpl.to)');
+  }
+
   // Operator-requested priority watch issues. These are existing tokens,
   // not NEW_LAUNCH discoveries, never auto-traded and never risk-exempt.
   // Seed BEFORE burst AMM preload and scan startup; name alone is NOT enough
@@ -549,7 +601,36 @@ async function main() {
   // With 4000+ tracked tokens this can take 5-15 min if awaited; the bot
   // would miss all trades during that window. Lazy registration still catches
   // tokens on their second buy; preload just closes the first-buy gap.
-  burstDetector.preloadAMMs().catch(err =>
+  // Preloading every catalog token (10k+) generated thousands of RPC calls
+  // despite the dynamic periodic scan being capped at 24. In dynamic mode,
+  // preload only the reviewed bootstrap issues and any already classified
+  // meme issues; burst discovery still watches every incoming validated tx.
+  let burstPreload = undefined as ReturnType<typeof tokenDiscovery.getTrackedTokens> | undefined;
+  if (dynamicPaperMode) {
+    const reviewed=JSON.parse(fs.readFileSync(
+      process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE!, 'utf8'
+    )) as {tokens:Array<{currency:string;issuer:string}>};
+    const allowed=new Set<string>();
+    for(const t of reviewed.tokens) {
+      const k=canonicalIssue(t.currency,t.issuer);
+      if(k)allowed.add(k);
+    }
+    for(const t of dynamicMemeUniverse.eligibleIssues()) {
+      const k=canonicalIssue(t.currency,t.issuer);
+      if(k)allowed.add(k);
+    }
+    // Open positions remain priority even if classification later expires.
+    for(const pos of paperTrader?.getOpenPositionsSummary()||[]) {
+      const k=canonicalIssue(pos.rawCurrency||pos.tokenCurrency,pos.tokenIssuer);
+      if(k)allowed.add(k);
+    }
+    burstPreload=tokenDiscovery.getTrackedTokens().filter(t=>
+      allowed.has(canonicalIssue(t.rawCurrency||t.currency,t.issuer)||'')
+    );
+    info('[MemeDiscovery] bounded startup burst AMM preload: '+
+      burstPreload.length+' exact issues; catalog '+tokenDiscovery.getTokenCount());
+  }
+  burstDetector.preloadAMMs(burstPreload).catch(err =>
     warn(`[preloadAMMs] Non-fatal error during startup preload: ${err}`)
   );
 
@@ -632,16 +713,50 @@ async function main() {
   });
   trendingSeeder.start();
 
-  // Background holder refresh — rate-limited to 1 token per 5s.
-  // Avoids WS flooding. Prioritises tokens with no cached value.
+  // Dynamic mode: holder counts are slow paginated issuer account_lines
+  // reads. Rotate across classified issues only, 1 token/minute, and never
+  // start a second job while a previous multi-page fetch is outstanding.
+  // Static mode remains unchanged until the feature is explicitly enabled.
+  let holderCursor=0;
+  let holderFetchBusy=false;
   setInterval(async () => {
-    const tokens = tokenDiscovery.getTrackedTokens();
-    const uncached = tokens.filter(t => holderCounter.getCached(t.currency, t.issuer) === null);
-    const target = uncached.length > 0 ? uncached[0] : tokens[Math.floor(Math.random() * tokens.length)];
-    if (target) {
-      holderCounter.getHolderCount(target.currency, target.issuer, target.rawCurrency).catch(() => {});
+    if(dynamicPaperMode && holderFetchBusy)return;
+    let tokens=tokenDiscovery.getTrackedTokens();
+    if(dynamicPaperMode) {
+      const allowed=new Set<string>();
+      for(const issue of dynamicMemeUniverse.eligibleIssues()) {
+        const k=canonicalIssue(issue.currency,issue.issuer);
+        if(k)allowed.add(k);
+      }
+      const bootstrap=JSON.parse(fs.readFileSync(
+        process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE!, 'utf8'
+      )) as {tokens:Array<{currency:string;issuer:string}>};
+      for(const t of bootstrap.tokens) {
+        const k=canonicalIssue(t.currency,t.issuer);
+        if(k)allowed.add(k);
+      }
+      const dedup=new Set<string>();
+      tokens=tokens.filter(t=>{
+        const k=canonicalIssue(t.rawCurrency||t.currency,t.issuer);
+        if(!k || !allowed.has(k) || dedup.has(k))return false;
+        dedup.add(k);return true;
+      });
     }
-  }, 5000); // 1 holder fetch per 5s = 12/min, won't flood WS
+    const uncached=tokens.filter(t=>
+      holderCounter.getCached(t.currency,t.issuer)===null
+    );
+    const candidates=uncached.length ? uncached : tokens;
+    const target=dynamicPaperMode
+      ? candidates[holderCursor++%Math.max(1,candidates.length)]
+      : (uncached.length>0 ? uncached[0] : tokens[Math.floor(Math.random()*tokens.length)]);
+    if(!target)return;
+    holderFetchBusy=true;
+    try {
+      await holderCounter.getHolderCount(target.currency,target.issuer,target.rawCurrency);
+    } catch(e) {
+      warn('[HolderCounter] background refresh deferred: '+String(e).slice(0,90));
+    } finally {holderFetchBusy=false;}
+  }, dynamicPaperMode ? 60000 : 5000);
 
   // Start periodic scanning with parallel batches
   isRunning = true;
@@ -864,7 +979,22 @@ function startPeriodicScan(
   BURST_TRADE_BLOCKLIST: Set<string>,
   manualBlacklist: OperatorBlacklist
 ): void {
-  const MAX_TRACKED_TOKENS = 300; // hard ceiling matches smartPruneTokens HARD_CAP
+  const MAX_TRACKED_TOKENS = 300; // fixed RPC work budget, not meme-universe limit
+  const dynamicMode = config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1';
+  // A small expensive-RPC scan budget prevents the 10k-token catalog from
+  // flooding a shared public XRPL node. Stream/burst signals remain immediate.
+  const dynamicScanBudget=Math.max(8,Math.min(60,
+    Number.parseInt(process.env.BOT_DYNAMIC_MEME_SCAN_BUDGET||'24',10)||24));
+  const bootstrapKeys = new Set<string>();
+  if(dynamicMode) {
+    const approved=JSON.parse(fs.readFileSync(
+      process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE!, 'utf8'
+    )) as {tokens:Array<{currency:string;issuer:string}>};
+    for(const token of approved.tokens) {
+      const key=canonicalIssue(token.currency,token.issuer);
+      if(key)bootstrapKeys.add(key);
+    }
+  }
   const BATCH_SIZE = Math.max(1, Math.min(10, Number.parseInt(process.env.SCAN_BATCH_SIZE || '10', 10) || 10)); // Configurable scanner concurrency
   const HOLDER_SCAN_INTERVAL = 24; // Scan holders every 24th cycle (~6 minutes)
   let scanCycle = 0;
@@ -883,13 +1013,29 @@ function startPeriodicScan(
     try {
       let tokens = tokenDiscovery.getTrackedTokens();
 
-      // Smart pruning: remove inactive tokens with no pool and low score
-      tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config, paperTrader);
-
-      // Hard cap if still over limit
-      if (tokens.length > MAX_TRACKED_TOKENS) {
-        tokens = tokens.sort((a, b) => b.lastUpdated - a.lastUpdated).slice(0, MAX_TRACKED_TOKENS);
-        warn(`Token count exceeds limit after pruning, scanning most recent ${MAX_TRACKED_TOKENS}`);
+      if(dynamicMode) {
+        // Discovery can track 10k+ tokens, but a public XRPL RPC must only
+        // receive bounded AMM/holder requests. Rotate the confirmed universe.
+        const memeKeys=new Set(bootstrapKeys);
+        for(const issue of dynamicMemeUniverse.eligibleIssues()){
+          const key=canonicalIssue(issue.currency,issue.issuer);
+          if(key)memeKeys.add(key);
+        }
+        const openKeys=new Set((paperTrader?.getOpenPositionsSummary()||[]).map(p=>
+          canonicalIssue(p.rawCurrency||p.tokenCurrency,p.tokenIssuer)).filter(
+          (k):k is string=>!!k));
+        tokens=selectDynamicScanTokens(tokens,memeKeys,openKeys,scanCycle,dynamicScanBudget);
+        if(scanCycle%4===1) {
+          info('[MemeDiscovery] monitored '+memeKeys.size+' exact issues; scanning '+
+            tokens.length+' rotating meme candidates; catalog remains '+tokenDiscovery.getTokenCount());
+        }
+      } else {
+        // Compatibility: static release behavior unchanged when feature off.
+        tokens = smartPruneTokens(tokens, db, ammScanner, tokenScorer, riskFilter, config, paperTrader);
+        if(tokens.length>MAX_TRACKED_TOKENS) {
+          tokens=tokens.sort((a,b)=>b.lastUpdated-a.lastUpdated).slice(0,MAX_TRACKED_TOKENS);
+          warn('Token count exceeds limit, scanning most recent '+MAX_TRACKED_TOKENS);
+        }
       }
 
       // Periodic holder count update
@@ -1282,16 +1428,19 @@ function startPeriodicScan(
       // Check exits for ALL open positions — catches orphaned positions
       // (tokens that got pruned from the scan list but still have open trades)
       if (paperTrader && paperTrader.getOpenPositions().length > 0) {
-        const orphanClosed = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
+        const orphanExitEvents = await paperTrader.checkAllOpenExits(async (currency, issuer, rawCurrency) => {
           const p = await ammPriceFetcher.getPrice(
             currency,issuer,rawCurrency,true,process.env.BOT_USE_RESERVE_QUOTES === '1'
           );
           return p ?? null;
         });
-        for (const ct of orphanClosed) {
+        for (const ct of orphanExitEvents) {
+          // checkAllOpenExits yields both partial TP1/TP2 events and complete
+          // closes. A partial realized gain is NOT a full closed winning trade.
+          if (ct.status !== 'partial' && ct.status !== 'closed') continue;
           totalTrades++;
           // Suppress ghost-close alerts (no-price / force-close at entry) — just log them
-          if (ct.exitReason === 'force_close_no_price') {
+          if (ct.status === 'closed' && ct.exitReason === 'force_close_no_price') {
             info(`Ghost close (no price): ${ct.tokenCurrency} — position voided, bankroll returned`);
             // Add to no-price cooldown — don't re-enter this token for 6h
             const cooldownKey = `${ct.tokenCurrency}:${ct.tokenIssuer}`;
@@ -1301,11 +1450,13 @@ function startPeriodicScan(
             continue;
           }
           setTimeout(() => sendAlert(telegramAlerter, db, {
-            type: 'paper_trade_closed',
+            type: ct.status === 'partial' ? 'paper_trade_partial_close' : 'paper_trade_closed',
             tokenCurrency: ct.tokenCurrency,
             tokenIssuer: ct.tokenIssuer,
             paperTrade: ct,
-            message: `Closed ${ct.tokenCurrency}: ${ct.pnlPercent?.toFixed(1)}% PnL`,
+            message: ct.status === 'partial'
+              ? `Partial sale ${ct.tokenCurrency}: ${ct.remainingPosition.toFixed(0)}% remains open`
+              : `Closed ${ct.tokenCurrency}: ${ct.pnlPercent?.toFixed(1)}% PnL`,
           }, config), 0);
         }
       }
@@ -1385,6 +1536,11 @@ function startPeriodicScan(
       `<b>Daily P&amp;L:</b> ${state.cashReconciled ? (state.dailyPnL >= 0 ? '+' : '') + state.dailyPnL.toFixed(2) + ' XRP (simulated)' : 'not audited'}`,
       `<b>Open:</b>      ${db.getOpenPositionCount()} open | ${db.getPartialPositionCount()} partial${openPositions.length !== 1 ? 's' : ''}`,
     ];
+    if(dynamicMode) {
+      const observed=dynamicMemeUniverse.stats();
+      lines.push('<i>Classified meme issues: '+observed.eligible+
+        ' (Data by <a href="https://xrpl.to">xrpl.to</a>)</i>');
+    }
     lines.push('');
     const closed6h = db.getClosedTradeCountSince(6*3600*1000);
     const totalClosed = db.getTotalClosedTradeCount();
@@ -1692,6 +1848,8 @@ function startHealthEndpoint(
         uptime: Math.round(process.uptime()),
         tokens: tokenDiscovery.getTokenCount(),
         positions: paperTrader?.getOpenPositions().length || 0,
+        paperEntryFrozen: paperTrader ? readPaperEntryFreeze().frozen : null,
+        paperStreamShadowOnly: paperTrader ? paperStreamShadowOnly('PAPER', 'stream') : null,
         xrplConnected: xrplStatus.connected,
         xrplStreamConnected: xrplStatus.streamConnected,
         xrplLastTxAgeMs: xrplStatus.lastTransactionAgeMs,
@@ -1705,6 +1863,7 @@ function startHealthEndpoint(
         `bot_uptime_seconds ${Math.round(process.uptime())}`,
         `bot_tokens_tracked ${tokenDiscovery.getTokenCount()}`,
         `bot_open_positions ${state?.openPositions || 0}`,
+        `bot_paper_stream_shadow_only ${paperTrader && paperStreamShadowOnly('PAPER', 'stream') ? 1 : 0}`,
         `bot_bankroll_xrp ${state?.bankrollXRP || 0}`,
         `bot_daily_pnl_xrp ${state?.dailyPnL || 0}`,
         `bot_xrpl_connected ${xrplClient.getStatus().connected ? 1 : 0}`,

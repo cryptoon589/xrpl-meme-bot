@@ -8,6 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
+import { dynamicMemeUniverse } from './dynamicMemeUniverse';
 
 type Decision = { allowed: boolean; reason: string };
 const NON_MEME = new Set([
@@ -17,6 +18,13 @@ const NON_MEME = new Set([
   'SOL','WSOL','XSOL','BNB','WBNB','AVAX','WAVAX','ADA','TRX',
   'PAXG','XAUT','FXRP','WBTC','RLUSD','USDY','USDE','SUSDE'
 ]);
+const NON_MEME_KNOWN_ISSUES = new Set([
+  'EVR:ra9g3LAJm9xJu8Awe7oWzR6VXFB1mpFtSe',
+  '534F4C4F00000000000000000000000000000000:rsoLo2S1kiGeCcn6hCUXVrCpGMWLrRrLZz',
+  '5245414C00000000000000000000000000000000:rKVyXn1AhqMTvNA9hS6XkFjQNn2VE8Nz88'
+]);
+// Known utility/ecosystem issues from the previous PAPER misclassification.
+// These are NOT entries in the operator-controlled permanent blacklist.
 const ISSUER = /^r[1-9A-HJ-NP-Za-km-z]{24,34}$/;
 
 function readable(value?: string): string {
@@ -40,6 +48,13 @@ export function paperMemeEntryDecision(
   if (!ISSUER.test(issuer||'')) return reject('Invalid XRPL issuer');
   const excluded=deniedName(currency,rawCurrency);
   if (excluded) return reject('Non-meme asset type: '+excluded);
+  const identity=normalizeIssuedCurrency(rawCurrency||currency);
+  if(identity && NON_MEME_KNOWN_ISSUES.has(identity+':'+issuer))
+    return reject('Previously confirmed conventional token issue');
+  // External evidence expands the bootstrap list, but must never bypass
+  // the operator's reviewed approval-file checksum or strict startup rules.
+  const dynamicEligible=process.env.BOT_PAPER_MEME_DISCOVERY==='1' &&
+    dynamicMemeUniverse.hasIssue(currency,issuer,rawCurrency);
 
   const file=process.env.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE;
   const approvedHash=process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256;
@@ -77,6 +92,7 @@ export function paperMemeEntryDecision(
     if (seen.has(key)) return reject('Duplicate approved issue');
     seen.add(key);
   }
+  if (dynamicEligible) return {allowed:true,reason:'Fresh issuer-exact external meme evidence'};
   if (seen.has(observed+':'+issuer)) return {allowed:true,reason:'Exact issued meme asset approved'};
   return reject('Unknown/unreviewed token: not approved as XRPL meme coin');
 }

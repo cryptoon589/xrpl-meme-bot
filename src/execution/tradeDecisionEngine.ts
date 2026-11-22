@@ -28,6 +28,10 @@ import {
 import { diagnostics } from '../diagnostics/diagnostics';
 import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
+import { ensureTaggedMemeIssue } from '../market/memeCategoryFeed';
+import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
+import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
+import { paperStreamShadowOnly, PAPER_STREAM_SHADOW_REASON } from '../risk/paperStreamShadowOnly';
 
 // FIX #33: explicit outcome names — APPROVED_PAPER makes clear it's paper mode, not live.
 // APPROVED_LIVE requires MODE=LIVE + LIVE_TRADING=true + TRADING_WALLET_SEED.
@@ -84,10 +88,35 @@ export class TradeDecisionEngine {
     const reject = (sizeXRP: number, slippage: number, reason: string): DecisionResult =>
       this.reject(input.signalType, profile, sizeXRP, slippage, reason);
 
+    if(this.config.mode==='PAPER'){
+      const freeze=readPaperEntryFreeze();
+      if(freeze.frozen)return reject(0,0,'PAPER entry frozen: '+freeze.reason);
+    }
+
+    // On-demand provider lookup is bounded/cached; no automatic approval from
+    // a ticker or momentum alone. Direct PaperTrader methods independently
+    // verify the resulting in-process evidence.
+    if (this.config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1') {
+      await ensureTaggedMemeIssue(input.currency,input.issuer,input.rawCurrency);
+    }
     // Entry eligibility is distinct from the four-token manual blacklist.
     if (this.config.mode === 'PAPER' && process.env.BOT_PAPER_MEME_ONLY === '1') {
       const policy=paperMemeEntryDecision(input.currency,input.issuer,input.rawCurrency);
       if (!policy.allowed) return reject(0,0,'Meme-only universe: '+policy.reason);
+    }
+
+    // Separately protect source-confirmed project identities. A Memes tag
+    // proves category at most; it does not authenticate a project's issuer.
+    // Unreviewed names remain eligible through normal dynamic discovery.
+    if(this.config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1'){
+      const identity=decideVerifiedProjectIssuer(
+        input.currency,input.issuer,input.rawCurrency
+      );
+      if(!identity.allowed){
+        return reject(0,0,
+          'Verified project issuer mismatch: '+identity.ticker+
+          ' (candidate issuer is not project-published issuance)');
+      }
     }
 
     // ── 1. Blocklist checks ────────────────────────────────────────────────
@@ -195,6 +224,14 @@ export class TradeDecisionEngine {
     if (roundTripLossPct > profile.maxRoundTripLossPct) {
       return reject(sizeXRP, slippage,
         `Round-trip loss too high: ${roundTripLossPct.toFixed(2)}% > ${profile.maxRoundTripLossPct}%`);
+    }
+
+    // Strategy V2: only signals that passed all normal PAPER issuer, liquidity,
+    // size, slippage and loss checks are eligible for the shadow comparison.
+    // Always reject STREAM / whale_stream before any simulated buy.
+    // BURST and scored paths are unchanged.
+    if (paperStreamShadowOnly(this.config.mode, input.signalType)) {
+      return { ...reject(sizeXRP, slippage, PAPER_STREAM_SHADOW_REASON), roundTripLossPct };
     }
 
     // ── 9. Dry-run mode: all checks passed but no real tx ─────────────────

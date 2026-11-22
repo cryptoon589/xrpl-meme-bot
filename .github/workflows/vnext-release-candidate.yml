@@ -5,6 +5,7 @@ on:
     branches:
       - release/hunterix-vnext-paper-20261116
       - fix/hunterix-vnext-meme-only-20261116
+      - feature/hunterix-dynamic-meme-universe-20261121
   workflow_dispatch:
 
 jobs:
@@ -35,6 +36,34 @@ jobs:
         run: node scripts/test_army_pricing_and_blacklist.js
       - name: Meme-only PAPER trade eligibility regression
         run: node scripts/test_meme_entry_universe.js
+      - name: Dynamic meme evidence and rotating scan regressions (mock provider only)
+        run: node scripts/test_dynamic_meme_universe.js
+      - name: Dynamic meme XRPL RPC budget regressions (offline)
+        run: node scripts/test_dynamic_rpc_budget.js
+      - name: Prevent concurrent different-issuer same-ticker PAPER exposure
+        run: node scripts/test_open_ticker_collision.js
+      - name: Verify source-backed project issuer for protected names (offline)
+        run: node scripts/test_verified_project_issuers.js
+      - name: Dynamic PAPER performance audit versus 16-trade baseline (SQLite offline)
+        run: python3 scripts/test_dynamic_paper_performance.py
+      - name: 'Read-only post-activation strategy audit: trade attribution and evidence quality'
+        run: python3 scripts/test_dynamic_paper_strategy.py
+      - name: 'Strategy V2 PAPER: STREAM observation-only, qualified evidence and future-window report'
+        run: |
+          node scripts/test_paper_stream_shadow_v2.js
+          python3 scripts/test_paper_stream_shadow_report.py
+          python3 -m py_compile scripts/audit_paper_stream_shadow.py
+      - name: PAPER entry-only freeze and restart-safe exit-state checkpoint (synthetic SQLite)
+        run: |
+          node scripts/test_paper_exit_only_restart.js
+          node --check scripts/paper_entry_control.js
+          python3 -m py_compile scripts/check_paper_restart_safety.py scripts/guarded_flat_paper_cutover.py
+          python3 scripts/test_guarded_flat_cutover.py
+          python3 scripts/test_legacy_paper_entry_gate.py
+          node scripts/test_legacy_paper_gate_trader_contract.js
+          python3 -m py_compile scripts/arm_legacy_paper_entry_gate.py
+          python3 scripts/test_watch_flat_paper_cutover.py
+          python3 -m py_compile scripts/watch_flat_paper_cutover.py
       - name: Whale, burst, validated new launches and operator blacklist
         run: |
           node scripts/test_manual_blacklist.js
@@ -69,6 +98,7 @@ jobs:
           assert.equal(e.TRADING_WALLET_SEED,'');
           assert.equal(e.BOT_USE_RESERVE_QUOTES,'1');
           assert.equal(e.BOT_PAPER_MEME_ONLY,'1');
+          assert.equal(e.BOT_PAPER_STREAM_SHADOW_ONLY,'1');
           assert.ok(e.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE.endsWith('paper_meme_entry_allowlist.json'));
           assert.equal(e.BOT_ENABLE_LIQUIDITY_LOSS_GUARD,'1');
           assert.equal(e.BOT_DB_PATH.endsWith('meme_bot.paper-epoch-20261116-ci.db'),true);
