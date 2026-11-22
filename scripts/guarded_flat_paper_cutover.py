@@ -266,6 +266,16 @@ def main() -> int:
              '--db',str(db_path)],cwd=active,timeout=30)
         if paper_state(db_path)[0]:
             abort('Book is not flat before new PM2 start')
+        # The old process may have been armed with an emergency SQLITE
+        # BEFORE INSERT gate without restarting. It must NOT survive the new
+        # release: new code now enforces a durable ENTRY-FROZEN sentinel and
+        # Strategy V2 shadow-only policy at TDE / PaperTrader boundaries.
+        # Only remove our exact reviewed trigger, only after old PM2 stopped,
+        # private online backup exists, the new release code/build is verified,
+        # restart preflight passed and exit-only sentinel is already present.
+        from arm_legacy_paper_entry_gate import drop_gate_after_old_stopped
+        if drop_gate_after_old_stopped(db_path):
+            print('PASS: reviewed legacy SQLite INSERT gate removed under stopped PM2; new freeze sentinel remains')
         cmd(['pm2','restart',PM2_NAME],timeout=30)
         require_safe_runtime(pm2_process(),active,online=True)
         health=verify_health()
