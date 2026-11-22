@@ -59,6 +59,9 @@ jobs:
           node --check scripts/paper_entry_control.js
           python3 -m py_compile scripts/check_paper_restart_safety.py scripts/guarded_flat_paper_cutover.py
           python3 scripts/test_guarded_flat_cutover.py
+          python3 scripts/test_legacy_paper_entry_gate.py
+          node scripts/test_legacy_paper_gate_trader_contract.js
+          python3 -m py_compile scripts/arm_legacy_paper_entry_gate.py
           python3 scripts/test_watch_flat_paper_cutover.py
           python3 -m py_compile scripts/watch_flat_paper_cutover.py
       - name: Whale, burst, validated new launches and operator blacklist
