@@ -1118,6 +1118,67 @@ export class Database {
     } catch { /* already exists */ }
   }
 
+  // ==================== STRATEGY V2 STREAM OBSERVATION ====================
+  /**
+   * An eligible STREAM signal which the PAPER strategy would have traded.
+   * This inserts ONLY a shadow observation, never a PAPER trade or any cash /
+   * inventory mutation. Deduped by exact ledger issue per UTC 15m bucket.
+   * We deliberately DO NOT use the legacy shadow resolver's delayed spot
+   * price as historical window highs; the forensic report queries dated
+   * market_snapshots and reports missing observation coverage explicitly.
+   */
+  recordPaperStreamShadowSignal(data: {
+    currency: string; issuer: string; rawCurrency: string;
+    observedAt: number; priceXRP: number; priceObservedAt?: number | null;
+    poolXrpReserve: number; uniqueBuyers: number;
+    buyCount5m: number; sellCount5m: number;
+    buySellRatio: number; buyVolumeXRP: number; newWalletBuys: number;
+    signalType: 'stream' | 'whale_stream'; assignedProfile: string;
+    approvedSizeXRP: number; roundTripLossPct: number;
+  }): boolean {
+    const numbers = [
+      data.observedAt, data.priceXRP, data.poolXrpReserve,
+      data.uniqueBuyers, data.buyCount5m, data.sellCount5m,
+      data.buySellRatio, data.buyVolumeXRP, data.newWalletBuys,
+      data.approvedSizeXRP, data.roundTripLossPct,
+    ];
+    if (!data.currency || !data.issuer || !data.rawCurrency ||
+        !data.assignedProfile || !['stream','whale_stream'].includes(data.signalType) ||
+        numbers.some(x => !Number.isFinite(x)) ||
+        data.observedAt <= 0 || data.priceXRP <= 0 || data.poolXrpReserve <= 0 ||
+        data.approvedSizeXRP <= 0 || data.roundTripLossPct < 0 ||
+        data.uniqueBuyers < 0 || data.buyCount5m < 0 || data.sellCount5m < 0 ||
+        data.buyVolumeXRP < 0 || data.newWalletBuys < 0 ||
+        data.buySellRatio < 0 || data.buySellRatio > 1 ||
+        [data.uniqueBuyers,data.buyCount5m,data.sellCount5m,data.newWalletBuys]
+          .some(x => !Number.isInteger(x))) {
+      throw new Error('Invalid eligible PAPER STREAM shadow signal evidence');
+    }
+    const ts = data.priceObservedAt ?? null;
+    if (ts !== null && (!Number.isFinite(ts) || ts <= 0 ||
+        ts > data.observedAt + 30000)) {
+      throw new Error('Invalid STREAM source quote timestamp');
+    }
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO paper_stream_shadow_signals
+        (token_currency, token_issuer, raw_currency, observed_at,
+         bucket_15m, price_xrp, price_observed_at, pool_xrp_reserve,
+         unique_buyers, buy_count_5m, sell_count_5m, buy_sell_ratio,
+         buy_volume_xrp, new_wallet_buys, signal_type, assigned_profile,
+         approved_size_xrp, round_trip_loss_pct)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const result = this.runWithRetry(stmt, [
+      data.currency,data.issuer,data.rawCurrency,data.observedAt,
+      Math.floor(data.observedAt / (15*60*1000)),
+      data.priceXRP,ts,data.poolXrpReserve,data.uniqueBuyers,
+      data.buyCount5m,data.sellCount5m,data.buySellRatio,
+      data.buyVolumeXRP,data.newWalletBuys,data.signalType,
+      data.assignedProfile,data.approvedSizeXRP,data.roundTripLossPct,
+    ]);
+    return result.changes === 1;
+  }
+
   // ==================== SHADOW BACKTEST ====================
 
   recordShadowTrade(data: {
