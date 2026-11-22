@@ -16,7 +16,7 @@ import { loadConfig } from './config';
 import { getLogger, info, warn, error, debug } from './utils/logger';
 import http from 'http';
 import { readPaperEntryFreeze } from './risk/paperEntryFreeze';
-import { PAPER_STREAM_SHADOW_REASON } from './risk/paperStreamShadowOnly';
+import { PAPER_STREAM_SHADOW_REASON, paperStreamShadowOnly } from './risk/paperStreamShadowOnly';
 import { XRPLClient } from './xrpl/client';
 import { TokenDiscovery } from './scanner/tokenDiscovery';
 import { AMMScanner } from './scanner/ammEvents';
@@ -1849,6 +1849,7 @@ function startHealthEndpoint(
         tokens: tokenDiscovery.getTokenCount(),
         positions: paperTrader?.getOpenPositions().length || 0,
         paperEntryFrozen: paperTrader ? readPaperEntryFreeze().frozen : null,
+        paperStreamShadowOnly: paperTrader ? paperStreamShadowOnly('PAPER', 'stream') : null,
         xrplConnected: xrplStatus.connected,
         xrplStreamConnected: xrplStatus.streamConnected,
         xrplLastTxAgeMs: xrplStatus.lastTransactionAgeMs,
@@ -1862,6 +1863,7 @@ function startHealthEndpoint(
         `bot_uptime_seconds ${Math.round(process.uptime())}`,
         `bot_tokens_tracked ${tokenDiscovery.getTokenCount()}`,
         `bot_open_positions ${state?.openPositions || 0}`,
+        `bot_paper_stream_shadow_only ${paperTrader && paperStreamShadowOnly('PAPER', 'stream') ? 1 : 0}`,
         `bot_bankroll_xrp ${state?.bankrollXRP || 0}`,
         `bot_daily_pnl_xrp ${state?.dailyPnL || 0}`,
         `bot_xrpl_connected ${xrplClient.getStatus().connected ? 1 : 0}`,
