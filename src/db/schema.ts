@@ -213,6 +213,35 @@ export const SCHEMA = {
     )
   `,
 
+  // Strategy V2: only risk-eligible STREAM signals are recorded here.
+  // No simulated token purchase, bankroll debit, or phantom P&L is created.
+  // Bucket uniqueness keeps frequent callbacks from oversampling one XRPL
+  // issue. Future market price observations are analyzed offline by timestamp.
+  paperStreamShadowSignals: `
+    CREATE TABLE IF NOT EXISTS paper_stream_shadow_signals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      raw_currency TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      bucket_15m INTEGER NOT NULL,
+      price_xrp REAL NOT NULL CHECK (price_xrp > 0),
+      price_observed_at INTEGER,
+      pool_xrp_reserve REAL,
+      unique_buyers INTEGER NOT NULL,
+      buy_count_5m INTEGER NOT NULL,
+      sell_count_5m INTEGER NOT NULL,
+      buy_sell_ratio REAL NOT NULL,
+      buy_volume_xrp REAL NOT NULL,
+      new_wallet_buys INTEGER NOT NULL,
+      signal_type TEXT NOT NULL,
+      assigned_profile TEXT NOT NULL,
+      approved_size_xrp REAL NOT NULL,
+      round_trip_loss_pct REAL NOT NULL,
+      UNIQUE(raw_currency, token_issuer, bucket_15m)
+    )
+  `,
+
   // New-paper ledger: never backfill fabricated cash into existing historic DB.
   paperCashState: `
     CREATE TABLE IF NOT EXISTS paper_cash_state (
@@ -272,6 +301,7 @@ export const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_scores_token ON scores(token_currency, token_issuer, timestamp)',
   'CREATE INDEX IF NOT EXISTS idx_paper_trades_status ON paper_trades(status)',
   'CREATE INDEX IF NOT EXISTS idx_paper_trades_entry ON paper_trades(entry_timestamp)',
+  'CREATE INDEX IF NOT EXISTS idx_stream_shadow_observed_at ON paper_stream_shadow_signals(observed_at)',
   'CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, timestamp)',
   'CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date)',
 ];
