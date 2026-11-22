@@ -36,6 +36,7 @@ import urllib.request
 
 OLD_SHA = '6c5d4d0c6c10c1da1608be90ce2725ee71e5645f'
 MIN_TESTED_SHA = 'f41766589db940c257357eb403bff1f29b7f16b9'
+STRATEGY_V2_MIN_SHA = 'fd2c296031a7f9f6a91024490f02c8c261ba589c'
 PM2_NAME = 'hunterix-vnext-paper'
 EPOCH_NAME = 'meme_bot.paper-epoch-20261116-vnext.db'
 PORT = 3000
@@ -124,6 +125,7 @@ def verify_repositories(active:Path,review:Path,release:str) -> None:
     cmd(['git','cat-file','-e',release+'^{commit}'],cwd=active)
     cmd(['git','merge-base','--is-ancestor',OLD_SHA,release],cwd=active)
     cmd(['git','merge-base','--is-ancestor',MIN_TESTED_SHA,release],cwd=active)
+    cmd(['git','merge-base','--is-ancestor',STRATEGY_V2_MIN_SHA,release],cwd=active)
 
 def acquire_stop_if_flat(db_path:Path) -> bool:
     """Prevent new SQLite trade commits between flat check and PM2 stop."""
@@ -186,10 +188,11 @@ def verify_health(timeout_seconds:int=95):
             if (status.get('status')=='ok' and
                 status.get('positions')==0 and
                 status.get('paperEntryFrozen') is True and
+                status.get('paperStreamShadowOnly') is True and
                 status.get('xrplConnected') is True and
                 status.get('xrplStreamConnected') is True):
                 return status
-            last=f"health not ready (status={status.get('status')}, frozen={status.get('paperEntryFrozen')}, positions={status.get('positions')})"
+            last=f"health not ready (status={status.get('status')}, frozen={status.get('paperEntryFrozen')}, v2_stream_shadow={status.get('paperStreamShadowOnly')}, positions={status.get('positions')})"
         except (urllib.error.URLError,TimeoutError,ValueError,ConnectionError) as ex:
             last=str(ex)
         time.sleep(2)
@@ -227,7 +230,8 @@ def main() -> int:
     print('Checking staged build and release fixtures before cutover...')
     cmd(['npm','run','build'],cwd=review,timeout=90)
     for test in ('test_paper_exit_only_restart.js','test_verified_project_issuers.js',
-                 'test_dynamic_paper_performance.py'):
+                 'test_dynamic_paper_performance.py','test_paper_stream_shadow_v2.js',
+                 'test_paper_stream_shadow_report.py'):
         if test.endswith('.py'):
             cmd(['python3','scripts/'+test],cwd=review,timeout=60)
         else:
@@ -268,7 +272,7 @@ def main() -> int:
         if git_head(active)!=release or paper_state(db_path)[0]:
             abort('Release or PAPER account changed during health check')
         cmd(['pm2','save'],timeout=20)
-        print('PASS: NEW PAPER release online, healthy, FLAT and ENTRY-FROZEN')
+        print('PASS: NEW PAPER release online, healthy, FLAT, ENTRY-FROZEN and STREAM-SHADOW-ONLY')
         print('Deployed:',release)
         print('Health uptime:',health.get('uptime'))
         print('No PAPER entries have been resumed; explicit operator review required.')
