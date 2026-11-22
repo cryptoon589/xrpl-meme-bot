@@ -112,7 +112,7 @@ def test_v2_health_gate():
     wrong={**status,'paperStreamShadowOnly':False}
     now=[0]
     def monotonic():
-        now[0]+=1
+        now[0]+=0.25
         return now[0]
     with patch.object(mod.urllib.request,'urlopen',side_effect=lambda *a,**k:Response(wrong)):
         with patch.object(mod.time,'monotonic',side_effect=monotonic):
