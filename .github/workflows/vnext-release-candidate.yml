@@ -9,6 +9,7 @@ on:
       - feature/hunterix-strategy-v21-20261122
       - fix/hunterix-v21-first-detected-time-20261122
       - feature/hunterix-buy-pressure-integrity-20261122
+      - analysis/hunterix-stream-issuer-quality-20261122
   pull_request:
     branches:
       - feature/hunterix-dynamic-meme-universe-20261121
@@ -65,6 +66,8 @@ jobs:
           python3 scripts/test_v21_capture_coverage.py
           python3 -m py_compile scripts/audit_v21_capture_coverage.py
           python3 -m py_compile scripts/audit_paper_opportunity_timeline.py
+          python3 scripts/test_stream_issuer_quality.py
+          python3 -m py_compile scripts/audit_stream_issuer_quality.py
       - name: PAPER entry-only freeze and restart-safe exit-state checkpoint (synthetic SQLite)
         run: |
           node scripts/test_paper_exit_only_restart.js
