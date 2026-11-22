@@ -92,6 +92,38 @@ det.processTransaction(tx('AMMDeposit'));
 assert.equal(observations.length,1);
 det.processTransaction(tx('Payment',12000000,{validated:false}));
 assert.equal(observations.length,1,'unvalidated TX cannot create evidence');
+
 assert.equal(legacyFlowCalls,2,'legacy callback path untouched');
+// XRP-delivered Payment with issued SendMax previously fell outside the main
+// transaction handler. Catch it ONLY through mapped-AMM evidence shadow.
+const {isXrpDeliveredIssuedSendMax,XRPLClient}=require('../dist/xrpl/client');
+const filtered=tx('Payment',-7000000);
+filtered.tx_json.Amount='7000000';
+filtered.tx_json.SendMax={currency,issuer,value:'10'};
+filtered.hash='A'.repeat(64);
+assert.equal(isXrpDeliveredIssuedSendMax(filtered),true);
+assert.equal(XRPLClient.isRelevant(filtered),false,
+  'main trading filter must remain unchanged');
+const beforeFiltered=legacyFlowCalls;
+det.observeFilteredXrpPayment(filtered);
+assert.equal(observations.length,2,'filtered exchange-like XRP delivery observed');
+assert.equal(observations[1].side,'xrp_outflow');
+assert.equal(observations[1].txHash,filtered.hash);
+assert.equal(legacyFlowCalls,beforeFiltered,
+  'XRP-delivered observation MUST NOT fabricate BURST buy/sell events');
+const noSendMax=tx('Payment',-7000000);
+noSendMax.tx_json.Amount='7000000';
+assert.equal(isXrpDeliveredIssuedSendMax(noSendMax),false);
+const unvalidatedFiltered={...filtered,validated:false};
+assert.equal(isXrpDeliveredIssuedSendMax(unvalidatedFiltered),false);
+det.observeFilteredXrpPayment(unvalidatedFiltered);
+assert.equal(observations.length,2);
+const malformed={...filtered,tx_json:{...filtered.tx_json,SendMax:'1000000'}};
+assert.equal(isXrpDeliveredIssuedSendMax(malformed),false);
+const notSwap={...filtered,meta:JSON.parse(JSON.stringify(filtered.meta))};
+notSwap.meta.AffectedNodes[1].ModifiedNode.FinalFields.Balance.value='80';
+det.observeFilteredXrpPayment(notSwap);
+assert.equal(observations.length,2,
+  'same-direction reserves must never become shadow exchange evidence');
 
 console.log('PASS observed exact AMM balance/trustline flows; plain transfers, LP, unvalidated, failed, wrong issuer rejected; legacy trading path untouched');
