@@ -48,6 +48,11 @@ jobs:
         run: python3 scripts/test_dynamic_paper_performance.py
       - name: 'Read-only post-activation strategy audit: trade attribution and evidence quality'
         run: python3 scripts/test_dynamic_paper_strategy.py
+      - name: 'Strategy V2 PAPER: STREAM observation-only, qualified evidence and future-window report'
+        run: |
+          node scripts/test_paper_stream_shadow_v2.js
+          python3 scripts/test_paper_stream_shadow_report.py
+          python3 -m py_compile scripts/audit_paper_stream_shadow.py
       - name: PAPER entry-only freeze and restart-safe exit-state checkpoint (synthetic SQLite)
         run: |
           node scripts/test_paper_exit_only_restart.js
@@ -90,6 +95,7 @@ jobs:
           assert.equal(e.TRADING_WALLET_SEED,'');
           assert.equal(e.BOT_USE_RESERVE_QUOTES,'1');
           assert.equal(e.BOT_PAPER_MEME_ONLY,'1');
+          assert.equal(e.BOT_PAPER_STREAM_SHADOW_ONLY,'1');
           assert.ok(e.HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE.endsWith('paper_meme_entry_allowlist.json'));
           assert.equal(e.BOT_ENABLE_LIQUIDITY_LOSS_GUARD,'1');
           assert.equal(e.BOT_DB_PATH.endsWith('meme_bot.paper-epoch-20261116-ci.db'),true);
