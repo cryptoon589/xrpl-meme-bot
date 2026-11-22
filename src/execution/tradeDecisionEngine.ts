@@ -88,7 +88,11 @@ export class TradeDecisionEngine {
     const reject = (sizeXRP: number, slippage: number, reason: string): DecisionResult =>
       this.reject(input.signalType, profile, sizeXRP, slippage, reason);
 
-    if(this.config.mode==='PAPER'){
+    // V2.1: an operator freeze blocks ALL buy paths immediately, but
+    // STREAM shadow candidates are allowed to complete risk-only validation.
+    // They still return REJECTED before PAPER execution or cash mutation.
+    const shadowObservation = paperStreamShadowOnly(this.config.mode,input.signalType);
+    if(this.config.mode==='PAPER' && !shadowObservation){
       const freeze=readPaperEntryFreeze();
       if(freeze.frozen)return reject(0,0,'PAPER entry frozen: '+freeze.reason);
     }
@@ -232,6 +236,12 @@ export class TradeDecisionEngine {
     // BURST and scored paths are unchanged.
     if (paperStreamShadowOnly(this.config.mode, input.signalType)) {
       return { ...reject(sizeXRP, slippage, PAPER_STREAM_SHADOW_REASON), roundTripLossPct };
+    }
+
+    // Second freeze guard: protects against a freeze toggled during async
+    // validation. STREAM shadow above can never fall through to a buy.
+    if(this.config.mode==='PAPER' && readPaperEntryFreeze().frozen){
+      return reject(0,0,'PAPER entry frozen during preflight');
     }
 
     // ── 9. Dry-run mode: all checks passed but no real tx ─────────────────

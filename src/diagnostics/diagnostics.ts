@@ -141,6 +141,11 @@ export class DiagnosticsService {
   categorizeReject(reason?: string): string {
     const r = (reason || '').toLowerCase();
     if (r.includes('blocklist')) return 'blocklisted';
+    if (r.includes('paper entry frozen')) return 'entry frozen';
+    if (r.includes('meme-only universe')) return 'meme eligibility';
+    if (r.includes('verified project issuer mismatch')) return 'issuer mismatch';
+    if (r.includes('no fresh complete amm reserves')) return 'stale or missing AMM reserves';
+    if (r.includes('strategy_v2_stream_shadow_only')) return 'STREAM shadow observation';
     if (r.includes('already have open position')) return 'duplicate position';
     if (r.includes('max open trades')) return 'max open trades';
     if (r.includes('daily loss limit')) return 'daily loss limit';
@@ -208,7 +213,7 @@ export class DiagnosticsService {
       `<b>Queue:</b> dropped ${this.counters.queueDroppedTx} | reconnects ${this.counters.reconnects}`,
       `<b>Discovery:</b> AMM pools ${this.counters.ammPoolsDiscovered}`,
       `<b>Burst:</b> seen ${this.counters.burstCandidatesSeen} | no AMM ${this.counters.burstRejectedNoAmm} | pool small ${this.counters.burstRejectedPoolTooSmall} | cooldown ${this.counters.burstRejectedCooldown} | approved ${this.counters.burstApproved} | opened ${this.counters.burstTradesOpened}`,
-      `<b>Stream:</b> seen ${this.counters.streamMomentumCandidatesSeen} | pool small ${this.counters.streamRejectedPoolTooSmall} | slippage ${this.counters.streamRejectedSlippage} | max open ${this.counters.streamRejectedMaxOpenTrades} | bankroll ${this.counters.streamRejectedBankroll} | daily loss ${this.counters.streamRejectedDailyLossLimit} | approved ${this.counters.streamApproved} | opened ${this.counters.streamTradesOpened}`,
+      `<b>Stream:</b> seen ${this.counters.streamMomentumCandidatesSeen} | shadow eligible ${this.counters.streamShadowEligible || 0} | pool small ${this.counters.streamRejectedPoolTooSmall} | slippage ${this.counters.streamRejectedSlippage} | max open ${this.counters.streamRejectedMaxOpenTrades} | bankroll ${this.counters.streamRejectedBankroll} | daily loss ${this.counters.streamRejectedDailyLossLimit} | approved ${this.counters.streamApproved} | opened ${this.counters.streamTradesOpened}`,
       `<b>TDE rejects:</b> ${topReasons.length ? topReasons.map(([r, c]) => `${r}=${c}`).join(' | ') : 'none'}`,
       `<b>Top missed movers:</b>`,
     ];

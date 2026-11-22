@@ -175,6 +175,54 @@ export class Database {
     }
   }
 
+  /**
+   * Diagnostic-only durable PAPER timeline. Dedup signals per exact issue and
+   * UTC 15-minute bucket; trade boundaries are keyed by trade ID. All writes
+   * are best-effort and cannot break an inventory/cash transaction or an exit.
+   * The original, potentially 18 GiB, database is never written by this path.
+   */
+  recordOpportunityEvent(event: {
+    tokenCurrency: string; tokenIssuer: string; rawCurrency?: string;
+    observedAt: number; eventType: string; source?: string;
+    priceXRP?: number | null; tradeId?: number | null; detail?: string | null;
+  }): boolean {
+    if (!this.isCompactRecoveryDb) return false;
+    const kinds = new Set([
+      'first_detected','burst_seen','burst_qualified','stream_quoted',
+      'stream_qualified','momentum_seen','paper_entry','paper_exit'
+    ]);
+    const raw = event.rawCurrency || event.tokenCurrency;
+    const px = event.priceXRP ?? null;
+    const tid = event.tradeId ?? null;
+    if (!event.tokenCurrency || !event.tokenIssuer || !raw ||
+        !kinds.has(event.eventType) ||
+        !Number.isSafeInteger(event.observedAt) || event.observedAt <= 0 ||
+        (px !== null && (!Number.isFinite(px) || px <= 0)) ||
+        (tid !== null && (!Number.isSafeInteger(tid) || tid <= 0))) {
+      return false;
+    }
+    const unit = tid !== null ? 'trade:' + tid
+      : event.eventType === 'first_detected' ? 'first'
+      : 'bucket:' + Math.floor(event.observedAt / 900000);
+    const key = [event.eventType,raw,event.tokenIssuer,unit].join('|');
+    try {
+      const result = this.runWithRetry(this.db.prepare(`
+        INSERT OR IGNORE INTO paper_opportunity_events
+        (token_currency,token_issuer,raw_currency,observed_at,
+         event_type,source,price_xrp,trade_id,detail,dedup_key)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+      `), [
+        event.tokenCurrency,event.tokenIssuer,raw,event.observedAt,
+        event.eventType,event.source ?? null,px,tid,
+        (event.detail ?? '').slice(0,256),key
+      ]);
+      return result.changes === 1;
+    } catch (err) {
+      warn('[V2.1] Observation persistence failed (trade unaffected): ' + err);
+      return false;
+    }
+  }
+
   // ==================== TOKENS ====================
 
   saveToken(token: TrackedToken): void {
@@ -193,6 +241,9 @@ export class Database {
           `INSERT INTO tokens (currency, issuer, first_seen, last_updated, raw_currency) VALUES (?, ?, ?, ?, ?)`
         );
         this.runWithRetry(insertStmt, [token.currency, token.issuer, token.firstSeen, now, token.rawCurrency ?? null]);
+        this.recordOpportunityEvent({tokenCurrency:token.currency,tokenIssuer:token.issuer,
+          rawCurrency:token.rawCurrency,observedAt:token.firstSeen,
+          eventType:'first_detected',source:'bot_tracking'});
       }
     } catch (err) {
       warn(`Error saving token: ${err}`);
@@ -640,6 +691,10 @@ export class Database {
       // Set the ID on the trade object
       const result: any = this.db.prepare('SELECT last_insert_rowid() as id').get();
       trade.id = Number(result.id);
+      this.recordOpportunityEvent({tokenCurrency:trade.tokenCurrency,tokenIssuer:trade.tokenIssuer,
+        rawCurrency:trade.rawCurrency,observedAt:trade.entryTimestamp,
+        eventType:'paper_entry',source:trade.tradeSource ?? 'paper',
+        priceXRP:trade.entryPriceXRP,tradeId:trade.id});
     } catch (err) {
       warn(`Error saving paper trade: ${err}`);
       throw err; // required for transaction rollback
@@ -676,6 +731,13 @@ export class Database {
         trade.tradeSource ?? null,
         trade.id
       ]);
+      if (trade.status === 'closed' && trade.exitTimestamp) {
+        this.recordOpportunityEvent({tokenCurrency:trade.tokenCurrency,tokenIssuer:trade.tokenIssuer,
+          rawCurrency:trade.rawCurrency,observedAt:trade.exitTimestamp,
+          eventType:'paper_exit',source:trade.tradeSource ?? 'paper',
+          priceXRP:trade.exitPriceXRP,tradeId:trade.id,
+          detail:trade.exitReason ?? null});
+      }
     } catch (err) {
       warn(`Error updating paper trade: ${err}`);
       throw err; // required for transaction rollback
@@ -1176,6 +1238,12 @@ export class Database {
       data.buyVolumeXRP,data.newWalletBuys,data.signalType,
       data.assignedProfile,data.approvedSizeXRP,data.roundTripLossPct,
     ]);
+    if (result.changes === 1) {
+      this.recordOpportunityEvent({tokenCurrency:data.currency,tokenIssuer:data.issuer,
+        rawCurrency:data.rawCurrency,observedAt:data.observedAt,
+        eventType:'stream_qualified',source:data.signalType,priceXRP:data.priceXRP,
+        detail:'buyers='+data.uniqueBuyers+' buyVolXRP='+data.buyVolumeXRP.toFixed(2)});
+    }
     return result.changes === 1;
   }
 
