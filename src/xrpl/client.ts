@@ -17,7 +17,7 @@ export function isXrpDeliveredIssuedSendMax(tx: any): boolean {
       (tx.engine_result ?? tx.meta?.TransactionResult) !== 'tesSUCCESS') return false;
   const amount=t.Amount ?? t.DeliverMax;
   const send=t.SendMax;
-  return typeof amount==='string' && /^\\d+$/.test(amount) &&
+  return typeof amount==='string' && /^\d+$/.test(amount) &&
     !!send && typeof send==='object' &&
     typeof send.currency==='string' && send.currency!=='XRP' &&
     typeof send.issuer==='string' && send.issuer.length>0;
