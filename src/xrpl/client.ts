@@ -6,6 +6,23 @@ import { Client } from 'xrpl';
 import { info, error, warn, debug } from '../utils/logger';
 import { diagnostics } from '../diagnostics/diagnostics';
 
+/**
+ * Evidence-only catch-up for cross-currency Payments delivering XRP using
+ * issued-token SendMax. The legacy relevant-token handler intentionally does
+ * NOT receive these; they must not manufacture buys, BURST or scored signals.
+ */
+export function isXrpDeliveredIssuedSendMax(tx: any): boolean {
+  const t=tx?.tx_json ?? tx?.transaction ?? tx?.tx;
+  if (!t || t.TransactionType !== 'Payment' || tx.validated !== true ||
+      (tx.engine_result ?? tx.meta?.TransactionResult) !== 'tesSUCCESS') return false;
+  const amount=t.Amount ?? t.DeliverMax;
+  const send=t.SendMax;
+  return typeof amount==='string' && /^\d+$/.test(amount) &&
+    !!send && typeof send==='object' &&
+    typeof send.currency==='string' && send.currency!=='XRP' &&
+    typeof send.issuer==='string' && send.issuer.length>0;
+}
+
 export class XRPLClient {
   private client: Client | null = null;
   private streamClient: Client | null = null;
@@ -24,6 +41,8 @@ export class XRPLClient {
   private lastLedgerAt = 0;
   private ledgerHandler?: (ledger: any) => void;
   private txHandler?: (tx: any) => void;
+  /** Observation-only; never forwards filtered payments into legacy trade callbacks. */
+  public onXrpDeliveredIssuedSendMax?: (tx: any) => void;
   private bookOfferCache = new Map<string, { expiresAt: number; promise: Promise<any> }>();
 
   constructor(wsUrl: string) {
@@ -312,6 +331,12 @@ export class XRPLClient {
           this.filteredTxCount++;
           diagnostics.recordTx(tx);
           this.txHandler(tx);
+        } else if (this.onXrpDeliveredIssuedSendMax &&
+            isXrpDeliveredIssuedSendMax(tx)) {
+          // Safe shadow-only path: NEVER call this.txHandler or legacy
+          // BuyPressureTracker/BurstDetector.processTransaction here.
+          try { this.onXrpDeliveredIssuedSendMax(tx); }
+          catch(err){warn('[AMMShadow] filtered XRP Payment evidence failed: '+String(err));}
         }
       });
       stream.on('disconnected', code => {
@@ -390,6 +415,10 @@ export class XRPLClient {
         this.filteredTxCount++;
         diagnostics.recordTx(tx);
         this.txHandler(tx);
+      } else if (this.onXrpDeliveredIssuedSendMax &&
+          isXrpDeliveredIssuedSendMax(tx)) {
+        try { this.onXrpDeliveredIssuedSendMax(tx); }
+        catch(err){warn('[AMMShadow] filtered XRP Payment evidence failed: '+String(err));}
       }
     });
   }

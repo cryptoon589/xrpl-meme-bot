@@ -17,7 +17,7 @@ const tx=(kind='Payment',delta=12000000,opts={})=>{
         FinalFields:{Account:amm,Balance:changed},
         PreviousFields:{Balance:'100000000'}}},
       {ModifiedNode:{LedgerEntryType:'RippleState',
-        FinalFields:{Balance:{currency,value:'120'},
+        FinalFields:{Balance:{currency,value:delta>0?'80':'120'},
           LowLimit:{issuer:amm},HighLimit:{issuer}},
         PreviousFields:{Balance:{currency,value:'100'}}}}
     ]},...opts
@@ -41,8 +41,26 @@ assert.equal(judge(tx(),amm,currency,'rOtherIssuer'),null,
 const noAmm=tx();noAmm.meta.AffectedNodes[0].ModifiedNode.FinalFields.Account='rOtherAMM';
 assert.equal(judge(noAmm),null,'unmapped AMM XRP balance cannot authorize');
 const noBalanceChange=tx();
-noBalanceChange.meta.AffectedNodes[1].ModifiedNode.PreviousFields.Balance.value='120';
+noBalanceChange.meta.AffectedNodes[1].ModifiedNode.PreviousFields.Balance.value='80';
 assert.equal(judge(noBalanceChange),null,'token balance must actually change');
+const sameSide=tx();
+sameSide.meta.AffectedNodes[1].ModifiedNode.FinalFields.Balance.value='120';
+assert.equal(judge(sameSide),null,'both AMM reserves increasing is not an exchange-like flow');
+const inverse=tx();
+const trust=inverse.meta.AffectedNodes[1].ModifiedNode;
+trust.FinalFields.LowLimit.issuer=issuer;
+trust.FinalFields.HighLimit.issuer=amm;
+trust.FinalFields.Balance.value='-80';
+trust.PreviousFields.Balance.value='-100';
+assert.equal(judge(inverse).side,'xrp_inflow',
+  'AMM high-side trustline must reverse token balance orientation');
+const inverseBad=tx();
+const trustBad=inverseBad.meta.AffectedNodes[1].ModifiedNode;
+trustBad.FinalFields.LowLimit.issuer=issuer;
+trustBad.FinalFields.HighLimit.issuer=amm;
+trustBad.FinalFields.Balance.value='-120';
+trustBad.PreviousFields.Balance.value='-100';
+assert.equal(judge(inverseBad),null,'same-direction reserves rejected even with AMM high-side trustline');
 // The legacy tracker counts a simple issued-token Payment as a buy AND a sell.
 // New classification must never turn that unrelated transfer into a real buy.
 const tracker=new BuyPressureTracker();
@@ -74,6 +92,42 @@ det.processTransaction(tx('AMMDeposit'));
 assert.equal(observations.length,1);
 det.processTransaction(tx('Payment',12000000,{validated:false}));
 assert.equal(observations.length,1,'unvalidated TX cannot create evidence');
+
 assert.equal(legacyFlowCalls,2,'legacy callback path untouched');
+// XRP-delivered Payment with issued SendMax previously fell outside the main
+// transaction handler. Catch it ONLY through mapped-AMM evidence shadow.
+const {isXrpDeliveredIssuedSendMax,XRPLClient}=require('../dist/xrpl/client');
+const filtered=tx('Payment',-7000000);
+filtered.tx_json.Amount='7000000';
+filtered.tx_json.SendMax={currency,issuer,value:'10'};
+filtered.hash='A'.repeat(64);
+assert.equal(isXrpDeliveredIssuedSendMax(filtered),true);
+assert.equal(XRPLClient.isRelevant(filtered),false,
+  'main trading filter must remain unchanged');
+const beforeFiltered=legacyFlowCalls;
+det.observeFilteredXrpPayment(filtered);
+assert.equal(observations.length,2,'filtered exchange-like XRP delivery observed');
+assert.equal(observations[1].side,'xrp_outflow');
+assert.equal(observations[1].txHash,filtered.hash);
+assert.equal(legacyFlowCalls,beforeFiltered,
+  'XRP-delivered observation MUST NOT fabricate BURST buy/sell events');
+const noSendMax=tx('Payment',-7000000);
+noSendMax.tx_json.Amount='7000000';
+assert.equal(isXrpDeliveredIssuedSendMax(noSendMax),false);
+det.observeFilteredXrpPayment(noSendMax);
+assert.equal(observations.length,2,'direct filtered shadow cannot accept ordinary XRP Payments');
+assert.equal(legacyFlowCalls,beforeFiltered,'direct filtered shadow cannot change burst');
+
+const unvalidatedFiltered={...filtered,validated:false};
+assert.equal(isXrpDeliveredIssuedSendMax(unvalidatedFiltered),false);
+det.observeFilteredXrpPayment(unvalidatedFiltered);
+assert.equal(observations.length,2);
+const malformed={...filtered,tx_json:{...filtered.tx_json,SendMax:'1000000'}};
+assert.equal(isXrpDeliveredIssuedSendMax(malformed),false);
+const notSwap={...filtered,meta:JSON.parse(JSON.stringify(filtered.meta))};
+notSwap.meta.AffectedNodes[1].ModifiedNode.FinalFields.Balance.value='80';
+det.observeFilteredXrpPayment(notSwap);
+assert.equal(observations.length,2,
+  'same-direction reserves must never become shadow exchange evidence');
 
 console.log('PASS observed exact AMM balance/trustline flows; plain transfers, LP, unvalidated, failed, wrong issuer rejected; legacy trading path untouched');

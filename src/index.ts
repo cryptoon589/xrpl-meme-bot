@@ -17,6 +17,7 @@ import { getLogger, info, warn, error, debug } from './utils/logger';
 import http from 'http';
 import { readPaperEntryFreeze } from './risk/paperEntryFreeze';
 import { PAPER_STREAM_SHADOW_REASON, paperStreamShadowOnly } from './risk/paperStreamShadowOnly';
+import { AmmPressureEvidence } from './diagnostics/ammPressureEvidence';
 import { XRPLClient } from './xrpl/client';
 import { TokenDiscovery } from './scanner/tokenDiscovery';
 import { AMMScanner } from './scanner/ammEvents';
@@ -214,8 +215,31 @@ async function main() {
   if (config.mode === 'PAPER' &&
       process.env.BOT_PAPER_MEME_DISCOVERY === '1') {
     const lastAmmFlowBucket = new Map<string, number>();
+    const ammPressureEvidence = new AmmPressureEvidence();
     burstDetector.onValidatedAmmFlow = flow => {
-      const bucket = Math.floor(Date.now() / 900000);
+      const now=Date.now();
+      // Independent observational 5m window. No wallet attribution or
+      // legacy/TDE/BURST signal mutation. Hash dedup prevents retried
+      // validated stream events from double-counting volume.
+      if(ammPressureEvidence.observe(flow,now)){
+        const newSnap=ammPressureEvidence.snapshot(flow.rawCurrency,flow.issuer,now);
+        const oldSnap=buyPressureTracker.getSnapshot(flow.rawCurrency,flow.issuer);
+        const detail='AMM5m in='+newSnap.inflows+' out='+newSnap.outflows+
+          ' inXRP='+newSnap.inflowXRP.toFixed(2)+
+          ' outXRP='+newSnap.outflowXRP.toFixed(2)+
+          ' | legacy5m buy='+oldSnap.buyCount+
+          ' sell='+oldSnap.sellCount+
+          ' new='+oldSnap.newWalletBuys+
+          ' ratio='+oldSnap.buySellRatio.toFixed(2);
+        const written=db.recordOpportunityEvent({
+          tokenCurrency:decodeCurrency(flow.rawCurrency),
+          tokenIssuer:flow.issuer,rawCurrency:flow.rawCurrency,
+          observedAt:now,eventType:'amm_pressure_compare',
+          source:'validated_amm_shadow',detail
+        });
+        if(written)diagnostics.increment('ammPressureCompared');
+      }
+      const bucket = Math.floor(now / 900000);
       const key = flow.rawCurrency + ':' + flow.issuer + ':' + flow.side;
       if (lastAmmFlowBucket.get(key) === bucket) return;
       lastAmmFlowBucket.set(key, bucket);
@@ -234,6 +258,11 @@ async function main() {
       });
       diagnostics.increment('validatedAmmFlowsObserved');
     };
+    // The relevant-token filter intentionally continues to exclude these
+    // XRP-delivered Payments from legacy buy pressure and trading decisions.
+    // Observe mapped AMM metadata only; never run the normal tx handler.
+    xrplClient.onXrpDeliveredIssuedSendMax = tx =>
+      burstDetector.observeFilteredXrpPayment(tx);
   }
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine

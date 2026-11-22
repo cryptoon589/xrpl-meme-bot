@@ -53,6 +53,14 @@ try {
   assert.equal(record('stream_qualified'),false);
   assert.equal(count('burst_seen'),3);
   assert.equal(count('stream_qualified'),1);
+  assert.equal(record('amm_pressure_compare'),true,
+    'side-by-side AMM metadata evidence must persist independently');
+  assert.equal(record('amm_pressure_compare'),false,
+    'AMM compare event must dedup by exact issue per 15m');
+  assert.equal(record('amm_pressure_compare','rOtherIssuer'),true,
+    'same ticker with different issuer must remain separate');
+  assert.equal(count('amm_pressure_compare'),2);
+
   assert.equal(record('burst_seen',issuer,NaN),false,'invalid timestamps are refused');
   const evidence={
     currency:'PNX',issuer,rawCurrency:raw,observedAt:first+1000,

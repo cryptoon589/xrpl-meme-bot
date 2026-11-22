@@ -26,7 +26,7 @@
  *   - MAX_TRACKED_TOKENS: 1000 (memory bound)
  */
 
-import { XRPLClient } from '../xrpl/client';
+import { XRPLClient, isXrpDeliveredIssuedSendMax } from '../xrpl/client';
 import { classifyValidatedAmmFlow, ValidatedAmmFlow } from '../diagnostics/xrplAmmFlowEvidence';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
@@ -200,7 +200,19 @@ export class BurstDetector {
   // Scans AffectedNodes for any known AMM account gaining XRP.
   // An AMM account gaining XRP == someone bought the token.
   // ─────────────────────────────────────────
-  private scanAmmFlows(tx: any, t: any, meta: any): void {
+  /**
+   * Shadow-only handler for XRP-delivered issued-SendMax Payments filtered
+   * out of the main transaction stream. Uses ONLY validated mapped AMM
+   * metadata evidence; must never update BURST buys or invoke onBurst.
+   */
+  observeFilteredXrpPayment(tx: any): void {
+    if (!this.onValidatedAmmFlow || !isXrpDeliveredIssuedSendMax(tx))return;
+    const t=tx.tx_json ?? tx.tx ?? tx.transaction;
+    if(t?.TransactionType !== 'Payment' || !tx.meta)return;
+    this.scanAmmFlows(tx,t,tx.meta,true);
+  }
+
+  private scanAmmFlows(tx: any, t: any, meta: any, observationOnly = false): void {
     const nodes: any[] = meta?.AffectedNodes || [];
     for (const node of nodes) {
       const n = node.ModifiedNode;
@@ -236,7 +248,8 @@ export class BurstDetector {
         }
       }
       debug(`AMM ${isSell ? 'sell' : 'buy'}: ${state.displayName} ${xrpDelta.toFixed(4)} XRP by ${wallet}`);
-      this.recordBuy(state.rawCurrency, state.issuer, wallet, Math.abs(xrpDelta), isSell);
+      if(!observationOnly)
+        this.recordBuy(state.rawCurrency, state.issuer, wallet, Math.abs(xrpDelta), isSell);
     }
   }
 
