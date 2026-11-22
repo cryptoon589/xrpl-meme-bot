@@ -32,6 +32,8 @@ interface TradeEvent {
   side: 'buy' | 'sell';
   volumeXRP: number;
   timestamp: number;
+  /** True only for an initially unseen buyer while durable per-token wallet history has capacity. */
+  firstSeenAsBuy: boolean;
 }
 
 export class BuyPressureTracker {
@@ -136,13 +138,17 @@ export class BuyPressureTracker {
     if (!this.events.has(key)) this.events.set(key, []);
     if (!this.knownWallets.has(key)) this.knownWallets.set(key, new Set());
 
-    this.events.get(key)!.push({ wallet, side, volumeXRP, timestamp: now });
-
-    // Cap knownWallets per token to prevent unbounded memory growth
+    // Record first-time status BEFORE registering the wallet. Previously the
+    // snapshot searched for events older than the 5m window after those events
+    // were already pruned, so every buyer was repeatedly labelled "new".
+    // If lifetime history has reached its cap, unknown wallets are unverified,
+    // NOT fresh buyers; never inflate novelty on a capped history.
     const known = this.knownWallets.get(key)!;
-    if (known.size < this.MAX_KNOWN_WALLETS) {
-      known.add(wallet);
-    }
+    const firstSeenAsBuy = side === 'buy' && !known.has(wallet) &&
+      known.size < this.MAX_KNOWN_WALLETS;
+    if (known.size < this.MAX_KNOWN_WALLETS) known.add(wallet);
+    this.events.get(key)!.push({ wallet, side, volumeXRP,
+      timestamp: now, firstSeenAsBuy });
     this.lastTrade.set(key, now);
 
     // Prune old events beyond window
@@ -188,7 +194,6 @@ export class BuyPressureTracker {
     this.pruneOldEvents(key, now);
 
     const events = this.events.get(key) || [];
-    const knownWallets = this.knownWallets.get(key) || new Set();
     const lastActivity = this.lastTrade.get(key) || 0;
 
     const buys = events.filter(e => e.side === 'buy');
@@ -202,19 +207,13 @@ export class BuyPressureTracker {
     const uniqueBuyerSet = new Set(buys.map(e => e.wallet));
     const uniqueSellerSet = new Set(sells.map(e => e.wallet));
 
-    // New wallets: buyers whose wallet has ONLY appeared in the last 5 min
-    // (never seen in events before this window started)
-    const windowStart = now - this.WINDOW_MS;
-    const walletsBeforeWindow = new Set(
-      Array.from(knownWallets).filter(w => {
-        // Check if this wallet had any events before the window
-        const allEvents = this.events.get(key) || [];
-        return allEvents.some(e => e.wallet === w && e.timestamp < windowStart);
-      })
-    );
-    const newWalletBuys = Array.from(uniqueBuyerSet).filter(
-      w => !walletsBeforeWindow.has(w)
-    ).length;
+    // Only buyers whose FIRST EVER tracked token event was a buy during this
+    // window count as fresh wallets. The per-token lifetime set survives
+    // five-minute event pruning. This remains a TRACKER observation, not
+    // verified on-ledger proof that a wallet never held the asset previously.
+    const newWalletBuys = new Set(
+      buys.filter(e => e.firstSeenAsBuy).map(e => e.wallet)
+    ).size;
 
     const newWalletPercent = uniqueBuyerSet.size > 0
       ? (newWalletBuys / uniqueBuyerSet.size) * 100
