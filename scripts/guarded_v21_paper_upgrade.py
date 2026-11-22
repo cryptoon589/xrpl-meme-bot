@@ -77,9 +77,14 @@ def require_runtime(active: Path, online: bool) -> None:
     require_safe_runtime(pm2_process(),active,online=online)
     ensure_frozen(active)
     e=pm2_process().get("pm2_env") or {}
-    if str(e.get("BOT_PAPER_STREAM_SHADOW_ONLY")) != "1" or \
-       str(e.get("BOT_USE_RESERVE_QUOTES")) != "1":
-        abort("Required STREAM shadow-only / reserve quote protections missing")
+    # Existing vNext PAPER releases may not have explicitly set this flag
+    # in their inherited PM2 environment. Dynamic PAPER defaults to STREAM
+    # shadow-only unless the operator EXPLICITLY opts out with '0'.
+    # Online preflight and post-restart /health MUST still report True.
+    if str(e.get("BOT_PAPER_STREAM_SHADOW_ONLY")) == "0":
+        abort("STREAM shadow policy explicitly disabled in PM2; deployment blocked")
+    if str(e.get("BOT_USE_RESERVE_QUOTES")) != "1":
+        abort("Reserve-aware PAPER quotes not explicitly enabled; deployment blocked")
 
 def current_health() -> dict:
     try:

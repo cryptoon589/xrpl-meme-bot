@@ -31,6 +31,28 @@ def test_freeze():
         flag.symlink_to("/dev/null")
         assert not u.frozen(root)
 
+def test_runtime_policy():
+    # Old PM2 may legitimately omit the shadow flag. The code defaults ON
+    # in dynamic PAPER, verified separately by /health. Explicit 0 blocks.
+    # The reserve quote setting MUST remain explicitly enabled.
+    with tempfile.TemporaryDirectory() as tmp:
+        root=Path(tmp)
+        base={
+            "BOT_PAPER_MEME_DISCOVERY":"1",
+            "BOT_USE_RESERVE_QUOTES":"1",
+        }
+        def check(env):
+            with patch.object(u,"pm2_process",return_value={"pm2_env":env}):
+                with patch.object(u,"require_safe_runtime",return_value=None):
+                    with patch.object(u,"ensure_frozen",return_value=None):
+                        u.require_runtime(root,online=True)
+        check(base)
+        check({**base,"BOT_PAPER_STREAM_SHADOW_ONLY":"1"})
+        expect_block(lambda:check({**base,"BOT_PAPER_STREAM_SHADOW_ONLY":"0"}))
+        expect_block(lambda:check({"BOT_PAPER_MEME_DISCOVERY":"1"}))
+        expect_block(lambda:check({**base,"BOT_USE_RESERVE_QUOTES":"0"}))
+        print("PASS legacy PM2 optional shadow flag; explicit opt-out and missing reserve quotes blocked")
+
 def test_nonflat():
     with tempfile.TemporaryDirectory() as t:
         root=Path(t)
@@ -64,6 +86,7 @@ def test_race_and_safety():
 
 if __name__=="__main__":
     test_freeze()
+    test_runtime_policy()
     test_nonflat()
     test_race_and_safety()
     print("PASS V2.1 guarded upgrade: 0600 sentinel, no stop if nonflat, pinned/flat/backup/restart safety")
