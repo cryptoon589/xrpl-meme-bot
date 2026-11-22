@@ -26,7 +26,7 @@
  *   - MAX_TRACKED_TOKENS: 1000 (memory bound)
  */
 
-import { XRPLClient } from '../xrpl/client';
+import { XRPLClient, isXrpDeliveredIssuedSendMax } from '../xrpl/client';
 import { classifyValidatedAmmFlow, ValidatedAmmFlow } from '../diagnostics/xrplAmmFlowEvidence';
 import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
@@ -206,8 +206,7 @@ export class BurstDetector {
    * metadata evidence; must never update BURST buys or invoke onBurst.
    */
   observeFilteredXrpPayment(tx: any): void {
-    if (!this.onValidatedAmmFlow || tx?.validated !== true ||
-        (tx.engine_result ?? tx.meta?.TransactionResult) !== 'tesSUCCESS')return;
+    if (!this.onValidatedAmmFlow || !isXrpDeliveredIssuedSendMax(tx))return;
     const t=tx.tx_json ?? tx.tx ?? tx.transaction;
     if(t?.TransactionType !== 'Payment' || !tx.meta)return;
     this.scanAmmFlows(tx,t,tx.meta,true);
