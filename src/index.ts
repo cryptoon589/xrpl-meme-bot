@@ -16,6 +16,7 @@ import { loadConfig } from './config';
 import { getLogger, info, warn, error, debug } from './utils/logger';
 import http from 'http';
 import { readPaperEntryFreeze } from './risk/paperEntryFreeze';
+import { PAPER_STREAM_SHADOW_REASON } from './risk/paperStreamShadowOnly';
 import { XRPLClient } from './xrpl/client';
 import { TokenDiscovery } from './scanner/tokenDiscovery';
 import { AMMScanner } from './scanner/ammEvents';
@@ -469,8 +470,37 @@ async function main() {
           blocklist: BURST_TRADE_BLOCKLIST,
         });
         if (decision.outcome === 'REJECTED') {
-          info(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
-          diagnostics.recordTdeReject(decision.rejectReason, 'stream');
+          if (decision.rejectReason === PAPER_STREAM_SHADOW_REASON) {
+            // Strategy V2: only normal-risk-APPROVED STREAM candidates reach
+            // this branch. Record raw exact issuer + quote + independent wallet
+            // breadth, without ever opening a PAPER position or touching cash.
+            try {
+              const recorded = db.recordPaperStreamShadowSignal({
+                currency: displayCurrency, issuer, rawCurrency: currency,
+                observedAt: Date.now(),
+                priceXRP: ammPrice.priceXRP,
+                priceObservedAt: ammPrice.observedAtMs ?? null,
+                poolXrpReserve: ammPrice.poolXRP,
+                uniqueBuyers: snap.uniqueBuyers,
+                buyCount5m: snap.buyCount, sellCount5m: snap.sellCount,
+                buySellRatio: snap.buySellRatio, buyVolumeXRP: snap.buyVolumeXRP,
+                newWalletBuys: snap.newWalletBuys,
+                signalType: streamHasWhale ? 'whale_stream' : 'stream',
+                assignedProfile: decision.profile.name,
+                approvedSizeXRP: decision.sizeXRP,
+                roundTripLossPct: decision.roundTripLossPct,
+              });
+              if (recorded) {
+                diagnostics.increment('streamShadowEligible');
+                info(`[StrategyV2] STREAM shadow signal: ${displayCurrency} buyers=${snap.uniqueBuyers} | no PAPER entry made`);
+              }
+            } catch (err) {
+              warn(`[StrategyV2] STREAM shadow evidence FAILED for ${displayCurrency}: ${err}`);
+            }
+          } else {
+            info(`[TDE] Stream rejected (${displayCurrency}): ${decision.rejectReason}`);
+            diagnostics.recordTdeReject(decision.rejectReason, 'stream');
+          }
           tradeLocks.delete(momentumKey);
           return;
         }
