@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 
 from audit_dynamic_paper_strategy import print_audit, outcome, describe_source
+from audit_dynamic_paper_performance import open_read_only
 
 CASH_BASE=105.499759
 NOW=1763740000000
@@ -119,5 +120,21 @@ def run():
             assert 'Cash movements DO NOT reconcile' in str(ex),str(ex)
         else:
             raise AssertionError('strategy audit must fail closed on economically inconsistent cash')
-        print('PASS full strategy audit fixture: entry/exit segmentation, source/profile mismatch, 2-buyer gate, issuer collision, MFE versus sellability caveat, no database writes and cash fail-closed')
+        # A running bot may commit trade/cash checkpoints during an audit.
+        # Reader must use one pinned WAL snapshot, never mix old/new rows.
+        with sqlite3.connect(curr) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+        with open_read_only(curr) as reader:
+            before=reader.execute(
+                'SELECT bankroll_xrp FROM paper_cash_state WHERE singleton_id=1'
+            ).fetchone()[0]
+            with sqlite3.connect(curr) as writer:
+                writer.execute('UPDATE paper_cash_state SET bankroll_xrp=bankroll_xrp+1')
+            during=reader.execute(
+                'SELECT bankroll_xrp FROM paper_cash_state WHERE singleton_id=1'
+            ).fetchone()[0]
+            assert during==before,'WAL read snapshot changed underneath a single audit'
+        with sqlite3.connect(curr) as writer:
+            writer.execute('UPDATE paper_cash_state SET bankroll_xrp=bankroll_xrp-1')
+        print('PASS full strategy audit fixture: entry/exit segmentation, source/profile mismatch, 2-buyer gate, issuer collision, MFE caveat, pinned WAL snapshot, no input writes and cash fail-closed')
 if __name__=='__main__':run()
