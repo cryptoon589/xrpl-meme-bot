@@ -114,6 +114,10 @@ assert.equal(legacyFlowCalls,beforeFiltered,
 const noSendMax=tx('Payment',-7000000);
 noSendMax.tx_json.Amount='7000000';
 assert.equal(isXrpDeliveredIssuedSendMax(noSendMax),false);
+det.observeFilteredXrpPayment(noSendMax);
+assert.equal(observations.length,2,'direct filtered shadow cannot accept ordinary XRP Payments');
+assert.equal(legacyFlowCalls,beforeFiltered,'direct filtered shadow cannot change burst');
+
 const unvalidatedFiltered={...filtered,validated:false};
 assert.equal(isXrpDeliveredIssuedSendMax(unvalidatedFiltered),false);
 det.observeFilteredXrpPayment(unvalidatedFiltered);
