@@ -74,7 +74,7 @@ async function main(){
     'shadow observation must not debit PAPER cash');
   assert.equal(db.getOpenTrades().length,0);
 
-  const observedAt=Date.now();
+  const observedAt=Math.floor(Date.now()/900000)*900000+60000;
   const evidence={
     currency:'TESTMEME',issuer,rawCurrency:raw,
     observedAt,priceXRP:1,priceObservedAt:observedAt-1000,
