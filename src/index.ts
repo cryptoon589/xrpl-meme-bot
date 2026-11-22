@@ -258,6 +258,11 @@ async function main() {
       });
       diagnostics.increment('validatedAmmFlowsObserved');
     };
+    // The relevant-token filter intentionally continues to exclude these
+    // XRP-delivered Payments from legacy buy pressure and trading decisions.
+    // Observe mapped AMM metadata only; never run the normal tx handler.
+    xrplClient.onXrpDeliveredIssuedSendMax = tx =>
+      burstDetector.observeFilteredXrpPayment(tx);
   }
 
   // Hook burst detector into paper trader — routes through TradeDecisionEngine
