@@ -5,6 +5,9 @@ import importlib.util
 import sqlite3
 import tempfile
 import os
+import json
+import io
+from unittest.mock import patch
 
 CUTOVER=Path(__file__).with_name('guarded_flat_paper_cutover.py')
 spec=importlib.util.spec_from_file_location('hunterix_flat_cutover',CUTOVER)
@@ -86,5 +89,40 @@ def run():
             mod.cmd=original_cmd
             mod.pm2_process=original_pm2
 
+def test_v2_health_gate():
+    """A positive /health alone must not bless a release without V2 shadow."""
+    status={
+        'status':'ok','positions':0,
+        'paperEntryFrozen':True,
+        'paperStreamShadowOnly':True,
+        'xrplConnected':True,
+        'xrplStreamConnected':True
+    }
+    class Response:
+        def __init__(self,body):self.body=body
+        def __enter__(self):return self
+        def __exit__(self,*exc):return False
+        def read(self,*args):return json.dumps(self.body).encode()
+    with patch.object(mod.urllib.request,'urlopen',side_effect=lambda *a,**k:Response(status)):
+        r=mod.verify_health(timeout_seconds=1)
+        assert r['paperStreamShadowOnly'] is True
+
+    # If the right source code deployed but a PM2 override disables the
+    # policy, deployment may not be declared SUCCESS.
+    wrong={**status,'paperStreamShadowOnly':False}
+    now=[0]
+    def monotonic():
+        now[0]+=1
+        return now[0]
+    with patch.object(mod.urllib.request,'urlopen',side_effect=lambda *a,**k:Response(wrong)):
+        with patch.object(mod.time,'monotonic',side_effect=monotonic):
+            with patch.object(mod.time,'sleep',side_effect=lambda *_:None):
+                try:mod.verify_health(timeout_seconds=1)
+                except RuntimeError as e:
+                    assert 'v2_stream_shadow=False' in str(e),str(e)
+                else:raise AssertionError('Deployment health must reject STREAM shadow disabled')
+    print('PASS guarded cutover: requires /health V2 STREAM shadow policy ON as well as flat frozen PAPER inventory')
+
 if __name__=='__main__':
     run()
+    test_v2_health_gate()
