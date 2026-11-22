@@ -46,6 +46,10 @@ module.exports={
       // Opt-in only after staged tests and provider access review.
       // This remains OFF in the running issuer-exact static PAPER deployment.
       BOT_PAPER_MEME_DISCOVERY:process.env.HUNTERIX_ENABLE_DYNAMIC_MEME_DISCOVERY==='1'?'1':'0',
+      // Strategy V2: STREAM/whale_stream candidates are observation-only.
+      // Old PM2 restarts can retain pre-release env; the code also defaults
+      // this guard ON for dynamic PAPER unless explicitly set to '0'.
+      BOT_PAPER_STREAM_SHADOW_ONLY:'1',
       HUNTERIX_MEME_ENTRY_ALLOWLIST_FILE:path.join(root,'state','paper_meme_entry_allowlist.json'),
       HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256:process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256,
       BOT_USE_RESERVE_QUOTES:'1',
