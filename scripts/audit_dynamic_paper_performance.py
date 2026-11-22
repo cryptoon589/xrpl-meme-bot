@@ -36,6 +36,11 @@ def open_read_only(path: Path) -> sqlite3.Connection:
     if not NEEDED_COLUMNS.issubset(columns):
         db.close()
         raise RuntimeError(f"Unexpected PAPER schema in {path}: missing {NEEDED_COLUMNS-columns}")
+    # Pin one coherent reader snapshot across all performance calculations.
+    # WAL readers do not interfere with the bot's continuing writes; an audit
+    # must not mistake trade/cash rows from different instants for a mismatch.
+    db.execute("BEGIN")
+    db.execute("SELECT 1 FROM paper_trades LIMIT 1").fetchone()
     return db
 
 def read_cash(db: sqlite3.Connection) -> float:
