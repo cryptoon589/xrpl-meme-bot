@@ -16,6 +16,8 @@ export type ValidatedAmmFlow = {
   issuer: string;
   side: 'xrp_inflow' | 'xrp_outflow';
   volumeXRP: number;
+  /** Optional validated ledger transaction hash for bounded duplicate suppression. */
+  txHash?: string;
 };
 
 export function classifyValidatedAmmFlow(
@@ -31,7 +33,7 @@ export function classifyValidatedAmmFlow(
   if (!code) return null;
   const nodes=meta.AffectedNodes;
   if (!Array.isArray(nodes) || nodes.length>200) return null;
-  let tokenChanged=false;
+  let ammTokenDelta: number | null = null;
   let deltaXRP=0;
   for(const item of nodes){
     const node=item?.ModifiedNode;
@@ -42,11 +44,16 @@ export function classifyValidatedAmmFlow(
       if(!ff?.Balance || !pf?.Balance || !ff.LowLimit || !ff.HighLimit)continue;
       const c=normalizeIssuedCurrency(ff.Balance.currency);
       if(c!==code)continue;
-      const ends=new Set([ff.LowLimit.issuer,ff.HighLimit.issuer]);
-      if(!ends.has(ammAccount) || !ends.has(issuer))continue;
+      // RippleState balance is from the LOW account's perspective.
+      // Derive what the AMM itself gained or lost, independent of
+      // whether the AMM is the low or the high trustline account.
+      const ammIsLow=ff.LowLimit.issuer===ammAccount && ff.HighLimit.issuer===issuer;
+      const ammIsHigh=ff.HighLimit.issuer===ammAccount && ff.LowLimit.issuer===issuer;
+      if(!ammIsLow && !ammIsHigh)continue;
       const now=Number(ff.Balance.value),old=Number(pf.Balance.value);
-      if(Number.isFinite(now)&&Number.isFinite(old)&&now!==old)
-        tokenChanged=true;
+      if(!Number.isFinite(now)||!Number.isFinite(old)||now===old)continue;
+      if(ammTokenDelta!==null)return null; // Ambiguous duplicate trustline deltas
+      ammTokenDelta=(now-old)*(ammIsLow?1:-1);
     }
     if(node.LedgerEntryType==='AccountRoot' &&
         node.FinalFields?.Account===ammAccount){
@@ -58,9 +65,17 @@ export function classifyValidatedAmmFlow(
       if(Number.isFinite(change))deltaXRP+=change;
     }
   }
-  if(!tokenChanged || !Number.isFinite(deltaXRP) ||
+  if(ammTokenDelta===null || !Number.isFinite(ammTokenDelta) ||
+      ammTokenDelta===0 || !Number.isFinite(deltaXRP) ||
       Math.abs(deltaXRP)<0.001)return null;
+  // An exchange-like swap must move XRP and the issued asset in OPPOSITE
+  // directions in the known AMM. Transfers or liquidity-like same-side
+  // movements cannot contribute to validated exchange-flow evidence.
+  if(Math.sign(ammTokenDelta)===Math.sign(deltaXRP))return null;
+  const hash=tx.hash ?? t.hash;
+  const txHash=typeof hash==='string' && /^[A-Fa-f0-9]{64}$/.test(hash)
+    ? hash.toUpperCase() : undefined;
   return {rawCurrency,issuer,
     side:deltaXRP>0?'xrp_inflow':'xrp_outflow',
-    volumeXRP:Math.abs(deltaXRP)};
+    volumeXRP:Math.abs(deltaXRP),...(txHash ? {txHash}: {})};
 }
