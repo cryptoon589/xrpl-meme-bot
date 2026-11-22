@@ -18,6 +18,7 @@ import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { findOpenTickerCollision } from '../risk/openTickerCollision';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
+import { paperStreamEntryReasonBlocked } from '../risk/paperStreamShadowOnly';
 import { PaperPositionRuntimeState } from './paperPositionRuntime';
 
 interface OpenPosition {
@@ -226,6 +227,10 @@ export class PaperTrader {
     tdeSizeXRP?: number
   ): PaperTrade | null {
     if (this.config.mode !== 'PAPER') return null;
+    if (paperStreamEntryReasonBlocked(this.config.mode, entryReason)) {
+      warn('[PAPER] Strategy V2 STREAM observation-only: direct trade opening blocked');
+      return null;
+    }
     if (readPaperEntryFreeze().frozen) { warn('[PAPER] Entry-only freeze active; burst buy blocked, existing exits unaffected'); return null; }
     if (this.missingRecoveryStateBlocksEntry()) return null;
     // Entry-only universe gate; never closes existing PAPER inventory.
@@ -415,6 +420,10 @@ export class PaperTrader {
     // Check mode
     if (this.config.mode !== 'PAPER') {
       debug('Paper trading disabled (mode is not PAPER)');
+      return null;
+    }
+    if (paperStreamEntryReasonBlocked(this.config.mode, entryReason)) {
+      warn('[PAPER] Strategy V2 STREAM observation-only: direct trade opening blocked');
       return null;
     }
     if (readPaperEntryFreeze().frozen) { warn('[PAPER] Entry-only freeze active; scored/stream buy blocked, existing exits unaffected'); return null; }
