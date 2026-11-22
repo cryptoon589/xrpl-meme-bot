@@ -17,7 +17,7 @@ const tx=(kind='Payment',delta=12000000,opts={})=>{
         FinalFields:{Account:amm,Balance:changed},
         PreviousFields:{Balance:'100000000'}}},
       {ModifiedNode:{LedgerEntryType:'RippleState',
-        FinalFields:{Balance:{currency,value:'120'},
+        FinalFields:{Balance:{currency,value:delta>0?'80':'120'},
           LowLimit:{issuer:amm},HighLimit:{issuer}},
         PreviousFields:{Balance:{currency,value:'100'}}}}
     ]},...opts
@@ -41,8 +41,26 @@ assert.equal(judge(tx(),amm,currency,'rOtherIssuer'),null,
 const noAmm=tx();noAmm.meta.AffectedNodes[0].ModifiedNode.FinalFields.Account='rOtherAMM';
 assert.equal(judge(noAmm),null,'unmapped AMM XRP balance cannot authorize');
 const noBalanceChange=tx();
-noBalanceChange.meta.AffectedNodes[1].ModifiedNode.PreviousFields.Balance.value='120';
+noBalanceChange.meta.AffectedNodes[1].ModifiedNode.PreviousFields.Balance.value='80';
 assert.equal(judge(noBalanceChange),null,'token balance must actually change');
+const sameSide=tx();
+sameSide.meta.AffectedNodes[1].ModifiedNode.FinalFields.Balance.value='120';
+assert.equal(judge(sameSide),null,'both AMM reserves increasing is not an exchange-like flow');
+const inverse=tx();
+const trust=inverse.meta.AffectedNodes[1].ModifiedNode;
+trust.FinalFields.LowLimit.issuer=issuer;
+trust.FinalFields.HighLimit.issuer=amm;
+trust.FinalFields.Balance.value='-80';
+trust.PreviousFields.Balance.value='-100';
+assert.equal(judge(inverse).side,'xrp_inflow',
+  'AMM high-side trustline must reverse token balance orientation');
+const inverseBad=tx();
+const trustBad=inverseBad.meta.AffectedNodes[1].ModifiedNode;
+trustBad.FinalFields.LowLimit.issuer=issuer;
+trustBad.FinalFields.HighLimit.issuer=amm;
+trustBad.FinalFields.Balance.value='-120';
+trustBad.PreviousFields.Balance.value='-100';
+assert.equal(judge(inverseBad),null,'same-direction reserves rejected even with AMM high-side trustline');
 // The legacy tracker counts a simple issued-token Payment as a buy AND a sell.
 // New classification must never turn that unrelated transfer into a real buy.
 const tracker=new BuyPressureTracker();
