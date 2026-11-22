@@ -80,6 +80,8 @@ jobs:
           python3 scripts/test_guarded_flat_cutover.py
           python3 scripts/test_guarded_v21_paper_upgrade.py
           python3 scripts/test_guarded_v212_evidence_upgrade.py
+          python3 scripts/test_guarded_v213_amm_shadow_upgrade.py
+          python3 -m py_compile scripts/guarded_v213_amm_shadow_upgrade.py
           python3 -m py_compile scripts/guarded_v212_evidence_upgrade.py
           python3 -m py_compile scripts/guarded_v21_paper_upgrade.py
           python3 scripts/test_legacy_paper_entry_gate.py
