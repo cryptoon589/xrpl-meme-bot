@@ -231,7 +231,7 @@ export class TradeDecisionEngine {
     // Always reject STREAM / whale_stream before any simulated buy.
     // BURST and scored paths are unchanged.
     if (paperStreamShadowOnly(this.config.mode, input.signalType)) {
-      return reject(sizeXRP, slippage, PAPER_STREAM_SHADOW_REASON);
+      return { ...reject(sizeXRP, slippage, PAPER_STREAM_SHADOW_REASON), roundTripLossPct };
     }
 
     // ── 9. Dry-run mode: all checks passed but no real tx ─────────────────
