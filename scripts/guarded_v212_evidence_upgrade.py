@@ -28,7 +28,7 @@ from guarded_flat_paper_cutover import (
 )
 from check_paper_restart_safety import check as restart_safety
 
-BASE = "e2277a8f510423741cb890be57a78cd19b8170d"
+BASE = "e2277a8f510423741cb890be57a78cd19b8170d2"
 ACTIVE_DEFAULT = Path("/root/hunterix-vnext-stage-20261116")
 REVIEW_DEFAULT = Path("/root/hunterix-buy-pressure-review-20261122")
 SENTINEL = "state/paper-entry-freeze.flag"
