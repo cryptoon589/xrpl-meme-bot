@@ -21,6 +21,26 @@ try {
     'SELECT COUNT(*) n FROM paper_opportunity_events WHERE event_type=?'
   ).get(kind).n;
   assert.equal(count('first_detected'),1,'token first sighting is idempotent');
+  // An externally tagged meme may have a historical provider dateon
+  // (seconds or milliseconds). HUNTERIX first-detection is the INSERT time,
+  // not the original token issuance date.
+  const pastDateon=1600000000;
+  const beforeInsert=Date.now();
+  db.saveToken({currency:'OLDMETA',issuer:'rSyntheticIssuerDateon',
+    rawCurrency:'4F4C444D45544100000000000000000000000000',
+    firstSeen:pastDateon,lastUpdated:beforeInsert});
+  const firstRow=db.db.prepare(
+    "SELECT observed_at FROM paper_opportunity_events WHERE event_type='first_detected' AND token_issuer=?"
+  ).get('rSyntheticIssuerDateon');
+  assert(firstRow && firstRow.observed_at>=beforeInsert &&
+    firstRow.observed_at<=Date.now(),
+    'first_detected must use the actual bot observation time');
+  const tokenRow=db.db.prepare(
+    "SELECT first_seen FROM tokens WHERE issuer=?"
+  ).get('rSyntheticIssuerDateon');
+  assert.equal(tokenRow.first_seen,pastDateon,
+    'existing provider token metadata must not be rewritten');
+
   const record=(eventType,issuerArg=issuer,when=first)=>db.recordOpportunityEvent({
     tokenCurrency:'PNX',tokenIssuer:issuerArg,rawCurrency:raw,
     observedAt:when,eventType,source:'burst',priceXRP:1,

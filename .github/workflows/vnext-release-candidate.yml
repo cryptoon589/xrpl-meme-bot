@@ -7,6 +7,7 @@ on:
       - fix/hunterix-vnext-meme-only-20261116
       - feature/hunterix-dynamic-meme-universe-20261121
       - feature/hunterix-strategy-v21-20261122
+      - fix/hunterix-v21-first-detected-time-20261122
   pull_request:
     branches:
       - feature/hunterix-dynamic-meme-universe-20261121

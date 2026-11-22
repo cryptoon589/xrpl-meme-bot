@@ -242,7 +242,10 @@ export class Database {
         );
         this.runWithRetry(insertStmt, [token.currency, token.issuer, token.firstSeen, now, token.rawCurrency ?? null]);
         this.recordOpportunityEvent({tokenCurrency:token.currency,tokenIssuer:token.issuer,
-          rawCurrency:token.rawCurrency,observedAt:token.firstSeen,
+          // This is the time HUNTERIX observed/internally inserted the issue,
+          // NOT an external provider's potentially historical dateon or XRPL
+          // issuance timestamp carried in token.firstSeen.
+          rawCurrency:token.rawCurrency,observedAt:now,
           eventType:'first_detected',source:'bot_tracking'});
       }
     } catch (err) {
