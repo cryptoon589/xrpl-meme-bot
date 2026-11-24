@@ -16,6 +16,9 @@ const NON_MEME = new Set([
   'FDUSD','PYUSD','GUSD','EUR','EURC','EURCV','EURS','EURT','GBP','JPY','CHF',
   'BTC','WBTC','XBTC','TBTC','BTCB','ETH','WETH','XETH','STETH','RETH',
   'SOL','WSOL','XSOL','BNB','WBNB','AVAX','WAVAX','ADA','TRX',
+  // External L1/stock-themed tickers explicitly excluded from meme-only PAPER.
+  // These are name exclusions, not claims about an underlying wrapped asset.
+  'HBAR','NVIDIA',
   'PAXG','XAUT','FXRP','WBTC','RLUSD','USDY','USDE','SUSDE'
 ]);
 const NON_MEME_KNOWN_ISSUES = new Set([
