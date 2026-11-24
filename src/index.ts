@@ -641,6 +641,13 @@ async function main() {
   // purchases: the TDE still verifies signal, pool reserves, slippage and risk.
   if (config.mode==='PAPER' && process.env.BOT_PAPER_MEME_DISCOVERY==='1') {
     const feed=new MemeCategoryFeed(issue=>{
+      // Exact-issuer fresh classification breadcrumb, not a trade permission
+      // change. Compare this to future allowlist/TTL rejections offline.
+      db.recordOpportunityEvent({
+        tokenCurrency:issue.display,tokenIssuer:issue.issuer,
+        rawCurrency:issue.currency,observedAt:Date.now(),
+        eventType:'meme_evidence_refreshed',source:issue.source
+      });
       tokenDiscovery.addTrackedToken({
         currency:issue.display,rawCurrency:issue.currency,
         issuer:issue.issuer,firstSeen:issue.dateon||Date.now(),
@@ -1180,6 +1187,20 @@ function startPeriodicScan(
               // and priceChange calculations use the correct AMM price from the start
               const snapshot = await marketData.collectMarketDataWithExtras(token, pool, vol, holders, ammPrice);
               if (!snapshot) return { token, snapshot: null };
+              // Scanner has already paid for this validated AMM reserve
+              // observation. Preserve it for 1/2/5 XRP research; never buy.
+              if(ammPrice?.source==='amm' && ammPrice.observedAtMs!=null){
+                db.recordPaperAmmReserveEvidence({
+                  tokenCurrency:token.currency,
+                  rawCurrency:token.rawCurrency||token.currency,
+                  tokenIssuer:token.issuer,
+                  observedAt:ammPrice.observedAtMs,
+                  poolXrpReserve:ammPrice.poolXRP,
+                  poolTokenReserve:ammPrice.poolTokens,
+                  tradingFeeUnits:ammPrice.tradingFee,
+                  source:'amm'
+                });
+              }
 
               // Fix 3: Inject new wallet data into snapshot for scorer
               (snapshot as any).poolTokens = ammPrice?.poolTokens;
