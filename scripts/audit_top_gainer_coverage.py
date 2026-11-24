@@ -149,6 +149,8 @@ def diagnose(db, latest, token, tables):
             # Historical decoder incorrectly stripped a final zero nibble
             # from letters such as P (0x50) / digit 0 (0x30).
             truncated=re.sub(r"00+$","",raw)
+            # Match the legacy Node Buffer.from(hex) odd-nibble behaviour.
+            if len(truncated)%2:truncated=truncated[:-1]
             try:
                 legacy_name=bytes.fromhex(truncated).decode("ascii","ignore")
                 if legacy_name:
