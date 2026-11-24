@@ -16,31 +16,15 @@ import TelegramBot from 'node-telegram-bot-api';
 import { AlertPayload } from '../types';
 import { BotConfig } from '../config';
 import { info, warn, debug } from '../utils/logger';
+import { decodeIssuedCurrencyName } from '../xrpl/currencyCode';
 
 // ── Currency decoding ─────────────────────────────────────────────────────────
 // XRPL hex currency codes are 40 hex chars (20 bytes), null-padded ASCII.
 // e.g. 46555A5A59000000... → FUZZY
 function decodeCurrency(raw: string): string {
   if (!raw) return 'UNKNOWN';
-  if (raw.length !== 40) return raw; // already a short ticker
-  try {
-    const stripped = raw.replace(/00+$/, '');
-    const decoded  = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
-    if (/^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0) return decoded;
-  } catch {}
-  return raw.slice(0, 8) + '…'; // fallback: truncated hex
-}
-
-// Prefer the ORIGINAL XRPL currency code for display and links. Historical
-// trade rows can contain short aliases (DRO, BCHA) or raw hex. Never change
-// the stored position identity, profit, entry, exit or wallet details here.
-function displayPaperTradeTicker(trade:{tokenCurrency:string;rawCurrency?:string|null}):string {
-  const raw=trade.rawCurrency;
-  if(typeof raw==='string' && /^[A-Fa-f0-9]{40}$/.test(raw)){
-    const decoded=decodeCurrency(raw);
-    if(decoded && decoded!==raw.slice(0,8)+'…')return decoded;
-  }
-  return decodeCurrency(trade.tokenCurrency);
+  const full=decodeIssuedCurrencyName(raw);
+  return full ?? (raw.length===40 ? raw.slice(0,8)+'…' : raw);
 }
 
 // Format XRP price — never show more precision than meaningful
