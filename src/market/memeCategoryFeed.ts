@@ -14,6 +14,8 @@ import {
 
 type FetchLike = typeof fetch;
 type CandidateCallback = (token:MemeIssue)=>void;
+export type ObservedMemeGainer = {currency:string;issuer:string;display:string;
+  observedAt:number;change24hPct:number;volume24hXRP:number;priceXRP?:number};
 const API='https://api.xrpl.to/v1';
 const USER_AGENT='HUNTERIX-Meme-PAPER-Classifier/0.1 (+https://github.com/cryptoon589/xrpl-meme-bot)';
 const FETCH_TIMEOUT_MS=8000;
@@ -25,6 +27,8 @@ const DEFAULT_429_BACKOFF_MS=30*60*1000;
 const MAX_BACKOFF_MS=48*60*60*1000;
 
 export class MemeCategoryFeed {
+  /** Observation only: a 24h gainer already moved; NOT a historical early-buy signal. */
+  public onGainerObserved?: (item:ObservedMemeGainer)=>void;
   private busy=false;
   private rotation=0;
   private nextAllowedFetch=0;
@@ -133,15 +137,20 @@ export class MemeCategoryFeed {
     this.busy=true;
     try {
       const slot=this.rotation++;
-      const page=slot%3===0
-        ? {sort:'vol24hxrp',offset:0}
-        : slot%3===1
-        ? {sort:'dateon',offset:0}
-        : {sort:'vol24hxrp',offset:50+(Math.floor(slot/3)%16)*50};
+      // Rotate one provider request per 15m across volume/new/revival and
+      // 24h gainers. This DOES NOT add requests to the shared anonymous budget.
+      const page=slot%4===0
+        ? {sort:'vol24hxrp',offset:0,movers:false}
+        : slot%4===1
+        ? {sort:'dateon',offset:0,movers:false}
+        : slot%4===2
+        ? {sort:'vol24hxrp',offset:50+(Math.floor(slot/4)%16)*50,movers:false}
+        : {sort:'pro24h',offset:0,movers:true};
       const u=new URL(API+'/tokens');
       for(const [key,value] of Object.entries({
         tag:'Memes',tags:'yes',sort:page.sort,order:'desc',
-        limit:'50',offset:String(page.offset),lightweight:'true',skip_metrics:'true'
+        limit:'50',offset:String(page.offset),lightweight:'true',skip_metrics:'true',
+        ...(page.movers ? {min_vol24hxrp:'50'} : {})
       }))u.searchParams.set(key,value);
       try {
         const body=await this.getJSON(u.toString());
@@ -149,6 +158,29 @@ export class MemeCategoryFeed {
            !Array.isArray(body.tokens) || body.tokens.length>50)
           throw Error('metadata category response invalid');
         const accepted=this.acceptPage(body.tokens);
+        if(page.movers && this.onGainerObserved){
+          const observedAt=this.now();
+          const eligible=new Map(dynamicMemeUniverse.eligibleIssues(observedAt).map(i=>[
+            canonicalIssue(i.currency,i.issuer),i
+          ]));
+          for(const entry of body.tokens as any[]){
+            const key=canonicalIssue(entry?.currency,entry?.issuer);
+            const matched=key ? eligible.get(key) : null;
+            // Provider rank alone does not prove memecoin eligibility;
+            // only pass entries explicitly accepted into fresh exact-issue
+            // meme classification from the same category response.
+            if(!matched)continue;
+            const change24hPct=Number(entry?.pro24h);
+            const volume24hXRP=Number(entry?.vol24hxrp);
+            const px=Number(entry?.exch);
+            if(!Number.isFinite(change24hPct) || change24hPct<=0 ||
+               !Number.isFinite(volume24hXRP) || volume24hXRP<50)continue;
+            try {this.onGainerObserved({currency:matched.currency,issuer:matched.issuer,
+              display:matched.display,observedAt,change24hPct,volume24hXRP,
+              ...(Number.isFinite(px) && px>0 ? {priceXRP:px}:{})});}
+            catch(e){warn('[MemeDiscovery] gainer observation callback failed: '+String(e).slice(0,100));}
+          }
+        }
         this.lastRefreshAt=this.now();
         const st=dynamicMemeUniverse.stats(this.now());
         info('[MemeDiscovery] category page accepted '+accepted+
