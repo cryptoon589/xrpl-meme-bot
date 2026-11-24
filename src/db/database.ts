@@ -237,7 +237,7 @@ export class Database {
       'first_detected','burst_seen','burst_qualified','stream_quoted',
       'stream_qualified','momentum_seen','paper_entry','paper_exit',
       'amm_xrp_inflow','amm_xrp_outflow','amm_pressure_compare',
-      'external_gainer_seen'
+      'external_gainer_seen','meme_evidence_refreshed'
     ]);
     const raw = event.rawCurrency || event.tokenCurrency;
     const px = event.priceXRP ?? null;
