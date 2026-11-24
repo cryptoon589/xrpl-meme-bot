@@ -130,10 +130,12 @@ function featureDecision(s) {
     s.buy_count_5m,s.unique_buyers_5m,
     s.buy_volume_5m,s.sell_volume_5m
   ];
-  if(values.some(v=>typeof v!=='number'||!Number.isFinite(v)||v<0))
+  if(values.some(v=>typeof v!=='number'||!Number.isFinite(v)) ||
+     s.buy_count_5m<0 || s.unique_buyers_5m<0 ||
+     s.buy_volume_5m<0 || s.sell_volume_5m<0)
     return {ok:false,reason:'missing_pre_entry_features'};
   if(s.price_change_5m<1 || s.price_change_5m>20 ||
-     s.price_change_15m>60)
+     s.price_change_15m<0 || s.price_change_15m>60)
     return {ok:false,reason:'weak_or_late_5m_momentum'};
   if(s.buy_count_5m<3||s.unique_buyers_5m<3||
      s.buy_volume_5m<5||s.buy_volume_5m<1.5*Math.max(1,s.sell_volume_5m))
@@ -185,7 +187,6 @@ function makeCandidates(db,options,now=Date.now()){
     if(prior.has(key)&&sample.observed_at-prior.get(key)<COOLDOWN_MS){
       bump('cooldown_duplicate');continue;
     }
-    prior.set(key,sample.observed_at);
     const quote=options.cohort==='scans'
       ?reserveExactly.get(raw,issuer,sample.observed_at)
       :reserveBefore.get(raw,issuer,sample.observed_at,
@@ -215,6 +216,7 @@ function makeCandidates(db,options,now=Date.now()){
     if(!gate.ok){bump(gate.reason);continue;}
     const confirm=featureDecision(snap);
     if(!confirm.ok)bump('B_'+confirm.reason);
+    prior.set(key,sample.observed_at);
     const result={
       raw,issuer,label:printable(raw,sample.token_currency),
       source:sample.event_type || 'scanner_price_sample',
@@ -286,7 +288,6 @@ function cli(opts,now=Date.now()){
   const db=new Database(opts.path,{readonly:true,fileMustExist:true,timeout:15000});
   try{
     db.pragma('query_only = ON');
-    const out=db.transaction(()=>audit(db,opts,now)).immediate; // not called: read-only transactions below
     const result=audit(db,opts,now);
     console.log('=== HUNTERIX A/B/C SHADOW EDGE STUDY (READ ONLY) ===');
     console.log('Cohort:',opts.cohort,'hours:',opts.hours,'limit:',opts.limit);
