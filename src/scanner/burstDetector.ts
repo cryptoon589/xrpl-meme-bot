@@ -28,7 +28,7 @@
 
 import { XRPLClient, isXrpDeliveredIssuedSendMax } from '../xrpl/client';
 import { classifyValidatedAmmFlow, ValidatedAmmFlow } from '../diagnostics/xrplAmmFlowEvidence';
-import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
+import { normalizeIssuedCurrency, decodeIssuedCurrencyName } from '../xrpl/currencyCode';
 import { parseXrpIssuedAmm } from '../market/parseIssuedAmm';
 import { TelegramAlerter } from '../telegram/alerts';
 import { Database } from '../db/database';
@@ -612,13 +612,8 @@ export class BurstDetector {
   }
 
   private decodeCurrency(currency: string): string {
-    if (currency.length !== 40) return currency;
-    try {
-      const stripped = currency.replace(/00+$/, '');
-      const decoded  = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-      if (/^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0) return decoded;
-    } catch {}
-    return currency.slice(0, 8) + '…';
+    if (currency.length!==40)return currency;
+    return decodeIssuedCurrencyName(currency) ?? currency.slice(0,8)+'…';
   }
 
   private evictOldest(): void {
