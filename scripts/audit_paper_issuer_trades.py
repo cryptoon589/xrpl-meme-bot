@@ -111,7 +111,7 @@ def report(path,from_id=73):
         by=defaultdict(list)
         for t in trial:
             if t["status"]=="closed" and t["pnl_xrp"] is not None:
-                by[t["entry_reason"][:20] if False else t["trade_source"] or "unknown"].append(t)
+                by[t["trade_source"] or "unknown"].append(t)
         for src,arr in sorted(by.items()):
             print(src, "closed",len(arr),"net_xrp",round(sum(t["pnl_xrp"] for t in arr),4))
         print("\n=== POST-DEPLOYMENT OBSERVATION EVENTS ===")
