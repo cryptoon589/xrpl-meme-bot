@@ -40,6 +40,8 @@ export class MemeCategoryFeed {
   private pendingLookups=new Map<string,Promise<boolean>>();
   private lastRefreshAt=0;
   private interval:NodeJS.Timeout|null=null;
+  private gainerWarmup:NodeJS.Timeout|null=null;
+  private gainerInterval:NodeJS.Timeout|null=null;
 
   constructor(
     private readonly onCandidate:CandidateCallback,
@@ -136,58 +138,25 @@ export class MemeCategoryFeed {
     if(this.busy || !this.available())return;
     this.busy=true;
     try {
+      // Preserve the existing 3-page discovery cadence. The gainer watcher
+      // is separate and rate-limited through the SAME getJSON budget.
       const slot=this.rotation++;
-      // Rotate one provider request per 15m across volume/new/revival and
-      // 24h gainers. This DOES NOT add requests to the shared anonymous budget.
-      const page=slot%4===0
-        ? {sort:'vol24hxrp',offset:0,movers:false}
-        : slot%4===1
-        ? {sort:'dateon',offset:0,movers:false}
-        : slot%4===2
-        ? {sort:'vol24hxrp',offset:50+(Math.floor(slot/4)%16)*50,movers:false}
-        : {sort:'pro24h',offset:0,movers:true};
+      const page=slot%3===0
+        ? {sort:'vol24hxrp',offset:0}
+        : slot%3===1
+        ? {sort:'dateon',offset:0}
+        : {sort:'vol24hxrp',offset:50+(Math.floor(slot/3)%16)*50};
       const u=new URL(API+'/tokens');
       for(const [key,value] of Object.entries({
         tag:'Memes',tags:'yes',sort:page.sort,order:'desc',
-        limit:'50',offset:String(page.offset),lightweight:'true',skip_metrics:'true',
-        ...(page.movers ? {min_vol24hxrp:'50'} : {})
+        limit:'50',offset:String(page.offset),lightweight:'true',skip_metrics:'true'
       }))u.searchParams.set(key,value);
       try {
         const body=await this.getJSON(u.toString());
         if(body?.success!==true || body.tagName?.toLowerCase()!=='memes' ||
            !Array.isArray(body.tokens) || body.tokens.length>50)
           throw Error('metadata category response invalid');
-        // Gainer pages must NOT expand the live eligible discovery universe,
-        // populate the token scanner, or influence PAPER entry decisions.
-        // Validate prospective candidate category in a disposable evidence
-        // index and discard it immediately after recording the comparison.
-        const observedAt=this.now();
-        const gainerIndex=page.movers ? new DynamicMemeUniverse() : null;
-        const accepted=gainerIndex
-          ? gainerIndex.acceptTaggedPage(body.tokens,observedAt).accepted
-          : this.acceptPage(body.tokens);
-        if(page.movers && this.onGainerObserved && gainerIndex){
-          const eligible=new Map(gainerIndex.eligibleIssues(observedAt).map(i=>[
-            canonicalIssue(i.currency,i.issuer),i
-          ]));
-          for(const entry of body.tokens as any[]){
-            const key=canonicalIssue(entry?.currency,entry?.issuer);
-            const matched=key ? eligible.get(key) : null;
-            // Provider rank alone does not prove memecoin eligibility;
-            // only pass entries explicitly accepted into fresh exact-issue
-            // meme classification from the same category response.
-            if(!matched)continue;
-            const change24hPct=Number(entry?.pro24h);
-            const volume24hXRP=Number(entry?.vol24hxrp);
-            const px=Number(entry?.exch);
-            if(!Number.isFinite(change24hPct) || change24hPct<=0 ||
-               !Number.isFinite(volume24hXRP) || volume24hXRP<50)continue;
-            try {this.onGainerObserved({currency:matched.currency,issuer:matched.issuer,
-              display:matched.display,observedAt,change24hPct,volume24hXRP,
-              ...(Number.isFinite(px) && px>0 ? {priceXRP:px}:{})});}
-            catch(e){warn('[MemeDiscovery] gainer observation callback failed: '+String(e).slice(0,100));}
-          }
-        }
+        const accepted=this.acceptPage(body.tokens);
         this.lastRefreshAt=this.now();
         const st=dynamicMemeUniverse.stats(this.now());
         info('[MemeDiscovery] category page accepted '+accepted+
@@ -199,6 +168,53 @@ export class MemeCategoryFeed {
     } finally {
       this.busy=false;
     }
+  }
+
+  /** Once/hour comparison ONLY, using one extra documented list request.
+   * Shared 3/15m and 333/day anonymous budget still enforces fail-closed
+   * backoff; never alters the scanner/eligible issue universe or trades.
+   * A 24h ranked winner is not assumed to have been tradable at signal time.
+   */
+  async refreshGainers():Promise<void> {
+    if(this.busy || !this.available())return;
+    this.busy=true;
+    try {
+      const u=new URL(API+'/tokens');
+      for(const [key,value] of Object.entries({
+        tag:'Memes',tags:'yes',sort:'pro24h',order:'desc',limit:'50',
+        offset:'0',lightweight:'true',skip_metrics:'true',min_vol24hxrp:'50'
+      }))u.searchParams.set(key,value);
+      const body=await this.getJSON(u.toString());
+      if(body?.success!==true || body.tagName?.toLowerCase()!=='memes' ||
+         !Array.isArray(body.tokens) || body.tokens.length>50)
+        throw Error('gainer category response invalid');
+      // Distinct temporary evidence index. NEVER call this.acceptPage().
+      const observedAt=this.now();
+      const eligible=new DynamicMemeUniverse();
+      eligible.acceptTaggedPage(body.tokens,observedAt);
+      const allowed=new Map(eligible.eligibleIssues(observedAt).map(i=>[
+        canonicalIssue(i.currency,i.issuer),i
+      ]));
+      for(const entry of body.tokens as any[]){
+        const key=canonicalIssue(entry?.currency,entry?.issuer);
+        const match=key ? allowed.get(key) : null;
+        if(!match)continue;
+        const change24hPct=Number(entry?.pro24h);
+        const volume24hXRP=Number(entry?.vol24hxrp);
+        const px=Number(entry?.exch);
+        if(!Number.isFinite(change24hPct) || change24hPct<=0 ||
+           !Number.isFinite(volume24hXRP) || volume24hXRP<50)continue;
+        try {this.onGainerObserved?.({
+          currency:match.currency,issuer:match.issuer,
+          display:match.display,observedAt,change24hPct,volume24hXRP,
+          ...(Number.isFinite(px) && px>0?{priceXRP:px}:{})
+        });}catch(e){warn('[MemeDiscovery] gainer callback failed: '+String(e).slice(0,100));}
+      }
+      info('[MemeDiscovery] external 24h gainers observed (Data by xrpl.to https://xrpl.to)');
+    }catch(e){
+      warn('[MemeDiscovery] external gainer check deferred: '+
+        String((e as Error).message).slice(0,100));
+    }finally{this.busy=false;}
   }
 
   /** Bounded on-demand lookup for newly seen / dormant meme signals.
@@ -241,11 +257,24 @@ export class MemeCategoryFeed {
       void this.refresh().catch(e=>warn('[MemeDiscovery] refresh failed: '+String(e).slice(0,90)));
     },REFRESH_MS);
     this.interval.unref();
+    // Two-minute offset preserves regular discovery checks; one additional
+    // request per hour is inside the SAME finite source budget.
+    this.gainerWarmup=setTimeout(()=>{
+      this.gainerWarmup=null;
+      void this.refreshGainers();
+      this.gainerInterval=setInterval(()=>void this.refreshGainers(),60*60*1000);
+      this.gainerInterval.unref();
+    },2*60*1000);
+    this.gainerWarmup.unref();
   }
 
   stop():void {
     if(this.interval)clearInterval(this.interval);
+    if(this.gainerInterval)clearInterval(this.gainerInterval);
+    if(this.gainerWarmup)clearTimeout(this.gainerWarmup);
     this.interval=null;
+    this.gainerInterval=null;
+    this.gainerWarmup=null;
   }
 
   stats():{eligible:number;successfulPages:number;lastSuccessAgeMs:number|null;lastRefreshAgeMs:number|null;cooldownRemainingMs:number;budgetUsed:number;budgetAvailable:boolean} {
