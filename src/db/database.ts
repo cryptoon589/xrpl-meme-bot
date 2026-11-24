@@ -182,6 +182,51 @@ export class Database {
    * are best-effort and cannot break an inventory/cash transaction or an exit.
    * The original, potentially 18 GiB, database is never written by this path.
    */
+  /**
+   * Preserve fresh, complete XRP/token AMM reserves already fetched for the
+   * existing scanner. No new XRPL RPC, no trade, no cash or inventory change.
+   * This data supports later *indicative* micro-size counterfactuals, never
+   * execution claims. Fail closed and quietly if the optional evidence path
+   * is unavailable.
+   */
+  recordPaperAmmReserveEvidence(data: {
+    tokenCurrency:string;rawCurrency:string;tokenIssuer:string;
+    observedAt:number;poolXrpReserve:number;poolTokenReserve:number;
+    tradingFeeUnits:number;source:'amm';
+  }): boolean {
+    if(!this.isCompactRecoveryDb ||
+       process.env.MODE!=='PAPER' ||
+       process.env.LIVE_TRADING!=='false')return false;
+    const raw=normalizeIssuedCurrency(data.rawCurrency);
+    const now=Date.now();
+    if(!raw || !data.tokenCurrency || !data.tokenIssuer ||
+       data.source!=='amm' ||
+       !Number.isSafeInteger(data.observedAt) ||
+       data.observedAt>now+1000 || now-data.observedAt>90000 ||
+       !Number.isFinite(data.poolXrpReserve) ||
+       !Number.isFinite(data.poolTokenReserve) ||
+       !(data.poolXrpReserve>0) || !(data.poolTokenReserve>0) ||
+       !Number.isInteger(data.tradingFeeUnits) ||
+       data.tradingFeeUnits<0 || data.tradingFeeUnits>1000)
+       return false;
+    try {
+      const result=this.runWithRetry(this.db.prepare(`
+        INSERT OR IGNORE INTO paper_amm_reserve_evidence
+        (token_currency,raw_currency,token_issuer,observed_at,bucket_5m,
+         pool_xrp_reserve,pool_token_reserve,trading_fee_units,source)
+        VALUES(?,?,?,?,?,?,?,?,?)
+      `),[
+        data.tokenCurrency,raw,data.tokenIssuer,data.observedAt,
+        Math.floor(data.observedAt/300000),data.poolXrpReserve,
+        data.poolTokenReserve,data.tradingFeeUnits,data.source
+      ]);
+      return result.changes===1;
+    }catch(err){
+      warn('[MicroShadow] AMM reserve observation unavailable: '+String(err).slice(0,90));
+      return false;
+    }
+  }
+
   recordOpportunityEvent(event: {
     tokenCurrency: string; tokenIssuer: string; rawCurrency?: string;
     observedAt: number; eventType: string; source?: string;
@@ -192,7 +237,7 @@ export class Database {
       'first_detected','burst_seen','burst_qualified','stream_quoted',
       'stream_qualified','momentum_seen','paper_entry','paper_exit',
       'amm_xrp_inflow','amm_xrp_outflow','amm_pressure_compare',
-      'external_gainer_seen'
+      'external_gainer_seen','meme_evidence_refreshed'
     ]);
     const raw = event.rawCurrency || event.tokenCurrency;
     const px = event.priceXRP ?? null;
@@ -1556,6 +1601,15 @@ export class Database {
           `).run(cutoff);
           removed[table] = result.changes;
         }
+        const oldReserves=this.db.prepare(`
+          DELETE FROM paper_amm_reserve_evidence
+          WHERE id IN (
+            SELECT id FROM paper_amm_reserve_evidence
+            WHERE observed_at < ? ORDER BY observed_at LIMIT 5000
+          )
+        `).run(cutoff);
+        removed.paper_amm_reserve_evidence=oldReserves.changes;
+
       })();
       if (Object.values(removed).some(n => n > 0)) {
         info(`Recovery observation retention (7d): ${JSON.stringify(removed)}`);
