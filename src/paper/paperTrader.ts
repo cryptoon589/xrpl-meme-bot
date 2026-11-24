@@ -16,6 +16,7 @@ import { estimateAmmSell } from './ammExecutionQuote';
 import { quotePaperBuy, quotePaperSell } from './reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
 import { findOpenTickerCollision } from '../risk/openTickerCollision';
+import { decodeIssuedCurrencyName } from '../xrpl/currencyCode';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
 import { paperStreamEntryReasonBlocked } from '../risk/paperStreamShadowOnly';
@@ -401,7 +402,7 @@ export class PaperTrader {
     // Register with price fetcher so null-cache is bypassed for exit checks
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
     const displayName = token.currency.length === 40
-      ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
+      ? decodeIssuedCurrencyName(token.currency) || token.currency
       : token.currency;
     info(`🚀 BURST paper trade OPENED: ${displayName} (profile: ${(this.openPositions.get(key) as any)?.profileName ?? '?'}) @ ${entryPrice.toFixed(8)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, pool: ${poolXrpReserve.toFixed(0)} XRP`);
     return trade;
@@ -633,7 +634,7 @@ export class PaperTrader {
     this.ammPriceFetcher?.registerOpenPosition(token.currency, token.issuer);
 
     const displayName2 = token.currency.length === 40
-      ? Buffer.from(token.currency.replace(/00+$/, ''), 'hex').toString('ascii').replace(/\x00/g, '').trim() || token.currency
+      ? decodeIssuedCurrencyName(token.currency) || token.currency
       : token.currency;
     info(`📈 Paper trade OPENED: ${displayName2} (profile: ${(this.openPositions.get(key) as any)?.profileName ?? '?'}) @ ${entryPrice.toFixed(6)} XRP, size: ${tradeSizeXRP.toFixed(2)} XRP, score: ${score}`);
 
