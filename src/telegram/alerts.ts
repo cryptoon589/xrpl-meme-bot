@@ -27,6 +27,17 @@ function decodeCurrency(raw: string): string {
   return full ?? (raw.length===40 ? raw.slice(0,8)+'…' : raw);
 }
 
+/** Resolve a trade's printed name from authoritative on-ledger raw code.
+ * Previously truncated aliases (DRO/BCHAM) remain unchanged in SQLite.
+ */
+function displayPaperTradeTicker(trade:{tokenCurrency:string;rawCurrency?:string|null}):string {
+  if(trade.rawCurrency && /^[A-Fa-f0-9]{40}$/.test(trade.rawCurrency)) {
+    return decodeIssuedCurrencyName(trade.rawCurrency) ||
+      decodeCurrency(trade.tokenCurrency);
+  }
+  return decodeCurrency(trade.tokenCurrency);
+}
+
 // Format XRP price — never show more precision than meaningful
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
