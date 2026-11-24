@@ -13,6 +13,7 @@ on:
       - fix/hunterix-new-wallet-breadth-20261122
       - feature/hunterix-amm-pressure-shadow-20261122
       - audit/hunterix-issuer-eligibility-and-movers-20261124
+      - audit/hunterix-top-gainers-ranking-20261124
   pull_request:
     branches:
       - feature/hunterix-dynamic-meme-universe-20261121
