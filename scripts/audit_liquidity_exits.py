@@ -71,18 +71,19 @@ def report(file:Path,after_id=72,limit=30):
             qs=",".join("?" for _ in a)
             # Measurements are close to trade timestamps, not guaranteed
             # trade-time reserves. Never compare across different issuers.
-            def observed(start,end,descending=False):
-                order="DESC" if descending else "ASC"
+            def observed(start,end,target):
                 return db.execute(f"""
                     SELECT timestamp,price_xrp,liquidity_xrp
                     FROM market_snapshots
                     WHERE token_issuer=? AND token_currency IN ({qs})
                       AND timestamp BETWEEN ? AND ?
-                    ORDER BY timestamp {order} LIMIT 1
-                """,(t["token_issuer"],*a,start,end)).fetchone()
-            pre=observed(t["entry_timestamp"]-5*60000,t["entry_timestamp"],True)
+                    ORDER BY ABS(timestamp-?) ASC, timestamp DESC LIMIT 1
+                """,(t["token_issuer"],*a,start,end,target)).fetchone()
+            pre=observed(t["entry_timestamp"]-5*60000,
+                         t["entry_timestamp"],t["entry_timestamp"])
             post=observed(t["exit_timestamp"]-5*60000,
-                          t["exit_timestamp"]+5*60000,False) if t["exit_timestamp"] else None
+                          t["exit_timestamp"]+5*60000,
+                          t["exit_timestamp"]) if t["exit_timestamp"] else None
             for name,p in [("entry-near",pre),("exit-near",post)]:
                 print("  "+name+":",
                       (stamp(p["timestamp"])+" price="+str(p["price_xrp"])+
