@@ -36,10 +36,15 @@ async function main(){
     await feed.refresh();
     clock+=15*60*1000+1000;
   }
-  assert.equal(calls.length,4,'must use one category request each 15min');
+  assert.equal(calls.length,4,'must preserve original one discovery category call per 15min');
   assert.deepEqual(calls.map(x=>x.searchParams.get('sort')),
-    ['vol24hxrp','dateon','vol24hxrp','pro24h']);
-  assert.equal(calls[3].searchParams.get('min_vol24hxrp'),'50');
+    ['vol24hxrp','dateon','vol24hxrp','vol24hxrp'],
+    'gainer evidence cannot displace a token-discovery scan');
+  clock+=61000;
+  await feed.refreshGainers();
+  assert.equal(calls.length,5,'one bounded additional hourly gainer comparison request');
+  assert.equal(calls[4].searchParams.get('sort'),'pro24h');
+  assert.equal(calls[4].searchParams.get('min_vol24hxrp'),'50');
   assert.equal(observed.length,2,'tagged genuine gainers only; conflicting RWA rejected');
   const gainerOnly=Buffer.from('ONLYGAINER').toString('hex').toUpperCase().padEnd(40,'0');
   assert(observed.some(i=>i.currency===gainerOnly));
@@ -50,8 +55,8 @@ async function main(){
   assert.equal(observed[0].change24hPct,85);
   assert.equal(observed[0].volume24hXRP,360);
   assert.equal(observed[0].priceXRP,0.00001);
-  assert(feed.stats().budgetUsed<=1,
-    'the rotating gainer page must not exceed the provider request window');
+  assert(feed.stats().budgetUsed<=3,
+    'extra gainer page still shares the strict 3 requests per 15min budget');
   console.log('PASS hourly prospective gainer observation, same budget, issuer exact, conflicting RWA tag rejected; no trades or network');
 }
 main().catch(e=>{console.error(e);process.exitCode=1});
