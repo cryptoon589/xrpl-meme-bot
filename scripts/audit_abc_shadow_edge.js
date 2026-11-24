@@ -333,4 +333,4 @@ if(require.main===module){
   try{cli(readOptions(process.argv.slice(2)));}
   catch(e){console.error('ABC RESEARCH BLOCKED:',e.message);process.exitCode=2;}
 }
-module.exports={readOptions,featureDecision,adaptiveSize,entryGate,scenario,makeCandidates,outcomeForCandidate,audit,cli};
+module.exports={readOptions,featureDecision,adaptiveSize,entryGate,scenario,safeAliases,selectFeature,makeCandidates,outcomeForCandidate,audit,cli};
