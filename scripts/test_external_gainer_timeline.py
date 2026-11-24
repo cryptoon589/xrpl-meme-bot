@@ -23,14 +23,22 @@ def main():
        ("PHNIX",B,RAW,T,"external_gainer_seen","24h change=45.00% vol24h=100 XRP",0.00002),
        ("NEW",A,"4E45570000000000000000000000000000000000",T,
           "external_gainer_seen","24h change=72.00% vol24h=60 XRP",0.5),
+       ("OLDPUMP",A,"4F4C4450554D50000000000000000000000000",T-60000,
+          "external_gainer_seen","24h change=950.00% vol24h=60 XRP",0.5),
+       ("LOW",A,"4C4F5700000000000000000000000000000000",T,
+          "external_gainer_seen","24h change=1.00% vol24h=60 XRP",0.5),
       ])
     before=p.read_bytes()
     out=io.StringIO()
-    with redirect_stdout(out):report(p,30)
+    with redirect_stdout(out):report(p,2)
     text=out.getvalue()
-    assert "TRADED_BEFORE_RANK" in text,text
+    assert "Displayed top by observed 24h % gain: 2" in text,text
+    assert "Exact-issue observations in latest snapshot: 4" in text,text
+    assert "Rankable distinct issues: 4" in text,text
+    assert "24h=+72.00%" in text and "24h=+45.00%" in text,text
+    assert "24h=+42.00%" not in text and "24h=+1.00%" not in text,text
+    assert "24h=+950.00%" not in text,'older snapshot cannot contaminate latest top gainers'
     assert text.count("NO_PRIOR_SIGNAL_RECORDED")==3,text
-    assert "Ranked gainer observations: 3" in text,text
     assert p.read_bytes()==before,"Read-only audit mutated SQLite"
     print("PASS prospective exact-issuer gainer ranks vs historical bot signals (no lookahead, no write)")
 if __name__=="__main__":main()
