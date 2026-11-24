@@ -99,6 +99,8 @@ jobs:
           python3 scripts/test_guarded_v212_evidence_upgrade.py
           python3 scripts/test_guarded_v213_amm_shadow_upgrade.py
           python3 scripts/test_guarded_v214_issuer_movers_upgrade.py
+          python3 scripts/test_guarded_v215_micro_observation_upgrade.py
+          python3 -m py_compile scripts/guarded_v215_micro_observation_upgrade.py
           python3 -m py_compile scripts/guarded_v214_issuer_movers_upgrade.py
           python3 -m py_compile scripts/guarded_v213_amm_shadow_upgrade.py
           python3 -m py_compile scripts/guarded_v212_evidence_upgrade.py
