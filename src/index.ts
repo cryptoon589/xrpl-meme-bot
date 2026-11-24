@@ -1645,7 +1645,7 @@ function startPeriodicScan(
     } else {
       lines.push('');
       for (const pos of openPositions) {
-        const ticker    = decodeCurrencyLocal(pos.tokenCurrency);
+        const ticker    = decodeCurrencyLocal(pos.rawCurrency || pos.tokenCurrency);
         const ageMs     = now - (pos.entryTimestamp || now);
         const ageStr    = ageMs >= 3600000
           ? `${Math.floor(ageMs / 3600000)}h ${Math.round((ageMs % 3600000) / 60000)}m`
