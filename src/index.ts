@@ -652,6 +652,20 @@ async function main() {
         lastUpdated:Date.now()
       });
     });
+    // Third-party movers are prospective OBSERVATIONS, never entry proof.
+    // Use the SAME one-request-per-15m metadata poller: no extra RPC/API load.
+    feed.onGainerObserved = item => {
+      db.recordOpportunityEvent({
+        tokenCurrency:item.display,tokenIssuer:item.issuer,
+        rawCurrency:item.currency,observedAt:item.observedAt,
+        eventType:'external_gainer_seen',
+        source:'xrpl.to:Memes:pro24h',
+        ...(item.priceXRP ? {priceXRP:item.priceXRP} : {}),
+        detail:'24h change='+item.change24hPct.toFixed(2)+'%'+
+          ' vol24h='+item.volume24hXRP.toFixed(2)+' XRP; retrospective rank, NOT buy signal',
+      });
+      diagnostics.increment('externalMemeGainersObserved');
+    };
     setActiveMemeCategoryFeed(feed);
     feed.start(); // fetches are not on the XRPL node
     info('[MemeDiscovery] dynamic issuer-exact category feed enabled (Data by xrpl.to https://xrpl.to)');
