@@ -277,7 +277,7 @@ export class PaperTrader {
       debug(`Already have open position for ${key}`);
       return null;
     }
-    if (this.db.hasOpenTradeForToken(token.currency, token.issuer)) {
+    if (this.db.hasOpenTradeForToken(token.currency, token.issuer, token.rawCurrency)) {
       warn(`Blocked duplicate burst trade for ${key}`);
       return null;
     }
@@ -475,7 +475,7 @@ export class PaperTrader {
       debug(`Already have open position for ${key} (in-memory)`);
       return null;
     }
-    if (this.db.hasOpenTradeForToken(token.currency, token.issuer)) {
+    if (this.db.hasOpenTradeForToken(token.currency, token.issuer, token.rawCurrency)) {
       warn(`Blocked duplicate trade for ${key} — already open in DB`);
       // Sync in-memory state from DB to avoid future misses
       this.loadOpenPositionFromDB(token.currency, token.issuer);
