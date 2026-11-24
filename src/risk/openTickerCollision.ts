@@ -47,10 +47,14 @@ export function findOpenTickerCollision(
   const ticker=displayTicker(candidateCode);
   if(!ticker)return null;
   for(const position of positions){
-    if(position.tokenIssuer===candidate.issuer)continue;
     if(position.remainingPosition!=null && position.remainingPosition<=0)continue;
     const existing=normalizeIssuedCurrency(position.rawCurrency||position.tokenCurrency);
     if(!existing)continue;
+    // Also block SAME ledger issue with alternate labels (e.g. PHNIX vs
+    // 50484E4958...) where legacy display+issuer keys can differ.
+    if(position.tokenIssuer===candidate.issuer && existing===candidateCode)
+      return position;
+    // Different-issuer impersonation or same-issuer same-name aliases.
     if(displayTicker(existing)===ticker)return position;
   }
   return null;
