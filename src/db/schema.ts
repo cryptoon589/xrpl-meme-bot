@@ -242,6 +242,24 @@ export const SCHEMA = {
     )
   `,
 
+  // Observation-only source AMM reserve samples for future micro-size
+  // counterfactuals. No token inventory, trade, cash or fills are created.
+  paperAmmReserveEvidence: `
+    CREATE TABLE IF NOT EXISTS paper_amm_reserve_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      token_currency TEXT NOT NULL,
+      raw_currency TEXT NOT NULL,
+      token_issuer TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      bucket_5m INTEGER NOT NULL,
+      pool_xrp_reserve REAL NOT NULL CHECK (pool_xrp_reserve > 0),
+      pool_token_reserve REAL NOT NULL CHECK (pool_token_reserve > 0),
+      trading_fee_units INTEGER NOT NULL CHECK (trading_fee_units BETWEEN 0 AND 1000),
+      source TEXT NOT NULL CHECK (source = 'amm'),
+      UNIQUE(raw_currency,token_issuer,bucket_5m)
+    )
+  `,
+
   // V2.1: compact, append-only PAPER opportunity event breadcrumbs.
   // Stores BOT first-sighting (not issuance), qualified signals and actual
   // simulated trade boundaries. Never contains wallet credentials or fills.
@@ -322,6 +340,7 @@ export const INDEXES = [
   'CREATE INDEX IF NOT EXISTS idx_paper_trades_entry ON paper_trades(entry_timestamp)',
   'CREATE INDEX IF NOT EXISTS idx_stream_shadow_observed_at ON paper_stream_shadow_signals(observed_at)',
   'CREATE INDEX IF NOT EXISTS idx_paper_opp_issue_time ON paper_opportunity_events(raw_currency,token_issuer,observed_at)',
+  'CREATE INDEX IF NOT EXISTS idx_micro_amm_issue_time ON paper_amm_reserve_evidence(raw_currency,token_issuer,observed_at)',
   'CREATE INDEX IF NOT EXISTS idx_paper_opp_event_time ON paper_opportunity_events(event_type,observed_at)',
   'CREATE INDEX IF NOT EXISTS idx_alerts_type ON alerts(alert_type, timestamp)',
   'CREATE INDEX IF NOT EXISTS idx_daily_summaries_date ON daily_summaries(date)',
