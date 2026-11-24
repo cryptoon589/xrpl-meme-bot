@@ -191,7 +191,8 @@ export class Database {
     const kinds = new Set([
       'first_detected','burst_seen','burst_qualified','stream_quoted',
       'stream_qualified','momentum_seen','paper_entry','paper_exit',
-      'amm_xrp_inflow','amm_xrp_outflow','amm_pressure_compare'
+      'amm_xrp_inflow','amm_xrp_outflow','amm_pressure_compare',
+      'external_gainer_seen'
     ]);
     const raw = event.rawCurrency || event.tokenCurrency;
     const px = event.priceXRP ?? null;
