@@ -25,7 +25,9 @@ function auditRows(rows){
       currency:row.token_currency,
       issuer:row.token_issuer,
       rawCurrency:row.raw_currency,
-    },positions);
+    },positions.filter(p=>p.tokenIssuer!==row.token_issuer));
+    // This legacy report field is explicitly OTHER-issuer only; same-issue
+    // alternate display aliases are audited separately by issuer forensic.
     return {
       id:row.id,
       name:row.token_currency,
