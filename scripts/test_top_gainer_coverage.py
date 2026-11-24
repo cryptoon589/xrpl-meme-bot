@@ -29,6 +29,10 @@ def main():
           currency TEXT,issuer TEXT,raw_currency TEXT,
           skipped_at INTEGER,reject_reason TEXT
         );
+        CREATE TABLE missed_opportunities(
+          currency TEXT,issuer TEXT,skipped_at INTEGER,skip_reason TEXT,
+          pct_gain_60m REAL
+        );
         CREATE TABLE paper_trades(
           id INTEGER PRIMARY KEY,token_currency TEXT,token_issuer TEXT,
           raw_currency TEXT,trade_source TEXT,status TEXT,
@@ -46,11 +50,17 @@ def main():
         ("BLACKSWN",B,CODE,T-60000000,"first_detected","",None),
         ("SWOOF",A,"53574F4F46000000000000000000000000000000",
          T-30000,"first_detected","",None),
+        ("SWOOF",A,"53574F4F46000000000000000000000000000000",
+         T-20000,"stream_quoted","",0.002),
       ])
       c.execute("INSERT INTO tokens VALUES(?,?,?,?,?)",
                 ("BLACKSWN",A,CODE,T-60*3600000,T-100000))
       c.execute("INSERT INTO market_snapshots VALUES(?,?,?,?)",
                 ("BLACKSWN",A,T-100000,9000.0))
+      c.executemany("INSERT INTO missed_opportunities VALUES(?,?,?,?,?)",[
+         ("SWOOF",A,T-10000,"low_liquidity",None),
+         ("SWOOF",B,T-10000,"different issuer reason",None)
+      ])
       c.execute("INSERT INTO shadow_trades VALUES(?,?,?,?,?)",
                 ("BLACKSWN",A,CODE,T-200000,"Slippage too high"))
       c.execute("INSERT INTO paper_trades VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -66,6 +76,9 @@ def main():
     assert "#2 BLACKSWN +149.45% [TRADED_BEFORE_RANK]" in s,s
     assert "exact_issue_rejects: Slippage too high" in s,s
     assert "matching_paper_entries: #1 burst closed pnl=-0.5 XRP" in s,s
+    assert "#3 SWOOF +55.00% [QUOTE_ONLY_NO_QUALIFIED_SIGNAL]" in s,s
+    assert "near_misses_issuer+display (raw not stored): SWOOF low_liquidity (1)" in s,s
+    assert "different issuer reason" not in s,s
     assert "TRACKED_NO_SAMPLED_SIGNAL" in s,s
     assert path.read_bytes()==before,"read-only tool must not mutate fixture DB"
     print("PASS full latest snapshot ranking, distinct issuer isolation, prior sampling, reject and P&L linkage, no writes")
