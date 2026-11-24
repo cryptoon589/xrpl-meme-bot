@@ -244,16 +244,22 @@ function outcomeForCandidate(db,c,horizon,now){
 }
 function metrics(records,arm){
   let pnl=0,grossProfit=0,grossLoss=0,wins=0,number=0,peak=0,maxDrawdown=0;
+  let committedXRP=0,sumReturnPct=0;
   for(const r of records){
     const x=r[arm];if(!x)continue;
     number++;pnl+=x.pnlXRP;
+    committedXRP+=x.sizeXRP*(1+0.003);
+    sumReturnPct+=x.returnPct;
     if(x.pnlXRP>0){wins++;grossProfit+=x.pnlXRP;}
     else if(x.pnlXRP<0)grossLoss+=-x.pnlXRP;
     peak=Math.max(peak,pnl);
     maxDrawdown=Math.max(maxDrawdown,peak-pnl);
   }
   return {number,netXRP:pnl,winRate:number?wins/number*100:null,
-    meanPerEntry:number?pnl/number:null,
+    meanPerEntry:number?pnl/number:null,committedXRP,
+    weightedReturnPct:committedXRP?pnl/committedXRP*100:null,
+    meanReturnPct:number?sumReturnPct/number:null,
+    averageSizeXRP:number?committedXRP/(1+0.003)/number:null,
     profitFactor:grossLoss?grossProfit/grossLoss:null,
     maxDrawdown};
 }
@@ -278,6 +284,9 @@ function metricText(m){
   return 'entries='+m.number+
     ' net='+fmt(m.netXRP)+' XRP'+
     ' mean='+fmt(m.meanPerEntry)+' XRP'+
+    ' mean_return='+fmt(m.meanReturnPct)+'%'+
+    ' capital_weighted_return='+fmt(m.weightedReturnPct)+'%'+
+    ' avg_size='+fmt(m.averageSizeXRP)+' XRP'+
     ' win_rate='+fmt(m.winRate)+'%'+
     ' PF='+fmt(m.profitFactor)+
     ' peak_to_trough='+fmt(m.maxDrawdown)+' XRP';
@@ -310,6 +319,8 @@ function cli(opts,now=Date.now()){
       console.log('  A ',metricText(h.A));
       console.log('  B ',metricText(h.B));
       console.log('  C ',metricText(h.C));
+      console.log('  B opportunity retention within quote-covered A set: '+
+        h.B.number+'/'+h.A.number+'; compare returns per XRP deployed, not only nominal net P&L.');
       if(h.completed.length<30)
         console.log('  INSUFFICIENT SAMPLE: fewer than 30 complete observations; no edge or profitability inference.');
       for(const p of h.completed.slice(0,SAMPLE_DISPLAY_LIMIT)){
