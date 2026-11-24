@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 // Offline: no XRPL network access, trades, or databases are opened.
 const assert = require('node:assert/strict');
-const { normalizeIssuedCurrency: normalize } = require('../dist/xrpl/currencyCode');
+const { normalizeIssuedCurrency: normalize, decodeIssuedCurrencyName } = require('../dist/xrpl/currencyCode');
 const { AMMPriceFetcher } = require('../dist/market/ammPriceFetcher');
 const { BurstDetector } = require('../dist/scanner/burstDetector');
 
 const hex = text => Buffer.from(text, 'ascii').toString('hex').toUpperCase().padEnd(40, '0');
 assert.equal(normalize('PHNIX'), hex('PHNIX'));
+for(const text of ['DROP','BCHAMP','PHNIX','PUNX','DEEPTIDE','FUZZY']) {
+  assert.equal(decodeIssuedCurrencyName(hex(text)),text,
+    'full 160-bit bytes preserve trailing 0-nibble characters: '+text);
+}
+assert.equal(decodeIssuedCurrencyName('not-a-40-char-raw-currency'),null);
+assert.equal(decodeIssuedCurrencyName('00'.repeat(20)),null);
+
 assert.equal(normalize('XRPNOMICS'), hex('XRPNOMICS'));
 assert.equal(normalize('wNOC'), hex('wNOC'));
 assert.equal(normalize('ARMY'), hex('ARMY'));
