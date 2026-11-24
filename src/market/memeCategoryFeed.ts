@@ -9,7 +9,7 @@
  */
 import { info, warn } from '../utils/logger';
 import {
-  canonicalIssue, dynamicMemeUniverse, TaggedMemeToken, MemeIssue
+  canonicalIssue, dynamicMemeUniverse, DynamicMemeUniverse, TaggedMemeToken, MemeIssue
 } from '../risk/dynamicMemeUniverse';
 
 type FetchLike = typeof fetch;
@@ -157,10 +157,17 @@ export class MemeCategoryFeed {
         if(body?.success!==true || body.tagName?.toLowerCase()!=='memes' ||
            !Array.isArray(body.tokens) || body.tokens.length>50)
           throw Error('metadata category response invalid');
-        const accepted=this.acceptPage(body.tokens);
-        if(page.movers && this.onGainerObserved){
-          const observedAt=this.now();
-          const eligible=new Map(dynamicMemeUniverse.eligibleIssues(observedAt).map(i=>[
+        // Gainer pages must NOT expand the live eligible discovery universe,
+        // populate the token scanner, or influence PAPER entry decisions.
+        // Validate prospective candidate category in a disposable evidence
+        // index and discard it immediately after recording the comparison.
+        const observedAt=this.now();
+        const gainerIndex=page.movers ? new DynamicMemeUniverse() : null;
+        const accepted=gainerIndex
+          ? gainerIndex.acceptTaggedPage(body.tokens,observedAt).accepted
+          : this.acceptPage(body.tokens);
+        if(page.movers && this.onGainerObserved && gainerIndex){
+          const eligible=new Map(gainerIndex.eligibleIssues(observedAt).map(i=>[
             canonicalIssue(i.currency,i.issuer),i
           ]));
           for(const entry of body.tokens as any[]){
