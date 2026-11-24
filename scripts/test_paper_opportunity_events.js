@@ -59,6 +59,12 @@ try {
   assert.equal(record('external_gainer_seen','rOtherIssuer'),true,
     'identical ticker but different issuers must remain independent');
   assert.equal(count('external_gainer_seen'),2);
+  assert.equal(record('meme_evidence_refreshed'),true);
+  assert.equal(record('meme_evidence_refreshed'),false,
+    'exact classified issuer tag events deduplicate in 15 minute bucket');
+  assert.equal(record('meme_evidence_refreshed','rOtherIssuer'),true);
+  assert.equal(count('meme_evidence_refreshed'),2);
+
 
   assert.equal(record('amm_pressure_compare'),true,
     'side-by-side AMM metadata evidence must persist independently');
