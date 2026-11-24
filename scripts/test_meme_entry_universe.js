@@ -30,13 +30,21 @@ assert.equal(allow('ARMY','rDifferentIssuer',code),false,'same ticker, other iss
 assert.equal(allow('UNREVIEWED',issuer),false,'unknown XRPL token must not trade');
 assert.equal(allow('LOX',issuer),false,'meme branding alone not an issuer approval');
 for(const name of ['USDC','RLUSD','URLSD','USDT','USD','DAI','EURC',
-                   'BTC','WBTC','ETH','WETH','SOL','WSOL','BNB','PAXG']){
+                   'BTC','WBTC','ETH','WETH','SOL','WSOL','BNB','PAXG','HBAR','NVIDIA']){
   assert.equal(allow(name,issuer),false,'non-meme rejected: '+name);
 }
 const usdcHex=Buffer.from('USDC').toString('hex').toUpperCase().padEnd(40,'0');
 assert.equal(allow(usdcHex,issuer,usdcHex),false,'hex-encoded stablecoin rejected');
 assert.equal(allow('USDC',issuer,code),false,'misleading display symbol rejected');
 assert.equal(allow('ARMY',issuer,usdcHex),false,'misleading raw code rejected');
+for (const asset of ['HBAR','NVIDIA']){
+  const hex=Buffer.from(asset).toString('hex').toUpperCase().padEnd(40,'0');
+  assert.equal(allow(asset,issuer,hex),false,
+    asset+'-named XRPL meme tag cannot authorize external-asset branded PAPER trade');
+  assert.equal(allow('UNRELATED',issuer,hex),false,
+    'encoded '+asset+' cannot evade type exclusion via misleading display');
+}
+
 const correctHash=process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256;
 process.env.HUNTERIX_OPERATOR_MEME_ALLOWLIST_APPROVED_SHA256='0'.repeat(64);
 assert.equal(allow('ARMY',issuer,code),false,'tampered/unapproved hash rejected');
@@ -61,7 +69,7 @@ const cfg={mode:'PAPER',maxOpenTrades:5,maxDailyLossXRP:30,minTradeXRP:5,
 const tde=new TradeDecisionEngine(cfg);
 const snapshot={priceXRP:0.1,liquidityXRP:5000,poolXrpReserve:2500};
 (async()=>{
-  for(const currency of ['USDC','RLUSD','URLSD','BTC','ETH','SOL','UNREVIEWED']){
+  for(const currency of ['USDC','RLUSD','URLSD','BTC','ETH','SOL','HBAR','NVIDIA','UNREVIEWED']){
     const result=await tde.decide({currency,issuer,rawCurrency:currency,
       snapshot,signalType:'burst',signalScore:70,bankrollXRP:100,
       openPositions:0,dailyPnL:0,openPositionKeys:new Set(),blocklist:new Set()});

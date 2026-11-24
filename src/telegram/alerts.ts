@@ -16,19 +16,26 @@ import TelegramBot from 'node-telegram-bot-api';
 import { AlertPayload } from '../types';
 import { BotConfig } from '../config';
 import { info, warn, debug } from '../utils/logger';
+import { decodeIssuedCurrencyName } from '../xrpl/currencyCode';
 
 // ── Currency decoding ─────────────────────────────────────────────────────────
 // XRPL hex currency codes are 40 hex chars (20 bytes), null-padded ASCII.
 // e.g. 46555A5A59000000... → FUZZY
 function decodeCurrency(raw: string): string {
   if (!raw) return 'UNKNOWN';
-  if (raw.length !== 40) return raw; // already a short ticker
-  try {
-    const stripped = raw.replace(/00+$/, '');
-    const decoded  = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
-    if (/^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0) return decoded;
-  } catch {}
-  return raw.slice(0, 8) + '…'; // fallback: truncated hex
+  const full=decodeIssuedCurrencyName(raw);
+  return full ?? (raw.length===40 ? raw.slice(0,8)+'…' : raw);
+}
+
+/** Resolve a trade's printed name from authoritative on-ledger raw code.
+ * Previously truncated aliases (DRO/BCHAM) remain unchanged in SQLite.
+ */
+function displayPaperTradeTicker(trade:{tokenCurrency:string;rawCurrency?:string|null}):string {
+  if(trade.rawCurrency && /^[A-Fa-f0-9]{40}$/.test(trade.rawCurrency)) {
+    return decodeIssuedCurrencyName(trade.rawCurrency) ||
+      decodeCurrency(trade.tokenCurrency);
+  }
+  return decodeCurrency(trade.tokenCurrency);
 }
 
 // Format XRP price — never show more precision than meaningful
@@ -284,7 +291,7 @@ export class TelegramAlerter {
     const t    = payload.paperTrade;
     if (!t) return '';
 
-    const ticker  = decodeCurrency(t.tokenCurrency);
+    const ticker  = displayPaperTradeTicker(t);
     const safeTicker = escapeHtml(ticker);
 
     // Profile (new) vs legacy source (fallback)
@@ -338,7 +345,7 @@ export class TelegramAlerter {
       .join(' | ');
 
     // Issuer link
-    const link = `https://firstledger.net/token/${encodeURIComponent(t.tokenIssuer)}/${encodeURIComponent(t.tokenCurrency)}`;
+    const link = `https://firstledger.net/token/${encodeURIComponent(t.tokenIssuer)}/${encodeURIComponent(t.rawCurrency || t.tokenCurrency)}`;
 
     const lines = [
       `${profileEmoji} <b>TRADE OPENED</b>`,
@@ -367,7 +374,7 @@ export class TelegramAlerter {
     const t = payload.paperTrade;
     if (!t) return '';
 
-    const ticker   = decodeCurrency(t.tokenCurrency);
+    const ticker   = displayPaperTradeTicker(t);
     const safeTicker = escapeHtml(ticker);
     const soldPct  = t.lastPartialSoldPercent ?? (100 - (t.remainingPosition ?? 100));
     const xrpSold  = t.lastPartialXrpReturned ?? ((soldPct / 100) * t.entryAmountXRP);
@@ -412,7 +419,7 @@ export class TelegramAlerter {
     if (t.status === 'partial') return this.fmtTradePartial(payload);
     if (t.status !== 'closed') return '';
 
-    const ticker = decodeCurrency(t.tokenCurrency);
+    const ticker = displayPaperTradeTicker(t);
     const safeTicker = escapeHtml(ticker);
 
     // Use cumulative xrpReturned (includes all partial + final proceeds)

@@ -42,6 +42,28 @@ async function main(){
   assert.ok(formatted.includes('TRADE CLOSED — LOSS') && formatted.includes('<b>P&L:</b>') && formatted.includes('-0.01 XRP'),
     'trade-close alert must classify fee-adjusted negative net as loss despite gross proceeds equaling principal');
   console.log('PASS close alert uses corrected net P&L rather than gross returned-principal');
+  const phnixRaw='50484E4958000000000000000000000000000000';
+  const dropRaw='44524F5000000000000000000000000000000000';
+  const bchampRaw='424348414D500000000000000000000000000000';
+  const names=[
+    ['DRO',dropRaw,'DROP'],
+    ['BCHA',bchampRaw,'BCHAMP'],
+    [phnixRaw,phnixRaw,'PHNIX']
+  ];
+  for(const [stored,raw,expected] of names){
+    const fixture={...trade,tokenCurrency:stored,rawCurrency:raw,
+      tokenIssuer:'rOnlyOfflineFixture'};
+    const opened=a.format({type:'paper_trade_opened',paperTrade:fixture,message:''});
+    const closed=a.format({type:'paper_trade_closed',paperTrade:fixture,message:''});
+    assert(opened.includes('<code>'+expected+'</code>'),
+      'open alert must print full raw ticker '+expected);
+    assert(closed.includes('<code>'+expected+'</code>'),
+      'close alert must print full raw ticker '+expected);
+    assert(opened.includes(encodeURIComponent(raw)),
+      'FirstLedger link must use actual raw currency issue');
+  }
+  console.log('PASS DRO/BCHA/PHNIX Telegram names and issuer-exact FirstLedger links');
+
 
   // Regression: TP1 sold 60% of 5 XRP original for 3.58 XRP returned.
   // Realized profit on the SOLD inventory is ~0.57 XRP, but 40% is

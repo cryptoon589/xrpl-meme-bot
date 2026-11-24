@@ -22,3 +22,17 @@ export function normalizeIssuedCurrency(currency: unknown): string | null {
   if (bytes.length > 20) return null;
   return bytes.toString('hex').toUpperCase().padEnd(40, '0');
 }
+
+
+/** Printable label from an exact 160-bit XRP Ledger issued currency code.
+ * Hex codes must be decoded as complete bytes. Trimming a hex string's
+ * zero suffix destroys the final nibble in P (0x50): DROP becomes DRO.
+ * Stop at the first whole 0x00 padding BYTE instead.
+ */
+export function decodeIssuedCurrencyName(currency: string): string | null {
+  if (!/^[A-Fa-f0-9]{40}$/.test(currency)) return null;
+  const bytes=Buffer.from(currency,'hex');
+  const end=bytes.indexOf(0);
+  const label=bytes.subarray(0,end>=0?end:bytes.length).toString('ascii');
+  return label.length>0 && /^[\x20-\x7E]+$/.test(label) ? label : null;
+}

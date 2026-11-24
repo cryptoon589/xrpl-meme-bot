@@ -9,11 +9,13 @@
  */
 import { info, warn } from '../utils/logger';
 import {
-  canonicalIssue, dynamicMemeUniverse, TaggedMemeToken, MemeIssue
+  canonicalIssue, dynamicMemeUniverse, DynamicMemeUniverse, TaggedMemeToken, MemeIssue
 } from '../risk/dynamicMemeUniverse';
 
 type FetchLike = typeof fetch;
 type CandidateCallback = (token:MemeIssue)=>void;
+export type ObservedMemeGainer = {currency:string;issuer:string;display:string;
+  observedAt:number;change24hPct:number;volume24hXRP:number;priceXRP?:number};
 const API='https://api.xrpl.to/v1';
 const USER_AGENT='HUNTERIX-Meme-PAPER-Classifier/0.1 (+https://github.com/cryptoon589/xrpl-meme-bot)';
 const FETCH_TIMEOUT_MS=8000;
@@ -25,6 +27,8 @@ const DEFAULT_429_BACKOFF_MS=30*60*1000;
 const MAX_BACKOFF_MS=48*60*60*1000;
 
 export class MemeCategoryFeed {
+  /** Observation only: a 24h gainer already moved; NOT a historical early-buy signal. */
+  public onGainerObserved?: (item:ObservedMemeGainer)=>void;
   private busy=false;
   private rotation=0;
   private nextAllowedFetch=0;
@@ -36,6 +40,8 @@ export class MemeCategoryFeed {
   private pendingLookups=new Map<string,Promise<boolean>>();
   private lastRefreshAt=0;
   private interval:NodeJS.Timeout|null=null;
+  private gainerWarmup:NodeJS.Timeout|null=null;
+  private gainerInterval:NodeJS.Timeout|null=null;
 
   constructor(
     private readonly onCandidate:CandidateCallback,
@@ -132,6 +138,8 @@ export class MemeCategoryFeed {
     if(this.busy || !this.available())return;
     this.busy=true;
     try {
+      // Preserve the existing 3-page discovery cadence. The gainer watcher
+      // is separate and rate-limited through the SAME getJSON budget.
       const slot=this.rotation++;
       const page=slot%3===0
         ? {sort:'vol24hxrp',offset:0}
@@ -160,6 +168,53 @@ export class MemeCategoryFeed {
     } finally {
       this.busy=false;
     }
+  }
+
+  /** Once/hour comparison ONLY, using one extra documented list request.
+   * Shared 3/15m and 333/day anonymous budget still enforces fail-closed
+   * backoff; never alters the scanner/eligible issue universe or trades.
+   * A 24h ranked winner is not assumed to have been tradable at signal time.
+   */
+  async refreshGainers():Promise<void> {
+    if(this.busy || !this.available())return;
+    this.busy=true;
+    try {
+      const u=new URL(API+'/tokens');
+      for(const [key,value] of Object.entries({
+        tag:'Memes',tags:'yes',sort:'pro24h',order:'desc',limit:'50',
+        offset:'0',lightweight:'true',skip_metrics:'true',min_vol24hxrp:'50'
+      }))u.searchParams.set(key,value);
+      const body=await this.getJSON(u.toString());
+      if(body?.success!==true || body.tagName?.toLowerCase()!=='memes' ||
+         !Array.isArray(body.tokens) || body.tokens.length>50)
+        throw Error('gainer category response invalid');
+      // Distinct temporary evidence index. NEVER call this.acceptPage().
+      const observedAt=this.now();
+      const eligible=new DynamicMemeUniverse();
+      eligible.acceptTaggedPage(body.tokens,observedAt);
+      const allowed=new Map(eligible.eligibleIssues(observedAt).map(i=>[
+        canonicalIssue(i.currency,i.issuer),i
+      ]));
+      for(const entry of body.tokens as any[]){
+        const key=canonicalIssue(entry?.currency,entry?.issuer);
+        const match=key ? allowed.get(key) : null;
+        if(!match)continue;
+        const change24hPct=Number(entry?.pro24h);
+        const volume24hXRP=Number(entry?.vol24hxrp);
+        const px=Number(entry?.exch);
+        if(!Number.isFinite(change24hPct) || change24hPct<=0 ||
+           !Number.isFinite(volume24hXRP) || volume24hXRP<50)continue;
+        try {this.onGainerObserved?.({
+          currency:match.currency,issuer:match.issuer,
+          display:match.display,observedAt,change24hPct,volume24hXRP,
+          ...(Number.isFinite(px) && px>0?{priceXRP:px}:{})
+        });}catch(e){warn('[MemeDiscovery] gainer callback failed: '+String(e).slice(0,100));}
+      }
+      info('[MemeDiscovery] external 24h gainers observed (Data by xrpl.to https://xrpl.to)');
+    }catch(e){
+      warn('[MemeDiscovery] external gainer check deferred: '+
+        String((e as Error).message).slice(0,100));
+    }finally{this.busy=false;}
   }
 
   /** Bounded on-demand lookup for newly seen / dormant meme signals.
@@ -202,11 +257,24 @@ export class MemeCategoryFeed {
       void this.refresh().catch(e=>warn('[MemeDiscovery] refresh failed: '+String(e).slice(0,90)));
     },REFRESH_MS);
     this.interval.unref();
+    // Two-minute offset preserves regular discovery checks; one additional
+    // request per hour is inside the SAME finite source budget.
+    this.gainerWarmup=setTimeout(()=>{
+      this.gainerWarmup=null;
+      void this.refreshGainers();
+      this.gainerInterval=setInterval(()=>void this.refreshGainers(),60*60*1000);
+      this.gainerInterval.unref();
+    },2*60*1000);
+    this.gainerWarmup.unref();
   }
 
   stop():void {
     if(this.interval)clearInterval(this.interval);
+    if(this.gainerInterval)clearInterval(this.gainerInterval);
+    if(this.gainerWarmup)clearTimeout(this.gainerWarmup);
     this.interval=null;
+    this.gainerInterval=null;
+    this.gainerWarmup=null;
   }
 
   stats():{eligible:number;successfulPages:number;lastSuccessAgeMs:number|null;lastRefreshAgeMs:number|null;cooldownRemainingMs:number;budgetUsed:number;budgetAvailable:boolean} {

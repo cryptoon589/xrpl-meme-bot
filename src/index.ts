@@ -54,6 +54,7 @@ import { diagnostics } from './diagnostics/diagnostics';
 import fs from 'fs';
 import { MemeCategoryFeed, setActiveMemeCategoryFeed } from './market/memeCategoryFeed';
 import { canonicalIssue, dynamicMemeUniverse } from './risk/dynamicMemeUniverse';
+import { decodeIssuedCurrencyName } from './xrpl/currencyCode';
 import { selectDynamicScanTokens } from './scanner/dynamicMemeScheduler';
 
 // Global state
@@ -195,14 +196,8 @@ async function main() {
   const BURST_TRADE_BLOCKLIST = manualBlacklist.asDecisionSet();
   info(`[Blacklist] Loaded ${manualBlacklist.list().length} operator entries. No automatic token additions.`);
 
-  const decodeCurrency = (raw: string): string => {
-    if (raw.length !== 40) return raw;
-    try {
-      const stripped = raw.replace(/00+$/, '');
-      const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-      return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : raw;
-    } catch { return raw; }
-  };
+  const decodeCurrency = (raw: string): string =>
+    decodeIssuedCurrencyName(raw) ?? raw;
   const isBlocklistedToken = (currency: string, issuer: string, raw?: string): boolean =>
     manualBlacklist.isBlocked(currency, issuer, raw);
 
@@ -652,6 +647,20 @@ async function main() {
         lastUpdated:Date.now()
       });
     });
+    // Third-party movers are prospective OBSERVATIONS, never entry proof.
+    // Use the SAME one-request-per-15m metadata poller: no extra RPC/API load.
+    feed.onGainerObserved = item => {
+      db.recordOpportunityEvent({
+        tokenCurrency:item.display,tokenIssuer:item.issuer,
+        rawCurrency:item.currency,observedAt:item.observedAt,
+        eventType:'external_gainer_seen',
+        source:'xrpl.to:Memes:pro24h',
+        ...(item.priceXRP ? {priceXRP:item.priceXRP} : {}),
+        detail:'24h change='+item.change24hPct.toFixed(2)+'%'+
+          ' vol24h='+item.volume24hXRP.toFixed(2)+' XRP; retrospective rank, NOT buy signal',
+      });
+      diagnostics.increment('externalMemeGainersObserved');
+    };
     setActiveMemeCategoryFeed(feed);
     feed.start(); // fetches are not on the XRPL node
     info('[MemeDiscovery] dynamic issuer-exact category feed enabled (Data by xrpl.to https://xrpl.to)');
@@ -1561,15 +1570,8 @@ function startPeriodicScan(
       if (xrp >= 0.0001) return xrp.toFixed(6) + ' XRP';
       return xrp.toFixed(8) + ' XRP';
     };
-    const decodeCurrencyLocal = (raw: string): string => {
-      if (!raw || raw.length !== 40) return raw || 'UNKNOWN';
-      try {
-        const stripped = raw.replace(/00+$/, '');
-        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
-        if (/^[ -~]+$/.test(decoded) && decoded.length > 0) return decoded;
-      } catch {}
-      return raw.slice(0, 8) + '…';
-    };
+    const decodeCurrencyLocal = (raw: string): string =>
+      decodeIssuedCurrencyName(raw) ?? raw ?? 'UNKNOWN';
 
     if (!paperTrader) return;
 
@@ -1631,7 +1633,7 @@ function startPeriodicScan(
     } else {
       lines.push('');
       for (const pos of openPositions) {
-        const ticker    = decodeCurrencyLocal(pos.tokenCurrency);
+        const ticker    = decodeCurrencyLocal(pos.rawCurrency || pos.tokenCurrency);
         const ageMs     = now - (pos.entryTimestamp || now);
         const ageStr    = ageMs >= 3600000
           ? `${Math.floor(ageMs / 3600000)}h ${Math.round((ageMs % 3600000) / 60000)}m`

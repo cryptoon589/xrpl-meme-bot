@@ -14,8 +14,11 @@ const copy={currency:'PHNIX',rawCurrency:phnix,issuer:collision};
 assert.equal(findOpenTickerCollision(copy,[held]),held,
   'different issuer with identical ledger-issued currency must be classified as active ticker collision');
 assert.equal(findOpenTickerCollision(
-  {currency:'PHNIX',issuer:official,rawCurrency:phnix},[held]),null,
-  'identical issuer is governed by exact-issue duplicate guard, not ticker collision');
+  {currency:'PHNIX',issuer:official,rawCurrency:phnix},[held]),held,
+  'identical issued asset must block duplicate position, including alternate encodings');
+assert.equal(findOpenTickerCollision(
+  {currency:phnix,issuer:official,rawCurrency:phnix},[held]),held,
+  'raw-hex versus human PHNIX alias cannot create a second open position');
 assert.equal(findOpenTickerCollision(
   {currency:'SWARM',issuer:collision,rawCurrency:other},[held]),null,
   'independent ticker not blocked');
@@ -27,6 +30,35 @@ assert.equal(findOpenTickerCollision(
 assert.equal(findOpenTickerCollision(
   {currency:'XRP',issuer:collision},[held]),null,
   'native XRP does not gain a derived issued identity');
+
+// Persistent DB guard must also reject label aliases after restart, not
+// just when the in-memory openPositions map still has the first trade.
+const fs=require('node:fs');
+const os=require('node:os');
+const path=require('node:path');
+const {Database}=require('../dist/db/database');
+const tmp=fs.mkdtempSync(path.join(os.tmpdir(),'hunterix-issue-identity-'));
+let fixture;
+try {
+  fixture=new Database(path.join(tmp,'paper-identity.db'));
+  fixture.db.prepare(`
+    INSERT INTO paper_trades
+    (token_currency,token_issuer,raw_currency,entry_price_xrp,
+     entry_amount_xrp,entry_timestamp,entry_score,status)
+    VALUES(?,?,?,?,?,?,?,?)
+  `).run('PHNIX',official,phnix,0.01,5,Date.now(),70,'partial');
+  assert.equal(fixture.hasOpenTradeForToken('PHNIX',official,phnix),true);
+  assert.equal(fixture.hasOpenTradeForToken(phnix,official,phnix),true,
+    'hex alias must match persistent partial PHNIX inventory');
+  assert.equal(fixture.hasOpenTradeForToken('PHNIX',collision,phnix),false,
+    'different XRPL issuer is a distinct asset; collision guard handles name');
+  assert.equal(fixture.hasOpenTradeForToken('SWARM',official,other),false);
+  assert.equal(fixture.hasOpenTradeForToken('INVALID NAME TOO LONG FOR AN ISSUED TOKEN',official),true,
+    'unresolvable XRPL issue fails closed');
+} finally {
+  fixture?.close();
+  fs.rmSync(tmp,{recursive:true,force:true});
+}
 
 const prev={
   MODE:process.env.MODE,
@@ -49,6 +81,10 @@ try{
     'burst entry must reject the concurrent same-ticker different-issuer exposure');
   assert.equal(trader.tryOpenTrade(copy,null,70,'offline fixture'),null,
     'scored/stream entry must reject the same concurrent same-ticker exposure');
+  assert.equal(trader.tryOpenBurstTrade({currency:phnix,issuer:official,rawCurrency:phnix},null,'offline fixture'),null,
+    'burst must reject same issuer even if only hex/display representation differs');
+  assert.equal(trader.tryOpenTrade({currency:phnix,issuer:official,rawCurrency:phnix},null,70,'offline fixture'),null,
+    'scored must reject same issuer even if only hex/display representation differs');
   // Exits and existing trade rows are never mutated by either check.
   assert.equal(trader.openPositions.size,1);
   assert.equal(held.remainingPosition,100);
