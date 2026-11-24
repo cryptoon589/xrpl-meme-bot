@@ -31,6 +31,18 @@ function decodeCurrency(raw: string): string {
   return raw.slice(0, 8) + '…'; // fallback: truncated hex
 }
 
+// Prefer the ORIGINAL XRPL currency code for display and links. Historical
+// trade rows can contain short aliases (DRO, BCHA) or raw hex. Never change
+// the stored position identity, profit, entry, exit or wallet details here.
+function displayPaperTradeTicker(trade:{tokenCurrency:string;rawCurrency?:string|null}):string {
+  const raw=trade.rawCurrency;
+  if(typeof raw==='string' && /^[A-Fa-f0-9]{40}$/.test(raw)){
+    const decoded=decodeCurrency(raw);
+    if(decoded && decoded!==raw.slice(0,8)+'…')return decoded;
+  }
+  return decodeCurrency(trade.tokenCurrency);
+}
+
 // Format XRP price — never show more precision than meaningful
 function escapeHtml(value: unknown): string {
   return String(value ?? '')
@@ -284,7 +296,7 @@ export class TelegramAlerter {
     const t    = payload.paperTrade;
     if (!t) return '';
 
-    const ticker  = decodeCurrency(t.tokenCurrency);
+    const ticker  = displayPaperTradeTicker(t);
     const safeTicker = escapeHtml(ticker);
 
     // Profile (new) vs legacy source (fallback)
@@ -338,7 +350,7 @@ export class TelegramAlerter {
       .join(' | ');
 
     // Issuer link
-    const link = `https://firstledger.net/token/${encodeURIComponent(t.tokenIssuer)}/${encodeURIComponent(t.tokenCurrency)}`;
+    const link = `https://firstledger.net/token/${encodeURIComponent(t.tokenIssuer)}/${encodeURIComponent(t.rawCurrency || t.tokenCurrency)}`;
 
     const lines = [
       `${profileEmoji} <b>TRADE OPENED</b>`,
@@ -367,7 +379,7 @@ export class TelegramAlerter {
     const t = payload.paperTrade;
     if (!t) return '';
 
-    const ticker   = decodeCurrency(t.tokenCurrency);
+    const ticker   = displayPaperTradeTicker(t);
     const safeTicker = escapeHtml(ticker);
     const soldPct  = t.lastPartialSoldPercent ?? (100 - (t.remainingPosition ?? 100));
     const xrpSold  = t.lastPartialXrpReturned ?? ((soldPct / 100) * t.entryAmountXRP);
@@ -412,7 +424,7 @@ export class TelegramAlerter {
     if (t.status === 'partial') return this.fmtTradePartial(payload);
     if (t.status !== 'closed') return '';
 
-    const ticker = decodeCurrency(t.tokenCurrency);
+    const ticker = displayPaperTradeTicker(t);
     const safeTicker = escapeHtml(ticker);
 
     // Use cumulative xrpReturned (includes all partial + final proceeds)
