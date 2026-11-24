@@ -127,15 +127,43 @@ def diagnose(db, latest, token, tables):
         """,(issuer,latest,raw,raw)).fetchall()
     if trades:
         classification="TRADED_BEFORE_RANK"
-    elif any(x in events for x in ["burst_seen","momentum_seen","stream_qualified","stream_quoted"]):
-        classification="SIGNAL_NO_ENTRY"
+    elif any(x in events for x in ["burst_seen","burst_qualified","momentum_seen","stream_qualified"]):
+        classification="QUALIFIED_SIGNAL_NO_ENTRY"
+    elif "stream_quoted" in events:
+        # STREAM quote is only a priced observation, not a qualifying
+        # TDE-eligible or executable trading signal.
+        classification="QUOTE_ONLY_NO_QUALIFIED_SIGNAL"
     elif (previous and previous["n"]>0):
         classification="PRICE_SAMPLED_NO_SIGNAL"
     elif tracked or "first_detected" in events:
         classification="TRACKED_NO_SAMPLED_SIGNAL"
     else:
         classification="NO_PRIOR_BOT_COVERAGE_EVIDENCE"
-    return classification,events,previous,rejects,trades,tracked,first_seen
+    # Legacy near-miss table stores issuer + displayed currency, no raw code.
+    # Require issuer AND matching known display alias, but label this result as
+    # provisional; never call it cryptographically issuer-exact evidence.
+    near_misses=[]
+    if "missed_opportunities" in tables:
+        legacy=set(names)
+        if re.fullmatch(r"[A-Fa-f0-9]{40}",raw):
+            # Historical decoder incorrectly stripped a final zero nibble
+            # from letters such as P (0x50) / digit 0 (0x30).
+            truncated=re.sub(r"00+$","",raw)
+            try:
+                legacy_name=bytes.fromhex(truncated).decode("ascii","ignore")
+                if legacy_name:
+                    legacy.add(legacy_name.replace("\x00","").strip())
+            except ValueError:
+                pass
+        aliases_sql=",".join("?" for _ in legacy)
+        near_misses=db.execute(f"""
+            SELECT currency,skip_reason,COUNT(*) n,MAX(skipped_at) last_at,
+                   MAX(pct_gain_60m) max_spot_gain_60m
+            FROM missed_opportunities
+            WHERE issuer=? AND currency IN ({aliases_sql}) AND skipped_at<=?
+            GROUP BY currency,skip_reason ORDER BY n DESC LIMIT 5
+        """,(issuer,*sorted(legacy),latest)).fetchall()
+    return classification,events,previous,rejects,trades,tracked,first_seen,near_misses
 
 def report(path:Path,limit:int=20):
     if not path.is_file() or path.is_symlink():
@@ -168,7 +196,7 @@ def report(path:Path,limit:int=20):
         print("All 24h changes retrospective; prior sellable highs NOT established.")
         counts=Counter()
         for i,t in enumerate(winners,1):
-            status,ev,price,rejects,trades,tracked,first=diagnose(db,latest,t,tables)
+            status,ev,price,rejects,trades,tracked,first,near_misses=diagnose(db,latest,t,tables)
             counts[status]+=1
             print(f"\n#{i} {t['token_currency'][:16]} {t['change24h']:+.2f}% "
                   f"[{status}]")
@@ -191,6 +219,10 @@ def report(path:Path,limit:int=20):
                 print("  exact_issue_rejects:",
                       "; ".join(f"{x['reject_reason'][:110]} ({x['n']})"
                                 for x in rejects))
+            if near_misses:
+                print("  near_misses_issuer+display (raw not stored):",
+                      "; ".join(f"{x['currency']} {x['skip_reason'][:50]} ({x['n']})"
+                                for x in near_misses))
             if trades:
                 print("  matching_paper_entries:",
                       "; ".join(f"#{x['id']} {x['trade_source']} "
@@ -200,7 +232,8 @@ def report(path:Path,limit:int=20):
         print("\nCOVERAGE CATEGORIES:",dict(counts))
         print("CAVEATS: no-event is not a proven missed tradable move; "
               "no saved snapshot is not proof the asset never traded; "
-              "rejections are displayed only when exact raw code matches; "
+              "shadow rejections require exact raw code; legacy near-misses"
+              " are only issuer+display matches and may be ambiguous; "
               "max observed liquidity is not liquidity at a hypothetical entry.")
         print("No bot changes, no trades, no external requests.")
 
