@@ -28,6 +28,7 @@ import {
 import { diagnostics } from '../diagnostics/diagnostics';
 import { quotePaperRoundTrip } from '../paper/reservePaperExecution';
 import { paperMemeEntryDecision } from '../risk/memeEntryUniverse';
+import { decodeIssuedCurrencyName } from '../xrpl/currencyCode';
 import { ensureTaggedMemeIssue } from '../market/memeCategoryFeed';
 import { decideVerifiedProjectIssuer } from '../risk/verifiedProjectIssuers';
 import { readPaperEntryFreeze } from '../risk/paperEntryFreeze';
@@ -497,11 +498,8 @@ export class TradeDecisionEngine {
   }
 
   private decodeCurrency(raw: string): string {
-    if (!raw || raw.length !== 40) return raw || '';
-    try {
-      const stripped = raw.replace(/00+$/, '');
-      const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-      return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : raw;
-    } catch { return raw; }
+    if(!raw)return '';
+    return decodeIssuedCurrencyName(raw) ?? raw;
   }
+
 }
