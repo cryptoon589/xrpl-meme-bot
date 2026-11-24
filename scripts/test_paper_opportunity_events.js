@@ -53,6 +53,13 @@ try {
   assert.equal(record('stream_qualified'),false);
   assert.equal(count('burst_seen'),3);
   assert.equal(count('stream_qualified'),1);
+  assert.equal(record('external_gainer_seen'),true);
+  assert.equal(record('external_gainer_seen'),false,
+    '15m issuer-exact gainer duplicates must be suppressed');
+  assert.equal(record('external_gainer_seen','rOtherIssuer'),true,
+    'identical ticker but different issuers must remain independent');
+  assert.equal(count('external_gainer_seen'),2);
+
   assert.equal(record('amm_pressure_compare'),true,
     'side-by-side AMM metadata evidence must persist independently');
   assert.equal(record('amm_pressure_compare'),false,
