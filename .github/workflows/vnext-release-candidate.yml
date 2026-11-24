@@ -15,6 +15,7 @@ on:
       - audit/hunterix-issuer-eligibility-and-movers-20261124
       - audit/hunterix-top-gainers-ranking-20261124
       - feature/hunterix-micro-shadow-liquidity-20261124
+      - audit/hunterix-exit-spot-pnl-20261124
   pull_request:
     branches:
       - feature/hunterix-dynamic-meme-universe-20261121
@@ -79,6 +80,8 @@ jobs:
           node scripts/test_micro_amm_shadow.js
           node scripts/test_missed_currency_decoder.js
           python3 scripts/test_liquidity_exits.py
+          python3 scripts/test_exit_spot_pnl.py
+          python3 -m py_compile scripts/audit_exit_spot_pnl.py
           python3 scripts/test_meme_evidence_age.py
           python3 -m py_compile scripts/audit_liquidity_exits.py
           python3 -m py_compile scripts/audit_meme_evidence_age.py
