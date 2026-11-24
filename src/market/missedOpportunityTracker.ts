@@ -11,6 +11,7 @@
 import { Database } from '../db/database';
 import { AMMPriceFetcher } from './ammPriceFetcher';
 import { info, debug } from '../utils/logger';
+import { decodeIssuedCurrencyName } from '../xrpl/currencyCode';
 
 export interface MissedSignal {
   id?: number;
@@ -32,12 +33,7 @@ export interface MissedSignal {
 
 /** Decode a hex XRPL currency code to its ASCII ticker, or return as-is */
 function decodeCurrency(currency: string): string {
-  if (currency.length !== 40) return currency;
-  try {
-    const stripped = currency.replace(/00+$/, '');
-    const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
-    return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : currency;
-  } catch { return currency; }
+  return decodeIssuedCurrencyName(currency) ?? currency;
 }
 
 export class MissedOpportunityTracker {
