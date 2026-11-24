@@ -24,22 +24,47 @@ def report(path,limit=30):
         tables={r["name"] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "paper_opportunity_events" not in tables:
             raise ValueError("Opportunity event evidence missing")
-        gainers=[dict(r) for r in db.execute("""
-          SELECT token_currency,token_issuer,raw_currency,observed_at,
-                 detail,price_xrp
-          FROM paper_opportunity_events
-          WHERE event_type='external_gainer_seen'
-          ORDER BY observed_at DESC
-          LIMIT ?
-        """,(limit,))]
+        latest=db.execute("""
+            SELECT MAX(observed_at) latest
+            FROM paper_opportunity_events
+            WHERE event_type='external_gainer_seen'
+        """).fetchone()["latest"]
         print("=== HUNTERIX / XRPL.TO MEME GAINER TIMELINE (READ ONLY) ===")
         print("Data by xrpl.to https://xrpl.to | prospective snapshot, not trade advice")
-        print("Ranked gainer observations:",len(gainers))
-        if not gainers:
-            print("No gainer observations yet. The rotating metadata poll visits"
-                  " gainers once per four successful 15-minute requests.")
+        if latest is None:
+            print("No gainer observations yet. The observation-only collector"
+                  " attempts a refresh about two minutes after startup and hourly"
+                  " thereafter, subject to shared API limits.")
             return
-        print("One token may appear at multiple later observations.")
+        # Select ALL of the most recent provider batch before LIMIT. A simple
+        # ORDER BY observed_at DESC LIMIT N selects arbitrary tokens on ties,
+        # NOT the strongest N gainers from that snapshot.
+        batch=[dict(r) for r in db.execute("""
+            SELECT token_currency,token_issuer,raw_currency,observed_at,
+                   detail,price_xrp
+            FROM paper_opportunity_events
+            WHERE event_type='external_gainer_seen' AND observed_at=?
+        """,(latest,))]
+        ranked=[]
+        seen=set()
+        for g in batch:
+            key=(g["raw_currency"],g["token_issuer"])
+            if key in seen:continue
+            seen.add(key)
+            m=PCT.search(g["detail"] or "")
+            if not m:continue
+            try:gain=float(m.group(1))
+            except ValueError:continue
+            if not (-1e9<gain<1e9):continue
+            g["change24h"]=gain
+            ranked.append(g)
+        ranked.sort(key=lambda g:(-g["change24h"],g["raw_currency"],g["token_issuer"]))
+        gainers=ranked[:limit]
+        print("Latest provider snapshot:",stamp(latest))
+        print("Exact-issue observations in latest snapshot:",len(batch))
+        print("Rankable distinct issues:",len(ranked))
+        print("Displayed top by observed 24h % gain:",len(gainers))
+        print("This ranking is retrospective and does not establish tradable missed entries.")
         results=Counter()
         for g in gainers:
             code=g["raw_currency"]
@@ -62,16 +87,17 @@ def report(path,limit=30):
             status='TRADED_BEFORE_RANK' if traded else (
                 'SIGNAL_BEFORE_RANK_NO_ENTRY' if kinds else 'NO_PRIOR_SIGNAL_RECORDED')
             results[status]+=1
-            m=PCT.search(g["detail"] or "")
-            change=float(m.group(1)) if m else None
+            change=g["change24h"]
             print(f"{stamp(ts)}  {g['token_currency'][:18]:18} "
-                  f"24h={change if change is not None else 'n/a'}% "
+                  f"24h={change:+.2f}% "
                   f"{status}  signals={','.join(kinds) or '-'} "
                   f"issue={code}:{issuer}")
         print("\nStatus counts:",dict(results))
-        print("Limitations: no historical 24h gainer list is backfilled; no signal "
-              "does not prove missed tradable momentum; future prices require "
-              "issuer-exact timestamped AMM reserve quotes.")
+        print("Limitations: only the latest snapshot is compared. A rising"
+              " 24-hour price observed NOW is not an earlier entry opportunity;"
+              " a missing signal is not a failed scan without activity, liquidity"
+              " and signal-decision records at the relevant earlier time."
+              " Sellable returns require issuer-exact contemporaneous AMM quotes.")
     finally:db.close()
 def main():
     p=argparse.ArgumentParser(description=__doc__)
