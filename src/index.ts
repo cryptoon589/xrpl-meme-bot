@@ -54,6 +54,7 @@ import { diagnostics } from './diagnostics/diagnostics';
 import fs from 'fs';
 import { MemeCategoryFeed, setActiveMemeCategoryFeed } from './market/memeCategoryFeed';
 import { canonicalIssue, dynamicMemeUniverse } from './risk/dynamicMemeUniverse';
+import { decodeIssuedCurrencyName } from './xrpl/currencyCode';
 import { selectDynamicScanTokens } from './scanner/dynamicMemeScheduler';
 
 // Global state
@@ -195,14 +196,8 @@ async function main() {
   const BURST_TRADE_BLOCKLIST = manualBlacklist.asDecisionSet();
   info(`[Blacklist] Loaded ${manualBlacklist.list().length} operator entries. No automatic token additions.`);
 
-  const decodeCurrency = (raw: string): string => {
-    if (raw.length !== 40) return raw;
-    try {
-      const stripped = raw.replace(/00+$/, '');
-      const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '');
-      return /^[\x20-\x7E]+$/.test(decoded) && decoded.length > 0 ? decoded : raw;
-    } catch { return raw; }
-  };
+  const decodeCurrency = (raw: string): string =>
+    decodeIssuedCurrencyName(raw) ?? raw;
   const isBlocklistedToken = (currency: string, issuer: string, raw?: string): boolean =>
     manualBlacklist.isBlocked(currency, issuer, raw);
 
@@ -1575,15 +1570,8 @@ function startPeriodicScan(
       if (xrp >= 0.0001) return xrp.toFixed(6) + ' XRP';
       return xrp.toFixed(8) + ' XRP';
     };
-    const decodeCurrencyLocal = (raw: string): string => {
-      if (!raw || raw.length !== 40) return raw || 'UNKNOWN';
-      try {
-        const stripped = raw.replace(/00+$/, '');
-        const decoded = Buffer.from(stripped, 'hex').toString('ascii').replace(/\x00/g, '').trim();
-        if (/^[ -~]+$/.test(decoded) && decoded.length > 0) return decoded;
-      } catch {}
-      return raw.slice(0, 8) + '…';
-    };
+    const decodeCurrencyLocal = (raw: string): string =>
+      decodeIssuedCurrencyName(raw) ?? raw ?? 'UNKNOWN';
 
     if (!paperTrader) return;
 
