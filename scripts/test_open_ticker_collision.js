@@ -14,8 +14,11 @@ const copy={currency:'PHNIX',rawCurrency:phnix,issuer:collision};
 assert.equal(findOpenTickerCollision(copy,[held]),held,
   'different issuer with identical ledger-issued currency must be classified as active ticker collision');
 assert.equal(findOpenTickerCollision(
-  {currency:'PHNIX',issuer:official,rawCurrency:phnix},[held]),null,
-  'identical issuer is governed by exact-issue duplicate guard, not ticker collision');
+  {currency:'PHNIX',issuer:official,rawCurrency:phnix},[held]),held,
+  'identical issued asset must block duplicate position, including alternate encodings');
+assert.equal(findOpenTickerCollision(
+  {currency:phnix,issuer:official,rawCurrency:phnix},[held]),held,
+  'raw-hex versus human PHNIX alias cannot create a second open position');
 assert.equal(findOpenTickerCollision(
   {currency:'SWARM',issuer:collision,rawCurrency:other},[held]),null,
   'independent ticker not blocked');
@@ -49,6 +52,10 @@ try{
     'burst entry must reject the concurrent same-ticker different-issuer exposure');
   assert.equal(trader.tryOpenTrade(copy,null,70,'offline fixture'),null,
     'scored/stream entry must reject the same concurrent same-ticker exposure');
+  assert.equal(trader.tryOpenBurstTrade({currency:phnix,issuer:official,rawCurrency:phnix},null,'offline fixture'),null,
+    'burst must reject same issuer even if only hex/display representation differs');
+  assert.equal(trader.tryOpenTrade({currency:phnix,issuer:official,rawCurrency:phnix},null,70,'offline fixture'),null,
+    'scored must reject same issuer even if only hex/display representation differs');
   // Exits and existing trade rows are never mutated by either check.
   assert.equal(trader.openPositions.size,1);
   assert.equal(held.remainingPosition,100);
