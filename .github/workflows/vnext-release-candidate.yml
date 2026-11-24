@@ -56,6 +56,8 @@ jobs:
           node scripts/test_open_ticker_collision.js
           python3 scripts/test_paper_issuer_trades.py
           python3 scripts/test_external_gainer_timeline.py
+          python3 scripts/test_top_gainer_coverage.py
+          python3 -m py_compile scripts/audit_top_gainer_coverage.py
           python3 -m py_compile scripts/audit_external_gainer_timeline.py
           python3 -m py_compile scripts/audit_paper_issuer_trades.py
       - name: Verify source-backed project issuer for protected names (offline)
