@@ -17,6 +17,7 @@ import {
 } from '../types';
 import { info, warn, debug } from '../utils/logger';
 import { PaperPositionRuntimeState, validPaperPositionRuntime } from '../paper/paperPositionRuntime';
+import { normalizeIssuedCurrency } from '../xrpl/currencyCode';
 
 export class Database {
   private db: BetterSQLite3.Database;
@@ -840,16 +841,25 @@ export class Database {
    * DB-level check: is there already an open/partial trade for this token?
    * Used as a hard guard against duplicate entries even across restarts.
    */
-  hasOpenTradeForToken(currency: string, issuer: string): boolean {
+  hasOpenTradeForToken(currency: string, issuer: string, rawCurrency?: string): boolean {
+    // One XRPL issued asset is defined by exact raw currency + issuer, NOT
+    // by displayed name. This DB-backed guard works across bot restarts.
+    // In particular PHNIX and its 40-hex representation must share a slot.
+    const candidate=normalizeIssuedCurrency(rawCurrency || currency);
+    if(!candidate || !issuer)return true; // fail closed on malformed identity
     try {
-      const row = this.db.prepare(`
-        SELECT COUNT(*) as cnt FROM paper_trades
-        WHERE token_currency = ? AND token_issuer = ? AND status IN ('open', 'partial')
-      `).get(currency, issuer) as any;
-      return row.cnt > 0;
+      const rows = this.db.prepare(`
+        SELECT token_currency, raw_currency FROM paper_trades
+        WHERE token_issuer = ? AND status IN ('open', 'partial')
+      `).all(issuer) as Array<{token_currency:string;raw_currency:string|null}>;
+      return rows.some(row=>{
+        const stored=normalizeIssuedCurrency(row.raw_currency||row.token_currency);
+        // A malformed stored open row is not safe to ignore.
+        return !stored || stored===candidate;
+      });
     } catch (err) {
-      warn(`Error checking open trade: ${err}`);
-      return false;
+      warn('Open-trade identity verification unavailable: '+String(err));
+      return true; // fail closed rather than open duplicate during DB trouble
     }
   }
 
